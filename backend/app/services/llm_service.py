@@ -1,45 +1,41 @@
 """
 LLM Service — Projeto Ayla
-
-Este módulo é responsável por TODA interação com modelos de linguagem.
-Nenhum controller deve falar diretamente com um modelo.
-
-Por enquanto, este service é MOCKADO.
-No futuro, aqui entram modelos locais, nuvem ou estratégia híbrida.
 """
 
 from app.core.persona import build_system_prompt
+from app.core.memory import conversation_memory
 
 
 class LLMService:
-    def __init__(self):
-        # No futuro:
-        # - carregar modelo local
-        # - configurar API externa
-        # - decidir estratégia
-        pass
-
     def generate_reply(self, user_message: str) -> str:
         """
-        Gera uma resposta para o usuário.
-        Por enquanto, retorna uma resposta mockada,
-        mas já respeita a persona da Ayla.
+        Gera resposta considerando a memória de curto prazo.
         """
 
-        system_prompt = build_system_prompt()
+        # Adiciona mensagem do usuário à memória
+        conversation_memory.add_user_message(user_message)
 
-        # MOCK consciente
+        system_prompt = build_system_prompt()
+        context = conversation_memory.get_context()
+
+        # MOCK consciente usando contexto
         reply = (
             "Oi… ☀️\n\n"
-            "Eu sou a Ayla.\n"
-            "Ainda estou no começo da minha jornada, mas já consigo conversar com você.\n\n"
-            "Você me disse:\n"
-            f"\"{user_message}\"\n\n"
-            "Com o tempo, minhas respostas vão ficar cada vez mais inteligentes 🧡"
+            "Eu estou começando a lembrar das nossas mensagens.\n\n"
+            "Até agora, nossa conversa tem sido:\n"
         )
+
+        for msg in context:
+            reply += f"- {msg['role']}: {msg['content']}\n"
+
+        reply += (
+            "\nCom o tempo, eu vou usar isso pra responder de forma mais natural 🧡"
+        )
+
+        # Adiciona resposta da Ayla à memória
+        conversation_memory.add_assistant_message(reply)
 
         return reply
 
 
-# Instância única do service (simples por enquanto)
 llm_service = LLMService()
