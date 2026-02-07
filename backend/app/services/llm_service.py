@@ -5,6 +5,7 @@ LLM Service — Projeto Ayla
 from app.core.persona import build_system_prompt
 from app.core.memory import conversation_memory
 from app.core.persistent_memory import persistent_memory
+from app.core.summarizer import compress_memory
 
 
 class LLMService:

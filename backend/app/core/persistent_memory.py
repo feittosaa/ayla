@@ -74,3 +74,28 @@ class PersistentConversationMemory:
 
 # Instância única da memória persistente
 persistent_memory = PersistentConversationMemory()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memory_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+def add_summary(self, summary: str):
+    cursor = self.conn.cursor()
+    cursor.execute(
+        "INSERT INTO memory_summary (summary) VALUES (?)",
+        (summary,)
+    )
+    self.conn.commit()
+
+
+def get_all_summaries(self):
+    cursor = self.conn.cursor()
+    cursor.execute(
+        "SELECT summary FROM memory_summary ORDER BY created_at ASC"
+    )
+    rows = cursor.fetchall()
+    return [row[0] for row in rows]
