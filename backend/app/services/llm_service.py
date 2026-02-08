@@ -19,10 +19,10 @@ class LLMService:
         conversation_memory.add_user_message(user_message)
         persistent_memory.add_message("user", user_message)
 
-        # 2️⃣ Recupera contexto (mas NÃO ecoa ele)
-        context = persistent_memory.get_last_messages(limit=8)  # Pega últimas 8 mensagens
+        # 2️⃣ Recupera contexto (uso futuro no prompt)
+        context = persistent_memory.get_last_messages(limit=8)
 
-        # (por enquanto só pra debug mental, depois entra no prompt real)
+        # System prompt (uso futuro)
         system_prompt = build_system_prompt()
 
         # 3️⃣ Resposta limpa da Ayla
@@ -33,9 +33,12 @@ class LLMService:
             "Aos poucos, vou usar nossas conversas passadas de forma mais natural."
         )
 
-        # 4️⃣ Salva resposta (SEM histórico embutido)
+        # 4️⃣ Salva resposta
         conversation_memory.add_assistant_message(reply)
         persistent_memory.add_message("assistant", reply)
+
+        # 5️⃣ Compressão de memória (resumo automático)
+        compress_memory()
 
         return reply
 
