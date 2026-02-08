@@ -1,25 +1,29 @@
+"""
+Chat Controller — Projeto Ayla
+
+Endpoint de chat com streaming via Server-Sent Events (SSE).
+"""
+
 from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 
 from app.services.llm_service import llm_service
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter()
 
 
-class ChatRequest(BaseModel):
-    message: str
+@router.post("/chat")
+def chat(payload: dict):
+    user_message = payload.get("message")
 
+    if not user_message:
+        return {"error": "Mensagem não fornecida"}
 
-class ChatResponse(BaseModel):
-    reply: str
+    def event_generator():
+        for chunk in llm_service.generate_stream(user_message):
+            yield f"data: {chunk}\n\n"
 
-
-@router.post("", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest):
-    """
-    Endpoint principal de conversa com a Ayla.
-    O controller apenas delega a geração da resposta.
-    """
-
-    reply = llm_service.generate_reply(request.message)
-    return ChatResponse(reply=reply)
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
