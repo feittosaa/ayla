@@ -13,10 +13,13 @@
     "windows": [
       {
         "title": "Ayla",
-        "width": 800,
-        "height": 600,
+        "width": 420,
+        "height": 640,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false
       }
     ],
     "security": {

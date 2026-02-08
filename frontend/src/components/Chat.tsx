@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import "./Chat.css";
 
 type Message = {
   role: "user" | "assistant";

@@ -1,0 +1,18 @@
+:root {
+  /* 🌞 Cores principais */
+  --ayla-bg: #0f1117;
+  --ayla-panel: #171923;
+  --ayla-accent: #ff9f43; /* laranja solar */
+  --ayla-accent-soft: #ffb870;
+
+  /* 🌸 Texto */
+  --ayla-text: #e6e6eb;
+  --ayla-text-soft: #a8a8b3;
+
+  /* 🌑 Bordas */
+  --ayla-border: #2a2d3a;
+
+  /* ✨ Fontes */
+  --ayla-font-main: 'Inter', system-ui, sans-serif;
+  --ayla-font-mono: 'JetBrains Mono', monospace;
+}
