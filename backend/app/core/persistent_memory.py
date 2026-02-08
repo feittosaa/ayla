@@ -2,100 +2,81 @@
 Persistent Memory — Projeto Ayla
 
 Memória persistente usando SQLite.
-Armazena histórico básico de conversa.
+Armazena mensagens e resumos semânticos.
 """
 
 import sqlite3
-from typing import List, Dict
 from pathlib import Path
+from typing import List, Dict
 
 
 DB_PATH = Path("ayla_memory.db")
 
 
-class PersistentConversationMemory:
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+class PersistentMemory:
+    def __init__(self):
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self._init_db()
 
-    def _get_connection(self):
-        return sqlite3.connect(self.db_path)
-
     def _init_db(self):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            conn.commit()
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS memory_summary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            summary TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        self.conn.commit()
+
+    # ---------- MENSAGENS ----------
 
     def add_message(self, role: str, content: str):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO messages (role, content) VALUES (?, ?)",
-                (role, content),
-            )
-            conn.commit()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO messages (role, content) VALUES (?, ?)",
+            (role, content)
+        )
+        self.conn.commit()
 
     def get_last_messages(self, limit: int = 10) -> List[Dict[str, str]]:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT role, content
-                FROM messages
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-            rows = cursor.fetchall()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT role, content FROM messages ORDER BY id DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cursor.fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
-        # Retorna na ordem correta (mais antigo → mais novo)
-        return [
-            {"role": role, "content": content}
-            for role, content in reversed(rows)
-        ]
+    # ---------- RESUMOS ----------
 
-    def clear(self):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM messages")
-            conn.commit()
+    def add_summary(self, summary: str):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO memory_summary (summary) VALUES (?)",
+            (summary,)
+        )
+        self.conn.commit()
 
-
-# Instância única da memória persistente
-persistent_memory = PersistentConversationMemory()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memory_summary (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    summary TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
-def add_summary(self, summary: str):
-    cursor = self.conn.cursor()
-    cursor.execute(
-        "INSERT INTO memory_summary (summary) VALUES (?)",
-        (summary,)
-    )
-    self.conn.commit()
+    def get_all_summaries(self) -> List[str]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT summary FROM memory_summary ORDER BY created_at ASC"
+        )
+        rows = cursor.fetchall()
+        return [row[0] for row in rows]
 
 
-def get_all_summaries(self):
-    cursor = self.conn.cursor()
-    cursor.execute(
-        "SELECT summary FROM memory_summary ORDER BY created_at ASC"
-    )
-    rows = cursor.fetchall()
-    return [row[0] for row in rows]
+# Singleton
+persistent_memory = PersistentMemory()
