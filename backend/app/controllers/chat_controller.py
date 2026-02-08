@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.core.persona import build_system_prompt
+from app.services.llm_service import llm_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -18,19 +18,8 @@ class ChatResponse(BaseModel):
 def chat_endpoint(request: ChatRequest):
     """
     Endpoint principal de conversa com a Ayla.
-    Por enquanto, a resposta é mockada,
-    mas já respeita a persona.
+    O controller apenas delega a geração da resposta.
     """
 
-    system_prompt = build_system_prompt()
-
-    reply = (
-        f"Oi… ☀️\n\n"
-        f"Eu sou a Ayla.\n"
-        f"Ainda estou aprendendo a falar direitinho, mas já consigo te ouvir.\n\n"
-        f"Você disse:\n"
-        f"\"{request.message}\"\n\n"
-        f"(Essa é uma resposta inicial, sem IA real ainda 🧡)"
-    )
-
+    reply = llm_service.generate_reply(request.message)
     return ChatResponse(reply=reply)
