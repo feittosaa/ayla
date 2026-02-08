@@ -1,18 +1,65 @@
-:root {
-  --bg: #0f0f14;
-  --panel: #171722;
-  --text: #e6e6eb;
-  --accent: #9b5cff; /* violeta Ayla */
-  --accent-soft: #6d3fd9;
-}
-
 * {
   box-sizing: border-box;
+  font-family: system-ui, sans-serif;
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: Inter, system-ui, sans-serif;
+  background: #0f0f14;
+  color: #eaeaf0;
+}
+
+.chat-container {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.messages {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.message {
+  max-width: 75%;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  line-height: 1.4;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: #5b4b8a;
+}
+
+.message.assistant {
+  align-self: flex-start;
+  background: #1c1c28;
+}
+
+.input-bar {
+  display: flex;
+  padding: 12px;
+  gap: 8px;
+  border-top: 1px solid #222;
+}
+
+.input-bar input {
+  flex: 1;
+  background: #161620;
+  border: none;
+  color: #fff;
+  padding: 10px;
+  border-radius: 6px;
+}
+
+.input-bar button {
+  background: #6d5bd0;
+  border: none;
+  color: white;
+  padding: 10px 16px;
+  border-radius: 6px;
+  cursor: pointer;
 }

@@ -2,6 +2,7 @@
 Chat Controller — Projeto Ayla
 
 Endpoint de chat com streaming via Server-Sent Events (SSE).
+Envia texto ACUMULADO (não tokens crus).
 """
 
 from fastapi import APIRouter
@@ -20,8 +21,11 @@ def chat(payload: dict):
         return {"error": "Mensagem não fornecida"}
 
     def event_generator():
-        for chunk in llm_service.generate_stream(user_message):
-            yield f"data: {chunk}\n\n"
+        full_text = ""
+
+        for token in llm_service.generate_stream(user_message):
+            full_text += token
+            yield f"data: {full_text}\n\n"
 
     return StreamingResponse(
         event_generator(),
