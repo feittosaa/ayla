@@ -1,0 +1,18 @@
+:root {
+  --bg: #0f0f14;
+  --panel: #171722;
+  --text: #e6e6eb;
+  --accent: #9b5cff; /* violeta Ayla */
+  --accent-soft: #6d3fd9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, sans-serif;
+}
