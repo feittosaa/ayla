@@ -12,7 +12,6 @@ from app.services.llm_service import llm_service
 
 router = APIRouter()
 
-
 @router.post("/chat")
 def chat(payload: dict):
     user_message = payload.get("message")
@@ -21,11 +20,8 @@ def chat(payload: dict):
         return {"error": "Mensagem não fornecida"}
 
     def event_generator():
-        full_text = ""
-
-        for token in llm_service.generate_stream(user_message):
-            full_text += token
-            yield f"data: {full_text}\n\n"
+        for chunk in llm_service.generate_stream(user_message):
+            yield f"data: {chunk}\n\n"
 
     return StreamingResponse(
         event_generator(),
