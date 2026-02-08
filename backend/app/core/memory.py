@@ -1,41 +1,43 @@
 """
-Memory Module — Projeto Ayla
+Conversation Memory — Projeto Ayla
 
-Gerencia a memória de curto prazo da Ayla (session).
-Nada aqui é permanente ainda.
+Memória de curto prazo (RAM).
+Mantém apenas as últimas interações.
 """
 
-from collections import deque
-from typing import Deque, Dict, List
+from typing import List, Dict
 
 
 class ConversationMemory:
     def __init__(self, max_messages: int = 10):
-        # Guarda as últimas mensagens da conversa
         self.max_messages = max_messages
-        self.messages: Deque[Dict[str, str]] = deque(maxlen=max_messages)
+        self._messages: List[Dict[str, str]] = []
 
-    def add_user_message(self, message: str):
-        self.messages.append({
-            "role": "user",
-            "content": message
+    def add_user_message(self, content: str):
+        self._add_message("user", content)
+
+    def add_assistant_message(self, content: str):
+        self._add_message("assistant", content)
+
+    def _add_message(self, role: str, content: str):
+        self._messages.append({
+            "role": role,
+            "content": content
         })
 
-    def add_assistant_message(self, message: str):
-        self.messages.append({
-            "role": "assistant",
-            "content": message
-        })
+        # Mantém apenas as últimas mensagens
+        if len(self._messages) > self.max_messages:
+            self._messages = self._messages[-self.max_messages:]
 
-    def get_context(self) -> List[Dict[str, str]]:
+    def get_messages(self) -> List[Dict[str, str]]:
         """
-        Retorna o histórico atual da conversa.
+        Retorna o histórico curto da conversa.
         """
-        return list(self.messages)
+        return self._messages.copy()
 
     def clear(self):
-        self.messages.clear()
+        self._messages.clear()
 
 
-# Memória única (session global por enquanto)
+# Instância única
 conversation_memory = ConversationMemory()
