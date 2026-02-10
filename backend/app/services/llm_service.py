@@ -5,7 +5,7 @@ Orquestra persona, memória, prompt e modelo de linguagem.
 """
 
 from app.services.ollama_client import OllamaClient
-from app.core.memory import conversation_memory
+from app.core.conversation_memory import conversation_memory
 from app.core.persistent_memory import persistent_memory
 from app.core.prompt_builder import build_prompt
 from app.core.memory_manager import maybe_compress_memory
