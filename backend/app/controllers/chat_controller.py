@@ -5,14 +5,15 @@ Endpoint de chat com streaming via Server-Sent Events (SSE).
 Envia texto ACUMULADO (não tokens crus).
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from app.core.security import verify_token
 
 from app.services.llm_service import llm_service
 
 router = APIRouter()
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(verify_token)])
 def chat(payload: dict):
     user_message = payload.get("message")
 
