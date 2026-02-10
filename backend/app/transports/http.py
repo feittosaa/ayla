@@ -1,5 +1,5 @@
 from fastapi import Header, HTTPException
-from app.core.chat_engine import handle_chat
+from app.core.chat_engine import chat_stream
 import os
 
 APP_TOKEN = os.getenv("AYLA_TOKEN")
@@ -11,4 +11,7 @@ def verify_token(x_ayla_token: str = Header(None)):
 
 
 def chat_http(user_message: str):
-    return handle_chat(user_message)
+    """
+    Transport HTTP (agnóstico de framework).
+    """
+    return chat_stream(user_message)

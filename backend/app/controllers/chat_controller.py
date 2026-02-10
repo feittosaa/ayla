@@ -1,9 +1,3 @@
-"""
-Chat Controller — Projeto Ayla
-
-Endpoint de chat com streaming via Server-Sent Events (SSE).
-"""
-
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from app.transports.http import chat_http, verify_token
