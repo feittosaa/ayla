@@ -62,25 +62,16 @@ export default function Chat() {
         for (const line of lines) {
           if (!line.startsWith("data:")) continue;
 
-          const text = line.replace("data:", "").trim();
+          const text = line.replace(/^data:\s?/, "");
           if (!text) continue;
 
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
 
-            let nextContent = "";
-
-            // 🧠 DETECÇÃO DE TEXTO CUMULATIVO
-            if (text.startsWith(last.content)) {
-              nextContent = text;
-            } else {
-              nextContent = last.content + text;
-            }
-
             updated[updated.length - 1] = {
               role: "assistant",
-              content: nextContent,
+              content: last.content + text,
             };
 
             return updated;
