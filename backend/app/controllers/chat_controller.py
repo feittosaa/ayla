@@ -1,25 +1,22 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+from app.transports.http import chat_http, verify_token
 
-from app.services.llm_service import llm_service
-
-router = APIRouter(prefix="/chat", tags=["chat"])
-
-
-class ChatRequest(BaseModel):
-    message: str
+router = APIRouter()
 
 
-class ChatResponse(BaseModel):
-    reply: str
+@router.post("/chat")
+def chat(payload: dict, _=Depends(verify_token)):
+    user_message = payload.get("message")
 
+    if not user_message:
+        return {"error": "Mensagem não fornecida"}
 
-@router.post("", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest):
-    """
-    Endpoint principal de conversa com a Ayla.
-    O controller apenas delega a geração da resposta.
-    """
+    def event_generator():
+        for chunk in chat_http(user_message):
+            yield f"data: {chunk}\n\n"
 
-    reply = llm_service.generate_reply(request.message)
-    return ChatResponse(reply=reply)
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
