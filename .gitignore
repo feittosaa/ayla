@@ -1,0 +1,22 @@
+# Node / Frontend
+node_modules/
+dist/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/bin/
+src-tauri/.tauri/
+
+# Backend / Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# PyInstaller executáveis
+*.exe
+
+# Env
+.env
+.env.*
