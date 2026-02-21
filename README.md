@@ -1,142 +1,139 @@
-# 🌤️ Projeto Ayla
+# Projeto Ayla — Documentação Base
 
-> Uma IA pessoal, local-first, construída com cuidado, identidade e memória.
+## 1. Visão Geral
 
----
+A **Ayla** é uma IA pessoal, offline-first, modular e evolutiva, projetada para atuar como uma extensão cognitiva do usuário. Diferente de assistentes tradicionais, a Ayla não é apenas reativa: ela observa, organiza, conecta e devolve significado ao longo do tempo.
 
-## ✨ O que é o Projeto Ayla?
+Princípios centrais:
 
-O **Projeto Ayla** é uma iniciativa pessoal para criar uma **IA assistente própria**, executável no computador, com foco em:
-
-* 🧠 **Consciência de contexto** (memória)
-* 🔐 **Privacidade** (local-first)
-* 🏗️ **Arquitetura sólida** (MVC)
-* 🌱 **Evolução incremental** (sem pressa, sem atalhos)
-
-A Ayla não é apenas um chatbot. Ela é pensada como um **sistema vivo**, que cresce junto com seu criador, acumulando conhecimento, preferências e decisões ao longo do tempo.
+* Controle total do usuário
+* Modularidade real (órgãos)
+* Evolução incremental
+* Memória contínua
+* Integração profunda com a vida digital
 
 ---
 
-## 🎯 Objetivo inicial (MVP)
+## 2. Conceito de Órgãos
 
-A primeira versão da Ayla deve ser capaz de:
-
-* Abrir como um **aplicativo desktop**
-* Receber perguntas em texto
-* Responder de forma coerente e contextual
-* Manter memória de curto prazo
-* Ter uma **identidade clara e consistente**
-
-Nada além disso é obrigatório no começo.
-
-> **Princípio fundamental:**
-> Antes de ser poderosa, a Ayla precisa ser **bem estruturada**.
+Os **órgãos** são módulos especializados que coletam, estruturam ou executam ações. Alguns são **simbióticos** (existem apenas para a Ayla), enquanto outros possuem potencial para se tornarem **produtos independentes**.
 
 ---
 
-## 🧭 Princípios do Projeto
+## 3. Órgãos Simbióticos (dependem da Ayla)
 
-1. **Local-first**
-   Sempre que possível, dados e processamento permanecem na máquina do usuário.
+### 3.1 Pulse
 
-2. **Privacidade como regra**
-   Nenhuma informação pessoal sai do sistema sem decisão explícita.
+* Integração exclusiva com plataformas de música (atualmente Spotify)
+* Coleta de dados musicais e padrões de escuta
+* Não relacionado a saúde, humor direto ou biometria
 
-3. **Arquitetura antes de features**
-   Código organizado é prioridade sobre funcionalidades chamativas.
+### 3.2 Arcade
 
-4. **Evolução consciente**
-   Cada nova capacidade deve ter um propósito claro.
+* Rastreamento de jogos e atividades de entretenimento interativo
+* Histórico, padrões e retrospectivas
 
-5. **Identidade > Treinamento**
-   A personalidade da Ayla é definida por regras, memória e contexto — não por re-treinamento pesado de modelos.
+### 3.3 Hand
 
----
+* Execução de comandos no computador
+* Automação local
+* Interface entre Ayla e sistema operacional
 
-## 🏛️ Arquitetura Geral
+### 3.4 Hermes
 
-O projeto segue uma separação clara entre **mente** e **corpo**:
+* Coleta de dados externos
+* E-mails, eventos, notificações
+* Atua como mensageiro da Ayla
 
-* **Backend (Python)** → lógica, IA, memória, regras
-* **Frontend (JavaScript)** → interface, interação, visual
+### 3.5 Iris
 
-A comunicação entre eles acontece via **API local**.
+Funções duplas:
 
-Estrutura base:
-
-```
-project-ayla/
-├── backend/    # Cérebro (Python)
-├── frontend/   # Corpo (JavaScript)
-├── docs/       # Visão, decisões e registros
-└── README.md
-```
+1. Análise de imagens, PDFs e arquivos referenciados pela Athena
+2. Análise e organização de galerias em nuvem (pessoas, lugares, contexto)
 
 ---
 
-## 🧠 IA e Modelos de Linguagem
+## 4. Órgãos com Potencial de Produto Próprio
 
-O Projeto Ayla **não depende de um único modelo**.
+### 4.1 Moneta
 
-A arquitetura permite:
+* Coleta, limpeza e estruturação de dados financeiros
+* Análise ocorre na Ayla
+* Produto latente, destacável
 
-* Uso de **modelos locais** (ex: LLaMA, Mistral)
-* Uso de **modelos em nuvem**, quando desejado
-* Estratégia **híbrida**, onde a Ayla decide qual usar
+### 4.2 Athena
 
-> O modelo é uma ferramenta.
-> A Ayla é o sistema que decide como usá-lo.
+* Gerenciadora intelectual central
+* Integração total com Obsidian (.md)
+* RPG, journaling, projetos pessoais e conhecimento
+* Núcleo cognitivo da Ayla
 
----
+### 4.3 Odin
 
-## 🎭 Identidade da Ayla
-
-A personalidade da Ayla é definida de forma **explícita e versionada**.
-
-Ela inclui:
-
-* Forma de falar
-* Tom emocional
-* Limites éticos
-* Estilo de interação
-
-Essa identidade vive no código e evolui junto com o projeto.
+* Busca profunda na internet
+* Produto externo, desacoplado
+* Integração posterior com a Ayla
 
 ---
 
-## 🧱 Estado Atual do Projeto
+## 5. Core Ayla (não são órgãos)
 
-📍 **Fase:** Fundação
+Capacidades fundamentais:
 
-* [x] Definição de visão
-* [x] Criação do repositório
-* [ ] Estrutura base do backend
-* [ ] API local funcional
-* [ ] Interface inicial
-
----
-
-## 🛣️ Roadmap (alto nível)
-
-1. Fundação (estrutura + visão)
-2. Backend funcional (API + respostas mockadas)
-3. Interface desktop
-4. Integração com modelo de linguagem
-5. Memória persistente
-6. Estratégia híbrida (local + nuvem)
-7. Voz, plugins e automações
+* Resposta por voz (TTS)
+* Escuta e entendimento de voz (STT / NLU)
+* Capacidade analítica
+* Explicação clara de raciocínios
+* Postura ética e consciente
 
 ---
 
-## 🧡 Nota do Criador
+## 6. Biblioteca Unificada (Conceito)
 
-Este projeto não é sobre criar a IA mais poderosa.
+A **Biblioteca** não é um órgão, mas um estado emergente da Ayla.
 
-É sobre criar **a IA certa**.
+Consolida:
 
-Uma que respeita limites, cresce com o tempo e reflete quem a constrói.
+* Músicas (Pulse)
+* Jogos (Arcade)
+* Filmes e séries (futuro)
+* Livros e mangás (Athena)
+
+Serve para:
+
+* Histórico cultural
+* Retrospectivas
+* Identidade pessoal ao longo do tempo
 
 ---
 
-> "Algumas coisas não nascem prontas.
-> Elas nascem bem cuidadas."
+## 7. Retrospectivas
+
+A Ayla deve ser capaz de gerar resumos periódicos (anuais, mensais, fases da vida), inspirados em modelos como retrospectivas culturais.
+
+---
+
+## 8. Planejamento Futuro
+
+### 8.1 Órgão Audiovisual
+
+* Coleta de dados de streaming e plataformas audiovisuais
+* Histórico e padrões de consumo
+* Integração com a Biblioteca
+
+### 8.2 Órgão GitHub
+
+* Rastreamento e consulta de códigos
+* Commits, linguagens, projetos
+* Retrospectivas técnicas
+
+---
+
+## 9. Filosofia de Evolução
+
+A Ayla cresce conforme a necessidade.
+Nada é criado sem propósito.
+Nada é separado sem necessidade real.
+
+A arquitetura respeita o tempo, o contexto e o usuário.
