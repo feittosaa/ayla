@@ -19,8 +19,6 @@ class CloudReadOnlyClient:
         self.base_url = base_url
         self.timeout = timeout
 
-        print("[DEBUG] OPENAI_API_KEY loaded:", bool(self.api_key))
-
     def stream_read_only(self, prompt: str) -> Generator[str, None, None]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",

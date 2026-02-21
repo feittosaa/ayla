@@ -9,9 +9,6 @@ class InferenceRouter:
 
     def stream(self, local_prompt: str, cloud_prompt: str, private: bool):
 
-        print("\n[DEBUG] InferenceRouter.stream")
-        print("private =", private)
-
         # 🔒 Privado = LOCAL SEM DISCUSSÃO
         if private:
             yield from self._local_only(local_prompt)
@@ -20,18 +17,14 @@ class InferenceRouter:
         # ⚡ NÃO privado → CLOUD FIRST
         if self.cloud:
             try:
-                print("[DEBUG] ROUTE = CLOUD")
                 yield from self.cloud.stream_read_only(cloud_prompt)
                 return
             except Exception as e:
-                print("[DEBUG] CLOUD FAILED:", repr(e))
+                pass
 
         # fallback local
         if self.breaker.allow():
             try:
-
-                print("[DEBUG] ROUTE = LOCAL")
-
                 yield from self.local.stream_local(local_prompt)
                 return
             except Exception:

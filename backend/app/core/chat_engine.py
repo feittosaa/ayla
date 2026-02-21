@@ -35,11 +35,6 @@ def chat_stream(user_message: str):
     # 4️⃣ stream do modelo
     private = HeuristicClassifier.is_private(user_message)
 
-    print("\n[DEBUG] Heuristic decision")
-    print("User message:", user_message)
-    print("private =", private)
-    print("-" * 40)
-
     for chunk in llm_service.stream(
         local_prompt=local_prompt,
         cloud_prompt=cloud_prompt,
