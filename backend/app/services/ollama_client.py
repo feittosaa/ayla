@@ -1,5 +1,5 @@
 """
-Ollama Client — Projeto Ayla
+Ollama Client
 
 Cliente responsável por se comunicar com o Ollama
 usando streaming puro (token por token).
@@ -10,23 +10,35 @@ import requests
 from typing import Generator
 
 
+import json
+import requests
+import concurrent.futures
+from typing import Generator
+
+
 class OllamaClient:
     def __init__(
         self,
         model: str = "mistral",
         base_url: str = "http://localhost:11434",
-        timeout: int = 180,
+        timeout: int = 120,
     ):
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def generate_stream(self, prompt: str) -> Generator[str, None, None]:
-        """
-        Gera resposta do LLM em streaming (chunk por chunk).
-        Retorna um generator de strings.
-        """
+        future = self.executor.submit(self._stream_request, prompt)
 
+        try:
+            for token in future.result(timeout=self.timeout):
+                yield token
+        except Exception:
+            future.cancel()
+            raise
+
+    def _stream_request(self, prompt: str):
         response = requests.post(
             f"{self.base_url}/api/generate",
             json={
@@ -46,10 +58,8 @@ class OllamaClient:
 
             data = json.loads(line.decode("utf-8"))
 
-            # Texto gerado pelo modelo
             if "response" in data:
                 yield data["response"]
 
-            # Fim da geração
             if data.get("done"):
                 break

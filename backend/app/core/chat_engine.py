@@ -29,7 +29,7 @@ def chat_stream(user_message: str):
     full_response = ""
 
     # 4️⃣ stream do modelo
-    for chunk in llm_service.stream(prompt):
+    for chunk in llm_service.stream(prompt, private=True):
         full_response += chunk
         yield chunk
 
