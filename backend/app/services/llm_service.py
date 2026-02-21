@@ -18,8 +18,12 @@ class LLMService:
             cloud_llm=self.cloud_client,
         )
 
-    def stream(self, prompt: str, private: bool = True):
-        yield from self.router.stream(prompt, private=private)
+    def stream(self, local_prompt: str, cloud_prompt: str, private: bool):
+        yield from self.router.stream(
+            local_prompt=local_prompt,
+            cloud_prompt=cloud_prompt,
+            private=private,
+        )
 
     def stream_local(self, prompt: str):
         yield from self.local_client.generate_stream(prompt)

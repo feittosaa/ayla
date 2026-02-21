@@ -1,12 +1,15 @@
 import os
+import json
 import requests
 from typing import Generator
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class CloudReadOnlyClient:
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key=os.getenv("OPENAI_API_KEY"),
         model: str = "gpt-4o-mini",
         base_url: str = "https://api.openai.com/v1/chat/completions",
         timeout: int = 30,
@@ -15,6 +18,8 @@ class CloudReadOnlyClient:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+
+        print("[DEBUG] OPENAI_API_KEY loaded:", bool(self.api_key))
 
     def stream_read_only(self, prompt: str) -> Generator[str, None, None]:
         headers = {

@@ -7,26 +7,37 @@ class InferenceRouter:
         self.cloud = cloud_llm
         self.breaker = CircuitBreaker()
 
-    def stream(self, prompt: str, private: bool = True):
-        # 🔒 Privado NUNCA usa cloud
+    def stream(self, local_prompt: str, cloud_prompt: str, private: bool):
+
+        print("\n[DEBUG] InferenceRouter.stream")
+        print("private =", private)
+
+        # 🔒 Privado = LOCAL SEM DISCUSSÃO
         if private:
-            yield from self._local_only(prompt)
+            yield from self._local_only(local_prompt)
             return
 
-        # tenta local primeiro
+        # ⚡ NÃO privado → CLOUD FIRST
+        if self.cloud:
+            try:
+                print("[DEBUG] ROUTE = CLOUD")
+                yield from self.cloud.stream_read_only(cloud_prompt)
+                return
+            except Exception as e:
+                print("[DEBUG] CLOUD FAILED:", repr(e))
+
+        # fallback local
         if self.breaker.allow():
             try:
-                yield from self.local.stream_local(prompt)
-                self.breaker.reset()
+
+                print("[DEBUG] ROUTE = LOCAL")
+
+                yield from self.local.stream_local(local_prompt)
                 return
             except Exception:
                 self.breaker.record_failure()
 
-        # ☁️ fallback cloud (read-only)
-        if self.cloud:
-            yield from self.cloud.stream_read_only(prompt)
-        else:
-            yield "\n[Serviço temporariamente indisponível]\n"
+        yield "\n[Serviço temporariamente indisponível]\n"
 
     def _local_only(self, prompt):
         try:
@@ -34,3 +45,17 @@ class InferenceRouter:
         except Exception:
             self.breaker.record_failure()
             yield "\n[Ayla está indisponível no momento 💭]\n"
+
+    def _sanitize_prompt(self, prompt: str) -> str:
+      # remove possíveis blocos de memória
+      forbidden = [
+          "MEMORY:",
+          "HISTÓRICO:",
+          "CONTEXTO:",
+          "RESUMOS:",
+      ]
+
+      for f in forbidden:
+          prompt = prompt.replace(f, "")
+
+      return prompt
