@@ -418,6 +418,21 @@ A IA pode ajudar a transformar os dados em narrativas e análises, mas os dados 
 - Atividade
 - Retrospectivas técnicas
 
+## Mercúrio — Comparação de preços
+
+O Mercúrio será responsável por encontrar e comparar ofertas de um mesmo produto em diferentes marketplaces, ajudando o usuário a identificar o melhor preço disponível.
+
+Possíveis responsabilidades:
+
+- Busca de produtos em lojas como Amazon, Shopee e Mercado Livre
+- Identificação e comparação de produtos equivalentes
+- Comparação de preços, frete e descontos
+- Histórico e acompanhamento de preços
+- Alertas para quedas de preço e ofertas desejadas
+- Recomendações baseadas no custo-benefício
+
+O objetivo é simplificar decisões de compra e ajudar o usuário a economizar, mantendo os dados de ofertas organizados na infraestrutura compartilhada da Ayla.
+
 ---
 
 # 11. Estado atual
