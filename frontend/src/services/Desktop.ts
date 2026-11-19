@@ -21,7 +21,9 @@ export type Snapshot = {
   runtimes: { id: string; label: string; bytes: number; installed: boolean }[];
   worker: { active_model: string | null }; metrics: Metric[]; recommended_profile: Profile;
   catalog: CatalogEntry[]; recommended_model: string | null;
+  setup: SetupState | null;
 };
+export type SetupState = { active: boolean; label?: string; received?: number; total?: number; error?: string; cancelled?: boolean };
 export type Privacy = 'sensitive' | 'uncertain' | 'public';
 export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number };
 export type MemoryList = { facts: Fact[]; enabled: boolean; ready: boolean };

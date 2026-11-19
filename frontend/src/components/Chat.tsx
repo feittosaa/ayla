@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
-import ModelSetup from './ModelSetup';
 import './Chat.css';
 
 type Props = { snapshot: Snapshot; refresh: () => Promise<void> };
@@ -21,7 +20,9 @@ export default function Chat({ snapshot, refresh }: Props) {
   const needsSetup = snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
   const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
   const memoryEntry = snapshot.catalog.find(entry => entry.capabilities.includes('embedding'));
-  const offerMemory = !needsSetup && snapshot.preferences.memory_auto && !snapshot.models.some(m => supports(m, 'embedding')) && memoryEntry;
+  const setup = snapshot.setup || { active: false };
+  const start = () => { setError(''); void native('setup_start').catch(e => setError(errorText(e))).finally(() => void refresh()); setTimeout(() => void refresh(), 300); };
+  const offerMemory = !needsSetup && !setup.active && snapshot.preferences.memory_auto && !snapshot.models.some(m => supports(m, 'embedding')) && memoryEntry;
   const conversationId = conversation?.id;
 
   useEffect(() => {
@@ -88,15 +89,17 @@ export default function Chat({ snapshot, refresh }: Props) {
     </div>
     <div className="messages" aria-live="polite">
       {!conversation && !needsSetup && <p className="empty-state">O que vamos fazer hoje?</p>}
-      {!messages.length && needsSetup && <section className="setup-card" aria-label="Preparar a Ayla">
-        <h2>Vamos preparar a Ayla neste computador</h2>
-        {suggested ? <><p>Para conversar sem internet, a Ayla precisa de um modelo de IA. Recomendado para o seu computador: <b>{suggested.name}</b>. {suggested.summary}</p><ModelSetup entry={suggested} refresh={refresh} action="Preparar a Ayla" /></>
+      {!messages.length && (needsSetup || setup.active) && <section className="setup-card" aria-label="Preparar a Ayla">
+        <h2>{setup.active ? 'Preparando a Ayla neste computador' : 'Vamos preparar a Ayla neste computador'}</h2>
+        {setup.active ? <><p>Baixando os modelos padrão para a Ayla funcionar sem internet. Você pode usar outras telas enquanto isso.</p>
+          <div role="status" className="setup-progress"><progress max={setup.total || 1} value={setup.received || 0} aria-label="Progresso do preparo" /><span>{setup.label} · {formatBytes(setup.received || 0)} de {formatBytes(setup.total || 0)}</span><button onClick={() => void native('cancel_job', { requestId: 'auto-setup' }).then(refresh)}>Interromper</button></div></>
+          : suggested ? <><p>{setup.error ? `O preparo não terminou: ${setup.error}` : setup.cancelled ? 'Preparo interrompido.' : 'A Ayla precisa de um modelo de IA para conversar sem internet.'} Recomendado para o seu computador: <b>{suggested.name}</b>.</p><button className="primary-action" onClick={start}>Preparar a Ayla · {formatBytes(suggested.download_bytes + (memoryEntry && snapshot.preferences.memory_auto ? memoryEntry.download_bytes : 0))}</button></>
           : <p>Os modelos recomendados não cabem na memória livre agora (disponível: {formatBytes(snapshot.memory_budget_bytes)}). Feche alguns programas, escolha uma preferência de uso maior em Configurações ou importe um modelo menor nas opções avançadas.</p>}
       </section>}
       {messages.map((m, i) => <div key={i} className={`message ${m.role}`}>{m.content}{!m.complete && m.content && !busy && <small>Resposta incompleta</small>}</div>)}
       {busy && <p className="connection-status">Respondendo…</p>}
       {learned.length > 0 && <div className="memory-notes" aria-label="Memórias desta conversa">{learned.map(fact => <p key={fact.id}>Ayla lembrou: {fact.content} <button className="link-button" onClick={() => void forget(fact)}>desfazer</button></p>)}</div>}
-      {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><ModelSetup entry={memoryEntry} refresh={refresh} action="Ativar memória" /></section>}
+      {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><button className="primary-action" onClick={start}>Ativar memória · {formatBytes(memoryEntry.download_bytes)}</button></section>}
     </div>
     {error && <p className="chat-error" role="alert">{error}</p>}
     <div className="chat-options">
