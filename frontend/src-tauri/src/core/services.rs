@@ -33,6 +33,8 @@ pub struct Core {
     last_activity: Mutex<Instant>,
     /// Extração em segundo plano, cancelada quando o usuário volta a conversar.
     background: Mutex<Option<CancellationToken>>,
+    /// Estado do preparo automático, exibido pela interface.
+    setup: Mutex<Value>,
 }
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
@@ -49,6 +51,7 @@ impl Core {
             keys: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
             background: Mutex::new(None),
+            setup: Mutex::new(json!({"active":false})),
         })
     }
     fn prefs(&self) -> Result<Preferences, String> {
@@ -257,7 +260,7 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
     })).collect();
     let recommended_model = models::recommended(budget, prefs.context_tokens).map(|e| e.id);
     Ok(
-        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model}),
+        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null)}),
     )
 }
 #[tauri::command]
@@ -419,6 +422,104 @@ pub async fn install_runtime(
 }
 /// Prepara um modelo do catálogo: instala o llama.cpp se faltar e baixa os
 /// arquivos verificados. Só é chamado após o usuário confirmar o tamanho.
+/// Identificador da tarefa de preparo automático (para interromper pela interface).
+pub const SETUP_JOB: &str = "auto-setup";
+
+impl Core {
+    /// Componentes que faltam para usar o perfil principal: llama.cpp, o melhor
+    /// modelo de conversa que cabe no orçamento e, com memória ligada, o de memória.
+    fn default_plan(&self, prefs: &Preferences) -> Result<Vec<&'static models::CatalogEntry>, String> {
+        let installed = self.models()?;
+        let mut plan = Vec::new();
+        if !installed.iter().any(|m| m.supports(Capability::Text)) {
+            if let Some(entry) = models::recommended(self.budget(prefs), prefs.context_tokens) {
+                plan.push(entry);
+            }
+        }
+        if prefs.memory_auto && !installed.iter().any(|m| m.supports(Capability::Embedding)) {
+            plan.extend(models::catalog().iter().filter(|e| e.capabilities.contains(&Capability::Embedding)).take(1));
+        }
+        Ok(plan)
+    }
+    /// Instala as entradas na ordem, com o llama.cpp antes se faltar; progresso acumulado.
+    async fn install_entries(&self, entries: &[&'static models::CatalogEntry], token: &CancellationToken, mut progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
+        let runtimes = self.root.join("runtimes");
+        let llama = runtime::artifacts().into_iter().find(|a| a.id == runtime::preferred_llama()).ok_or("Componente desconhecido")?;
+        let runtime_bytes = if runtime::llama_installed(&runtimes) { 0 } else { llama.bytes };
+        let total = runtime_bytes + entries.iter().map(|e| e.download_bytes()).sum::<u64>();
+        if runtime_bytes > 0 {
+            runtime::install(&runtimes, llama.id, token, |event| {
+                progress("Motor de IA", event["received"].as_u64().unwrap_or(0), total)
+            })
+            .await?;
+        }
+        let models_root = self.root.join("models");
+        fs::create_dir_all(&models_root).map_err(|_| "Não foi possível criar a pasta de modelos")?;
+        // Restos de downloads interrompidos por encerramento abrupto; nunca registrados.
+        if let Ok(items) = fs::read_dir(&models_root) {
+            for item in items.flatten() {
+                if item.file_name().to_string_lossy().ends_with(".installing") {
+                    let _ = fs::remove_dir_all(item.path());
+                }
+            }
+        }
+        let mut done = runtime_bytes;
+        for entry in entries {
+            if self.models()?.iter().any(|m| m.catalog.as_deref() == Some(entry.id)) {
+                done += entry.download_bytes();
+                continue;
+            }
+            let model = runtime::install_model(&models_root, entry, token, |received| progress(entry.name, done + received, total)).await?;
+            done += entry.download_bytes();
+            let definition = serde_json::to_string(&model).map_err(|_| "Modelo inválido")?;
+            let saved = self.store.lock().map_err(|_| "Dados ocupados".to_string())
+                .and_then(|db| db.save_model(&model.id, &definition).map_err(|_| "Não foi possível registrar modelo".to_string()));
+            if let Err(error) = saved {
+                if let Some(directory) = model.path.parent() {
+                    let _ = fs::remove_dir_all(directory);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    fn set_setup(&self, value: Value) {
+        if let Ok(mut setup) = self.setup.lock() {
+            *setup = value;
+        }
+    }
+    /// Preparo do perfil principal sem cliques. Chamado ao abrir o app (uma vez por
+    /// sessão) e pelo botão "Tentar novamente". Nunca roda no modo somente nuvem.
+    pub async fn prepare_defaults(&self) -> Result<(), String> {
+        let prefs = self.prefs()?;
+        if prefs.usage_mode == UsageMode::CloudOnly {
+            return Ok(());
+        }
+        let plan = self.default_plan(&prefs)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        let Ok(_install) = self.install_gate.try_lock() else { return Ok(()) };
+        let token = self.job(SETUP_JOB)?;
+        self.set_setup(json!({"active":true,"label":"Preparando","received":0,"total":0}));
+        let result = self.install_entries(&plan, &token, |label, received, total| {
+            self.set_setup(json!({"active":true,"label":label,"received":received,"total":total}));
+        }).await;
+        self.finish(SETUP_JOB);
+        self.set_setup(match &result {
+            Ok(()) => json!({"active":false}),
+            Err(_) if token.is_cancelled() => json!({"active":false,"cancelled":true}),
+            Err(error) => json!({"active":false,"error":error}),
+        });
+        result
+    }
+}
+
+#[tauri::command]
+pub async fn setup_start(state: tauri::State<'_, Core>) -> Result<(), String> {
+    state.prepare_defaults().await
+}
+
 #[tauri::command]
 pub async fn install_catalog_model(
     state: tauri::State<'_, Core>,
@@ -438,50 +539,9 @@ pub async fn install_catalog_model(
         return Ok(());
     }
     let token = state.job(&request_id)?;
-    let result = async {
-        let runtimes = state.root.join("runtimes");
-        let llama = runtime::artifacts()
-            .into_iter()
-            .find(|a| a.id == runtime::preferred_llama())
-            .ok_or("Componente desconhecido")?;
-        let runtime_bytes = if runtime::llama_installed(&runtimes) { 0 } else { llama.bytes };
-        let total = runtime_bytes + entry.download_bytes();
-        if runtime_bytes > 0 {
-            runtime::install(&runtimes, llama.id, &token, |event| {
-                let received = event["received"].as_u64().unwrap_or(0);
-                let _ = events.send(json!({"type":"download","received":received,"total":total}));
-            })
-            .await?;
-        }
-        let models_root = state.root.join("models");
-        fs::create_dir_all(&models_root).map_err(|_| "Não foi possível criar a pasta de modelos")?;
-        // Restos de downloads interrompidos por encerramento abrupto; nunca registrados.
-        if let Ok(entries) = fs::read_dir(&models_root) {
-            for item in entries.flatten() {
-                if item.file_name().to_string_lossy().ends_with(".installing") {
-                    let _ = fs::remove_dir_all(item.path());
-                }
-            }
-        }
-        let model = runtime::install_model(&models_root, entry, &token, |received| {
-            let _ = events.send(json!({"type":"download","received":runtime_bytes + received,"total":total}));
-        })
-        .await?;
-        let definition = serde_json::to_string(&model).map_err(|_| "Modelo inválido")?;
-        let saved = state
-            .store
-            .lock()
-            .map_err(|_| "Dados ocupados".to_string())
-            .and_then(|db| db.save_model(&model.id, &definition).map_err(|_| "Não foi possível registrar modelo".to_string()));
-        if let Err(error) = saved {
-            if let Some(directory) = model.path.parent() {
-                let _ = fs::remove_dir_all(directory);
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-    .await;
+    let result = state.install_entries(&[entry], &token, |_, received, total| {
+        let _ = events.send(json!({"type":"download","received":received,"total":total}));
+    }).await;
     state.finish(&request_id);
     result
 }

@@ -37,3 +37,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 hound = "3.5"
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+# Verificação SHA-256 de modelos (GBs) lenta sem otimização; só afeta builds de desenvolvimento.
+[profile.dev.package.sha2]
+opt-level = 3

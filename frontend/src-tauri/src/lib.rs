@@ -109,6 +109,13 @@ pub fn run() {
                     }
                 }
             });
+            // Perfil principal pronto sem cliques: prepara o que faltar ao abrir.
+            let setup = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(core) = setup.try_state::<Core>() {
+                    let _ = core.prepare_defaults().await;
+                }
+            });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -129,6 +136,7 @@ pub fn run() {
             core::services::remove_model,
             core::services::install_runtime,
             core::services::install_catalog_model,
+            core::services::setup_start,
             core::services::memory_list,
             core::services::memory_save,
             core::services::memory_delete,

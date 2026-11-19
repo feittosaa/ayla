@@ -3,7 +3,7 @@ import Chat from './components/Chat';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
-import { desktopSnapshot, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Snapshot, type UsageMode } from './services/Desktop';
+import { desktopSnapshot, supports, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Snapshot, type UsageMode } from './services/Desktop';
 import './App.css';
 
 const profiles: { id: Profile; title: string; percent: number; text: string }[] = [
@@ -22,6 +22,9 @@ export default function App() {
     catch (e) { setError(errorText(e)); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  // O preparo automático começa no núcleo ao abrir; acompanhar enquanto estiver ativo.
+  const preparing = Boolean(snapshot?.setup?.active) || (snapshot !== null && snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text')));
+  useEffect(() => { if (!preparing) return; const timer = setInterval(() => void refresh(), 1000); return () => clearInterval(timer); }, [preparing, refresh]);
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
   async function apply() {
     if (!draft || saving) return; setSaving(true); setNotice(''); setError('');

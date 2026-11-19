@@ -106,6 +106,46 @@ fn extract(
     Ok(())
 }
 
+/// Cache local opcional de downloads (desenvolvimento e testes): `AYLA_MODEL_CACHE`.
+/// Arquivos são achados pelo nome da URL e só usados se tamanho e SHA-256 conferirem.
+fn download_cache(url: &str) -> Option<PathBuf> {
+    let directory = PathBuf::from(std::env::var_os("AYLA_MODEL_CACHE")?);
+    let name = url.split('?').next()?.rsplit('/').next()?;
+    (directory.is_dir() && !name.is_empty() && !name.contains("..")).then(|| directory.join(name))
+}
+/// Reaproveita o arquivo do cache se tamanho e SHA-256 conferirem, com progresso e interrupção.
+async fn from_cache(
+    cached: &Path,
+    bytes: u64,
+    sha256: &str,
+    destination: &Path,
+    cancel: &CancellationToken,
+    progress: &mut impl FnMut(u64),
+) -> bool {
+    use tokio::io::AsyncReadExt;
+    if fs::metadata(cached).map(|m| m.len()).ok() != Some(bytes) {
+        return false;
+    }
+    let Ok(mut file) = tokio::fs::File::open(cached).await else { return false };
+    let mut sha = Sha256::new();
+    let mut buffer = vec![0u8; 4 << 20];
+    let mut read = 0u64;
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let Ok(n) = file.read(&mut buffer).await else { return false };
+        if n == 0 {
+            break;
+        }
+        sha.update(&buffer[..n]);
+        read += n as u64;
+        progress(read);
+    }
+    format!("{:x}", sha.finalize()) == sha256
+        && (fs::hard_link(cached, destination).is_ok() || fs::copy(cached, destination).is_ok())
+}
+
 /// Baixa `url` para `destination`, exigindo tamanho e SHA-256 exatos.
 /// Em erro ou cancelamento o arquivo parcial é removido.
 pub async fn download(
@@ -114,8 +154,27 @@ pub async fn download(
     sha256: &str,
     destination: &Path,
     cancel: &CancellationToken,
-    mut progress: impl FnMut(u64),
+    progress: impl FnMut(u64),
 ) -> Result<(), String> {
+    fetch(url, bytes, sha256, destination, cancel, progress, download_cache(url)).await
+}
+async fn fetch(
+    url: &str,
+    bytes: u64,
+    sha256: &str,
+    destination: &Path,
+    cancel: &CancellationToken,
+    mut progress: impl FnMut(u64),
+    cached: Option<PathBuf>,
+) -> Result<(), String> {
+    if let Some(cached) = &cached {
+        if from_cache(cached, bytes, sha256, destination, cancel, &mut progress).await {
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Err("Download interrompido".into());
+        }
+    }
     let result = async {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
@@ -155,8 +214,14 @@ pub async fn download(
         Ok(())
     }
     .await;
-    if result.is_err() {
-        let _ = fs::remove_file(destination);
+    match (&result, &cached) {
+        (Err(_), _) => {
+            let _ = fs::remove_file(destination);
+        }
+        (Ok(()), Some(cached)) if !cached.exists() => {
+            let _ = fs::hard_link(destination, cached).or_else(|_| fs::copy(destination, cached).map(|_| ()));
+        }
+        _ => {}
     }
     result
 }
@@ -890,6 +955,27 @@ mod tests {
                 super::super::models::CatalogFile { url: url("/p"), bytes: 4, sha256: projector_sha, projector: true },
             ])),
         }
+    }
+    #[tokio::test]
+    async fn local_cache_is_used_only_when_size_and_hash_match() {
+        let root = std::env::temp_dir().join(format!("ayla-cache-{}", super::super::store::id()));
+        let cache = root.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let token = CancellationToken::new();
+        // Cache válido: nenhum acesso à rede (porta 9 recusaria a conexão).
+        fs::write(cache.join("w"), b"weights").unwrap();
+        fetch("http://127.0.0.1:9/w", 7, digest(b"weights"), &root.join("a"), &token, |_| {}, Some(cache.join("w"))).await.unwrap();
+        assert_eq!(fs::read(root.join("a")).unwrap(), b"weights");
+        // Cache adulterado é ignorado e o download verificado o substitui no cache.
+        fs::write(cache.join("p"), b"evil").unwrap();
+        let base = serve_files(vec![("/p", b"proj")], 1);
+        assert!(fetch(&format!("{base}/p"), 4, digest(b"proj"), &root.join("b"), &token, |_| {}, Some(cache.join("p"))).await.is_ok());
+        assert_eq!(fs::read(root.join("b")).unwrap(), b"proj");
+        assert_eq!(fs::read(cache.join("p")).unwrap(), b"evil", "não sobrescreve arquivo existente do cache");
+        let base = serve_files(vec![("/n", b"novo")], 1);
+        fetch(&format!("{base}/n"), 4, digest(b"novo"), &root.join("c"), &token, |_| {}, Some(cache.join("n"))).await.unwrap();
+        assert_eq!(fs::read(cache.join("n")).unwrap(), b"novo", "download novo alimenta o cache");
+        fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn catalog_install_verifies_every_file_before_exposing_the_model() {
