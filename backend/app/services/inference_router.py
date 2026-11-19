@@ -1,54 +1,48 @@
 from app.services.circuit_breaker import CircuitBreaker
 
 
+class ProviderUnavailable(RuntimeError):
+    pass
+
+
 class InferenceRouter:
-    def __init__(self, local_llm, cloud_llm=None):
+    def __init__(self, local_llm=None, cloud_llm=None):
         self.local = local_llm
         self.cloud = cloud_llm
         self.breaker = CircuitBreaker()
 
     def stream(self, local_prompt: str, cloud_prompt: str, private: bool):
-
-        # 🔒 Privado = LOCAL SEM DISCUSSÃO
-        if private:
-            yield from self._local_only(local_prompt)
-            return
-
-        # ⚡ NÃO privado → CLOUD FIRST
-        if self.cloud:
+        # Local é o padrão. Falha após o primeiro token nunca reinicia em outro
+        # provedor: isso misturaria respostas e poderia reenviar dados sem clareza.
+        if self.local and self.breaker.allow():
+            emitted = False
             try:
-                yield from self.cloud.stream_read_only(cloud_prompt)
+                for chunk in self.local.stream_local(local_prompt):
+                    if chunk:
+                        emitted = True
+                        yield chunk
+                if not emitted:
+                    raise ProviderUnavailable("Resposta local vazia")
+                self.breaker.reset()
                 return
-            except Exception as e:
-                pass
-
-        # fallback local
-        if self.breaker.allow():
-            try:
-                yield from self.local.stream_local(local_prompt)
-                return
-            except Exception:
+            except Exception as exc:
                 self.breaker.record_failure()
+                if emitted:
+                    raise ProviderUnavailable("Resposta local interrompida") from exc
 
-        yield "\n[Serviço temporariamente indisponível]\n"
+        # A heurística apenas restringe o envio; habilitar cloud exige decisão
+        # explícita via configuração e não envia histórico nem resumos.
+        if not private and self.cloud:
+            emitted = False
+            try:
+                for chunk in self.cloud.stream_read_only(cloud_prompt):
+                    if chunk:
+                        emitted = True
+                        yield chunk
+                if not emitted:
+                    raise ProviderUnavailable("Resposta cloud vazia")
+                return
+            except Exception as exc:
+                raise ProviderUnavailable("Provedor cloud indisponível") from exc
 
-    def _local_only(self, prompt):
-        try:
-            yield from self.local.stream_local(prompt)
-        except Exception:
-            self.breaker.record_failure()
-            yield "\n[Ayla está indisponível no momento 💭]\n"
-
-    def _sanitize_prompt(self, prompt: str) -> str:
-      # remove possíveis blocos de memória
-      forbidden = [
-          "MEMORY:",
-          "HISTÓRICO:",
-          "CONTEXTO:",
-          "RESUMOS:",
-      ]
-
-      for f in forbidden:
-          prompt = prompt.replace(f, "")
-
-      return prompt
+        raise ProviderUnavailable("Nenhum provedor disponível para esta mensagem")

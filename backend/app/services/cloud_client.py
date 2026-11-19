@@ -1,81 +1,34 @@
-import os
+"""Cliente cloud opcional. Não promete retenção que dependa do provedor."""
+
 import json
 import requests
-from typing import Generator
-from dotenv import load_dotenv
 
-load_dotenv()
 
 class CloudReadOnlyClient:
-    def __init__(
-        self,
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model: str = "gpt-4o-mini",
-        base_url: str = "https://api.openai.com/v1/chat/completions",
-        timeout: int = 30,
-    ):
-        self.api_key = api_key or os.getenv("CLOUD_API_KEY")
-        self.model = model
-        self.base_url = base_url
-        self.timeout = timeout
+    def __init__(self, api_key, model="gpt-4o-mini", timeout=30):
+        self.api_key, self.model, self.timeout = api_key, model, timeout
 
-    def stream_read_only(self, prompt: str) -> Generator[str, None, None]:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": self.model,
-            "stream": True,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a stateless assistant. "
-                        "You do not store, remember, or recall any information. "
-                        "You answer only the current prompt."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-        }
-
-        response = requests.post(
-            self.base_url,
-            headers=headers,
-            json=payload,
+    def stream_read_only(self, prompt):
+        with requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json={"model": self.model, "stream": True, "messages": [{"role": "user", "content": prompt}]},
             stream=True,
-            timeout=self.timeout,
-        )
-
-        response.raise_for_status()
-
-        for line in response.iter_lines():
-            if not line:
-                continue
-
-            line = line.decode("utf-8")
-
-            if not line.startswith("data:"):
-                continue
-
-            data = line.replace("data:", "").strip()
-
-            if data == "[DONE]":
-                break
-
-            try:
-                delta = (
-                    json.loads(data)
-                    .get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content")
-                )
-                if delta:
-                    yield delta
-            except Exception:
-                continue
+            timeout=(5, self.timeout),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line or not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    return
+                event = json.loads(data)
+                if event.get("error"):
+                    raise RuntimeError("Provedor cloud não concluiu a resposta")
+                choices = event.get("choices", [])
+                if choices:
+                    token = choices[0].get("delta", {}).get("content")
+                    if token:
+                        yield token
+            raise RuntimeError("Stream cloud encerrado sem conclusão")

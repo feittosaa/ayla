@@ -20,3 +20,10 @@ dist/
 # Env
 .env
 .env.*
+!.env.example
+
+# Dados pessoais e backups locais
+*.db
+*.db-wal
+*.db-shm
+backend/backups/
