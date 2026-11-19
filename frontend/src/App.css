@@ -71,3 +71,16 @@
 .setup-progress { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: var(--ayla-text); }
 .setup-progress progress { flex: 1 1 200px; height: 10px; accent-color: var(--ayla-accent); }
 .setup-done { color: var(--ayla-text-soft); }
+.memory-toggle { display: flex; gap: 8px; align-items: center; margin: 12px 0; }
+.memory-add { display: flex; gap: 10px; margin: 12px 0; }
+.memory-add input { flex: 1; min-width: 0; }
+.memory-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.memory-list li { padding: 14px 0; border-bottom: 1px solid var(--ayla-border); }
+.memory-list p { margin: 0 0 4px; color: var(--ayla-text); line-height: 1.6; overflow-wrap: anywhere; }
+.memory-list small { color: var(--ayla-text-soft); font-size: 12px; }
+.memory-list textarea { width: 100%; }
+.memory-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.memory-activate { padding: 14px; border: 1px solid var(--ayla-border); border-radius: 10px; margin: 10px 0; }
+.memory-notes { align-self: center; max-width: 700px; font-size: 13px; color: var(--ayla-text-soft); text-align: center; }
+.memory-notes p { margin: 2px 0; }
+.app-shell .link-button { background: none; border: 0; padding: 0 2px; color: var(--ayla-accent-soft); text-decoration: underline; cursor: pointer; font-size: inherit; }

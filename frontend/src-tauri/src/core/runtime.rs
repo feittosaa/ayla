@@ -304,6 +304,8 @@ struct Worker {
 pub struct Runtime {
     pub root: PathBuf,
     worker: Mutex<Option<Worker>>,
+    /// Embeddings da memória: processo leve na CPU, ao lado do modelo de conversa.
+    memory: Mutex<Option<Worker>>,
     pub gate: tokio::sync::Mutex<()>,
     client: reqwest::Client,
 }
@@ -312,6 +314,7 @@ impl Runtime {
         Self {
             root,
             worker: Mutex::new(None),
+            memory: Mutex::new(None),
             gate: tokio::sync::Mutex::new(()),
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -321,33 +324,49 @@ impl Runtime {
                 .unwrap(),
         }
     }
-    pub fn stop(&self) {
-        if let Ok(mut worker) = self.worker.lock() {
+    fn stop_slot(slot: &Mutex<Option<Worker>>) {
+        if let Ok(mut worker) = slot.lock() {
             if let Some(mut worker) = worker.take() {
                 let _ = worker.child.kill();
                 let _ = worker.child.wait();
             }
         }
     }
+    /// Encerra o modelo de conversa/voz; o worker de memória segue seu próprio ciclo.
+    pub fn stop(&self) {
+        Self::stop_slot(&self.worker);
+    }
+    pub fn stop_all(&self) {
+        Self::stop_slot(&self.worker);
+        Self::stop_slot(&self.memory);
+    }
+    fn slot(&self, model: &Model) -> &Mutex<Option<Worker>> {
+        if model.capability == Capability::Embedding {
+            &self.memory
+        } else {
+            &self.worker
+        }
+    }
     pub fn idle_check(&self) {
-        let idle = self
-            .worker
-            .lock()
-            .ok()
-            .and_then(|w| {
-                w.as_ref()
-                    .map(|w| w.last_used.elapsed() > Duration::from_secs(w.idle_seconds))
-            })
-            .unwrap_or(false);
-        if idle {
-            if let Ok(_guard) = self.gate.try_lock() {
-                self.stop();
+        let idle = |slot: &Mutex<Option<Worker>>| {
+            slot.lock()
+                .ok()
+                .and_then(|w| {
+                    w.as_ref()
+                        .map(|w| w.last_used.elapsed() > Duration::from_secs(w.idle_seconds))
+                })
+                .unwrap_or(false)
+        };
+        for slot in [&self.worker, &self.memory] {
+            if idle(slot) {
+                if let Ok(_guard) = self.gate.try_lock() {
+                    Self::stop_slot(slot);
+                }
             }
         }
     }
-    pub fn resident_bytes(&self) -> u64 {
-        self.worker
-            .lock()
+    fn slot_bytes(slot: &Mutex<Option<Worker>>) -> u64 {
+        slot.lock()
             .ok()
             .and_then(|w| w.as_ref().map(|w| w.child.id()))
             .and_then(|pid| fs::read_to_string(format!("/proc/{pid}/status")).ok())
@@ -361,14 +380,14 @@ impl Runtime {
             })
             .unwrap_or(0)
     }
+    pub fn resident_bytes(&self) -> u64 {
+        Self::slot_bytes(&self.worker) + Self::slot_bytes(&self.memory)
+    }
     pub fn status(&self) -> Value {
-        let active = self
-            .worker
-            .lock()
-            .ok()
-            .and_then(|w| w.as_ref().map(|w| w.model_id.clone()));
-        let resident = self.resident_bytes();
-        json!({"active_model":active,"resident_bytes":resident})
+        let id = |slot: &Mutex<Option<Worker>>| {
+            slot.lock().ok().and_then(|w| w.as_ref().map(|w| w.model_id.clone()))
+        };
+        json!({"active_model":id(&self.worker),"memory_model":id(&self.memory),"resident_bytes":self.resident_bytes()})
     }
     fn command(&self, component: &str, binary: &str) -> Result<Command, String> {
         let root = self.root.join(component);
@@ -396,11 +415,16 @@ impl Runtime {
         prefs: &Preferences,
         cancel: &CancellationToken,
     ) -> Result<(String, String), String> {
+        let memory = model.capability == Capability::Embedding;
+        let slot = self.slot(model);
+        let stop = || Self::stop_slot(slot);
+        // Embeddings usam contexto fixo: entradas curtas e um processo pequeno.
+        let context = if memory { 2048 } else { prefs.context_tokens };
         {
-            let mut guard = self.worker.lock().map_err(|_| "Modelo ocupado")?;
+            let mut guard = slot.lock().map_err(|_| "Modelo ocupado")?;
             if let Some(worker) = guard.as_mut() {
                 if worker.model_id == model.id
-                    && worker.context == prefs.context_tokens
+                    && worker.context == context
                     && worker
                         .child
                         .try_wait()
@@ -413,9 +437,11 @@ impl Runtime {
                 }
             }
         }
-        self.stop();
-        let gpu = self.root.join("llama-vulkan");
-        let component = if find_binary(&gpu, "llama-server").is_some() {
+        stop();
+        let has = |id: &str| find_binary(&self.root.join(id), "llama-server").is_some();
+        let component = if memory {
+            if has("llama-cpu") { "llama-cpu" } else { "llama-vulkan" }
+        } else if has("llama-vulkan") {
             "llama-vulkan"
         } else {
             "llama-cpu"
@@ -437,22 +463,22 @@ impl Runtime {
             "--port",
             &port.to_string(),
             "-c",
-            &prefs.context_tokens.to_string(),
+            &context.to_string(),
             "--parallel",
             "1",
             "--threads",
-            &hardware::detect()
-                .logical_cpus
-                .saturating_sub(1)
-                .max(1)
-                .to_string(),
+            &{
+                let cpus = hardware::detect().logical_cpus;
+                if memory { (cpus / 4).max(1) } else { cpus.saturating_sub(1).max(1) }
+            }
+            .to_string(),
             "--no-warmup",
             "--offline",
             "--no-webui",
             "--no-slots",
         ]);
         command.env("LLAMA_API_KEY", &token);
-        if component == "llama-cpu" {
+        if component == "llama-cpu" || memory {
             command.args(["-ngl", "0"]);
         } else {
             let hw = hardware::detect();
@@ -479,34 +505,33 @@ impl Runtime {
         }
         if model.capability == Capability::Embedding {
             // O GGUF informa pooling; não impor mean a modelos que exigem CLS/last.
-            command.arg("--embedding");
+            command.args(["--embedding", "-ub", "2048", "-b", "2048"]);
         }
         let child=command.spawn().map_err(|_|"Não foi possível executar o modelo. Verifique a compatibilidade do componente com seu Linux.")?;
         let url = format!("http://127.0.0.1:{port}");
-        *self.worker.lock().map_err(|_| "Modelo ocupado")? = Some(Worker {
+        *slot.lock().map_err(|_| "Modelo ocupado")? = Some(Worker {
             child,
             model_id: model.id.clone(),
             url: url.clone(),
             token: token.clone(),
             last_used: Instant::now(),
             idle_seconds: prefs.idle_seconds,
-            context: prefs.context_tokens,
+            context,
         });
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(120) {
             if cancel.is_cancelled() {
-                self.stop();
+                stop();
                 return Err("Carregamento interrompido".into());
             }
-            let dead = self
-                .worker
+            let dead = slot
                 .lock()
                 .map_err(|_| "Modelo ocupado")?
                 .as_mut()
                 .and_then(|w| w.child.try_wait().ok().flatten())
                 .is_some();
             if dead {
-                self.stop();
+                stop();
                 return Err(
                     "O modelo não carregou. Verifique formato, projetor e orçamento de memória."
                         .into(),
@@ -523,9 +548,9 @@ impl Runtime {
                     return Ok((url, token));
                 }
             }
-            tokio::select! {_=cancel.cancelled()=>{self.stop();return Err("Carregamento interrompido".into());},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
+            tokio::select! {_=cancel.cancelled()=>{stop();return Err("Carregamento interrompido".into());},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }
-        self.stop();
+        stop();
         Err("Tempo de carregamento excedido".into())
     }
     pub async fn local_chat(
@@ -562,20 +587,76 @@ impl Runtime {
         text: &str,
         cancel: &CancellationToken,
     ) -> Result<Vec<f32>, String> {
+        self.embed_many(model, prefs, &[text.to_string()], cancel)
+            .await?
+            .pop()
+            .ok_or_else(|| "Vetor inválido".into())
+    }
+    pub async fn embed_many(
+        &self,
+        model: &Model,
+        prefs: &Preferences,
+        texts: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         let (url, token) = self.ensure(model, prefs, cancel).await?;
-        let response = tokio::select! {_=cancel.cancelled()=>{self.stop();return Err("Tarefa interrompida".into());},r=self.client.post(format!("{url}/v1/embeddings")).bearer_auth(token).json(&json!({"input":text})).send()=>r.map_err(|_|"Falha no modelo de memória")?};
+        let response = tokio::select! {_=cancel.cancelled()=>{Self::stop_slot(&self.memory);return Err("Tarefa interrompida".into());},r=self.client.post(format!("{url}/v1/embeddings")).bearer_auth(token).json(&json!({"input":texts})).send()=>r.map_err(|_|"Falha no modelo de memória")?};
         let data: Value = response
             .error_for_status()
             .map_err(|_| "Modelo incompatível com embeddings")?
             .json()
             .await
             .map_err(|_| "Resposta de memória inválida")?;
-        let vector: Vec<f32> = serde_json::from_value(data["data"][0]["embedding"].clone())
-            .map_err(|_| "Vetor inválido")?;
-        if vector.is_empty() || vector.iter().any(|n| !n.is_finite()) {
-            return Err("Vetor inválido".into());
+        let mut items: Vec<(usize, Vec<f32>)> = Vec::new();
+        for (position, item) in data["data"].as_array().ok_or("Resposta de memória inválida")?.iter().enumerate() {
+            let vector: Vec<f32> = serde_json::from_value(item["embedding"].clone()).map_err(|_| "Vetor inválido")?;
+            if vector.is_empty() || vector.iter().any(|n| !n.is_finite()) {
+                return Err("Vetor inválido".into());
+            }
+            items.push((item["index"].as_u64().map(|i| i as usize).unwrap_or(position), vector));
         }
-        Ok(vector)
+        items.sort_by_key(|(i, _)| *i);
+        if items.len() != texts.len() {
+            return Err("Resposta de memória incompleta".into());
+        }
+        if let Ok(mut w) = self.memory.lock() {
+            if let Some(w) = w.as_mut() {
+                w.last_used = Instant::now();
+            }
+        }
+        Ok(items.into_iter().map(|(_, v)| v).collect())
+    }
+    /// Geração não interativa com saída restrita a um JSON Schema (extração de memórias).
+    /// Cancelar abandona o pedido sem derrubar o modelo, que segue carregado para a conversa.
+    pub async fn complete_json(
+        &self,
+        model: &Model,
+        prefs: &Preferences,
+        messages: Vec<Value>,
+        schema: Value,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let (url, token) = self.ensure(model, prefs, cancel).await?;
+        let body = json!({"messages":messages,"max_tokens":700,"temperature":0.2,
+            "chat_template_kwargs":{"enable_thinking":false},
+            "response_format":{"type":"json_schema","json_schema":{"name":"memorias","schema":schema}}});
+        let response = tokio::select! {_=cancel.cancelled()=>return Err("Tarefa interrompida".into()),r=self.client.post(format!("{url}/v1/chat/completions")).bearer_auth(token).json(&body).send()=>r.map_err(|_|"Falha ao consultar o modelo")?};
+        let data: Value = tokio::select! {_=cancel.cancelled()=>return Err("Tarefa interrompida".into()),r=async{response.error_for_status().map_err(|_|"O modelo recusou o pedido")?.json::<Value>().await.map_err(|_|"Resposta inválida")}=>r?};
+        if let Ok(mut w) = self.worker.lock() {
+            if let Some(w) = w.as_mut() {
+                w.last_used = Instant::now();
+            }
+        }
+        if data["choices"][0]["finish_reason"] == "length" {
+            return Err("Extração excedeu o limite".into());
+        }
+        data["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Resposta sem conteúdo".into())
     }
     pub async fn voice(
         &self,
@@ -671,7 +752,7 @@ impl Runtime {
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
-        self.stop();
+        self.stop_all();
     }
 }
 

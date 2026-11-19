@@ -1,5 +1,6 @@
 use super::{
     hardware,
+    memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
     policy::{self, Sensitivity, UsageMode},
     preferences::{PreferenceStore, Preferences},
@@ -14,7 +15,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri::ipc::Channel;
 use tauri_plugin_dialog::DialogExt;
@@ -28,6 +29,10 @@ pub struct Core {
     install_gate: tokio::sync::Mutex<()>,
     jobs: Mutex<HashMap<String, CancellationToken>>,
     keys: Mutex<HashMap<String, String>>,
+    /// Última atividade da conversa; a extração automática espera a pausa.
+    last_activity: Mutex<Instant>,
+    /// Extração em segundo plano, cancelada quando o usuário volta a conversar.
+    background: Mutex<Option<CancellationToken>>,
 }
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
@@ -42,6 +47,8 @@ impl Core {
             install_gate: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(HashMap::new()),
             keys: Mutex::new(HashMap::new()),
+            last_activity: Mutex::new(Instant::now()),
+            background: Mutex::new(None),
         })
     }
     fn prefs(&self) -> Result<Preferences, String> {
@@ -92,7 +99,7 @@ impl Core {
                 token.cancel();
             }
         }
-        self.runtime.stop();
+        self.runtime.stop_all();
     }
     fn key(&self) -> Result<String, String> {
         let endpoint = self.prefs()?.cloud_endpoint;
@@ -107,6 +114,103 @@ impl Core {
         keyring::Entry::new("dev.feit.ayla", &endpoint)
             .and_then(|entry| entry.get_password())
             .map_err(|_| "Configure a chave do provedor cloud antes de usar".into())
+    }
+}
+impl Core {
+    fn memory_model(&self, prefs: &Preferences) -> Option<Model> {
+        let models = self.models().ok()?;
+        models::choose(&models, Capability::Embedding, self.budget(prefs), prefs.context_tokens, None).ok()
+    }
+    /// Calcula vetores ausentes (memórias novas, editadas ou migradas) em lotes pequenos.
+    async fn backfill(&self, prefs: &Preferences, model: &Model, cancel: &CancellationToken) -> Result<(), String> {
+        loop {
+            let pending = self.store.lock().map_err(|_| "Dados ocupados")?.facts_without_vector(&model.id, 32).map_err(|_| "Falha ao consultar memórias")?;
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let texts: Vec<String> = pending.iter().map(|f| memory::document_text(&f.content)).collect();
+            let vectors = self.runtime.embed_many(model, prefs, &texts, cancel).await?;
+            let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+            for (fact, vector) in pending.iter().zip(vectors) {
+                db.set_vector(&fact.id, &model.id, &vector).map_err(|_| "Falha ao salvar memória")?;
+            }
+        }
+    }
+    /// Busca híbrida: vetores acima do limiar + FTS5, fundidos por rank.
+    fn search(&self, model_id: &str, vector: &[f32], text: &str, minimum: f64, limit: usize) -> Result<Vec<(Fact, Option<f64>)>, String> {
+        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+        let mut hits: Vec<(String, f64)> = db.vectors(model_id).map_err(|_| "Falha ao consultar memórias")?
+            .into_iter()
+            .filter_map(|(id, v)| memory::cosine(vector, &v).filter(|s| *s >= minimum).map(|s| (id, s)))
+            .collect();
+        hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+        hits.truncate(20);
+        let words = memory::fts_query(text).map(|q| db.search_text(&q, 20).unwrap_or_default()).unwrap_or_default();
+        let ids = memory::fuse(&hits, &words, limit);
+        let facts = db.facts_by_ids(&ids).map_err(|_| "Falha ao consultar memórias")?;
+        Ok(facts.into_iter().map(|f| { let score = hits.iter().find(|(i, _)| *i == f.id).map(|(_, s)| *s); (f, score) }).collect())
+    }
+    /// Memórias relevantes ao pedido, para respostas locais. Falhas não impedem a conversa.
+    async fn recall(&self, prefs: &Preferences, text: &str, cancel: &CancellationToken) -> Vec<Fact> {
+        let Some(model) = self.memory_model(prefs) else { return Vec::new() };
+        let result = async {
+            self.backfill(prefs, &model, cancel).await?;
+            let vector = self.runtime.embed(&model, prefs, &memory::query_text(text), cancel).await?;
+            self.search(&model.id, &vector, text, memory::RETRIEVAL_MIN, memory::CONTEXT_LIMIT)
+        }
+        .await;
+        result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
+    }
+    /// Extrai memórias das mensagens novas de uma conversa e as aplica.
+    async fn remember(&self, prefs: &Preferences, conversation: &str, origin: &str, cancel: &CancellationToken) -> Result<Vec<Fact>, String> {
+        let range = self.store.lock().map_err(|_| "Dados ocupados")?.extraction_range(conversation).map_err(|_| "Falha ao consultar conversa")?;
+        let Some((after, until)) = range else { return Ok(Vec::new()) };
+        let embedder = self.memory_model(prefs).ok_or("Ative a memória para lembrar automaticamente")?;
+        let models = self.models()?;
+        let chat = models::choose(&models, Capability::Text, self.budget(prefs), prefs.context_tokens, None)?;
+        let turns = self.store.lock().map_err(|_| "Dados ocupados")?.turns_between(conversation, after, until, 20).map_err(|_| "Falha ao consultar conversa")?;
+        if turns.iter().any(|t| t.role == "user") {
+            self.backfill(prefs, &embedder, cancel).await?;
+            let said: String = turns.iter().filter(|t| t.role == "user").map(|t| t.content.as_str()).collect::<Vec<_>>().join("\n").chars().take(2000).collect();
+            let probe = self.runtime.embed(&embedder, prefs, &memory::document_text(&said), cancel).await?;
+            let related: Vec<Fact> = self.search(&embedder.id, &probe, &said, memory::RELATED_MIN, 10)?.into_iter().map(|(f, _)| f).collect();
+            let raw = self.runtime.complete_json(&chat, prefs, memory::extraction_request(&turns, &related), memory::extraction_schema(), cancel).await?;
+            let extraction = memory::parse_extraction(&raw, &related)?;
+            let texts: Vec<String> = extraction.remember.iter().map(|f| memory::document_text(&f.content)).collect();
+            let vectors = self.runtime.embed_many(&embedder, prefs, &texts, cancel).await?;
+            if cancel.is_cancelled() {
+                return Err("Tarefa interrompida".into());
+            }
+            let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+            let existing = db.vectors(&embedder.id).map_err(|_| "Falha ao consultar memórias")?;
+            let mut changed = Vec::new();
+            for id in &extraction.forget {
+                let _ = db.delete_fact(id);
+            }
+            for (new, vector) in extraction.remember.iter().zip(vectors) {
+                let saved = match &new.replaces {
+                    Some(id) if !extraction.forget.contains(id) => {
+                        // Texto novo: a privacidade volta a duvidosa, salvo se for sensível.
+                        let privacy = if new.privacy == Privacy::Sensitive { Privacy::Sensitive } else { Privacy::Uncertain };
+                        db.update_fact(id, Some(&new.content), Some(privacy)).ok().map(|_| id.clone())
+                    }
+                    _ => {
+                        let duplicate = existing.iter().any(|(_, v)| memory::cosine(&vector, v).is_some_and(|s| s >= memory::DUPLICATE_MIN));
+                        if duplicate { None } else {
+                            db.insert_fact(&new.content, &new.kind, new.privacy, origin, Some(conversation)).ok().map(|f| f.id)
+                        }
+                    }
+                };
+                if let Some(id) = saved {
+                    let _ = db.set_vector(&id, &embedder.id, &vector);
+                    changed.push(id);
+                }
+            }
+            db.set_memory_cursor(conversation, until).map_err(|_| "Falha ao registrar extração")?;
+            return db.facts_by_ids(&changed).map_err(|_| "Falha ao consultar memórias".into());
+        }
+        self.store.lock().map_err(|_| "Dados ocupados")?.set_memory_cursor(conversation, until).map_err(|_| "Falha ao registrar extração")?;
+        Ok(Vec::new())
     }
 }
 impl Drop for Core {
@@ -275,7 +379,7 @@ pub fn remove_model(state: tauri::State<'_, Core>, id: String) -> Result<(), Str
         .gate
         .try_lock()
         .map_err(|_| "Interrompa a tarefa atual antes de remover modelos")?;
-    state.runtime.stop();
+    state.runtime.stop_all();
     let model = state
         .models()?
         .into_iter()
@@ -400,7 +504,7 @@ pub fn unload_models(state: tauri::State<'_, Core>) -> Result<(), String> {
         .gate
         .try_lock()
         .map_err(|_| "Interrompa a tarefa atual antes de liberar o modelo")?;
-    state.runtime.stop();
+    state.runtime.stop_all();
     Ok(())
 }
 #[tauri::command]
@@ -472,17 +576,27 @@ pub async fn chat(
     ) {
         return Err("Tipo de conversa inválido".into());
     }
-    let _gate = state
-        .runtime
-        .gate
-        .try_lock()
-        .map_err(|_| "Já existe uma tarefa de IA em andamento")?;
+    // A extração em segundo plano cede a vez: cancela e espera liberar.
+    let background = state.background.lock().ok().and_then(|mut b| b.take());
+    let _gate = match state.runtime.gate.try_lock() {
+        Ok(gate) => gate,
+        Err(_) => match background {
+            Some(task) => {
+                task.cancel();
+                tokio::time::timeout(Duration::from_secs(10), state.runtime.gate.lock())
+                    .await
+                    .map_err(|_| "Já existe uma tarefa de IA em andamento")?
+            }
+            None => return Err("Já existe uma tarefa de IA em andamento".into()),
+        },
+    };
     let token = state.job(&request.id)?;
     let start = Instant::now();
     let mut partial = String::new();
     let mut first = None;
     let mut chunks = 0;
     let mut metric_model = String::from("unresolved");
+    let mut recalled = 0usize;
     let mut result=async{
         let prefs=state.prefs()?;
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
@@ -505,7 +619,10 @@ pub async fn chat(
             let mime=if bytes.starts_with(b"\x89PNG"){"image/png"}else if bytes.starts_with(&[0xff,0xd8]){"image/jpeg"}else{return Err("Use uma imagem PNG ou JPEG".into());};
             content=json!([{"type":"text","text":request.message},{"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}]);
         }
-        context.insert(0,json!({"role":"system","content":prefs.system_prompt()}));
+        // Memórias locais só entram em respostas locais nesta etapa.
+        let mut system=prefs.system_prompt().to_string();
+        if !use_cloud{let facts=state.recall(&prefs,&request.message,&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}}
+        context.insert(0,json!({"role":"system","content":system}));
         context.push(json!({"role":"user","content":content}));
         let mut report=|event:Value|{if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
         if use_cloud{
@@ -521,7 +638,7 @@ pub async fn chat(
         }else{
             let model=match selection{Ok(model)=>model,Err(error)=>{if prefs.usage_mode!=UsageMode::LocalOnly{let _=events.send(json!({"type":"suggestion","text":"Não há modelo local compatível disponível. Você pode revisar o texto e solicitar cloud, mantendo dados sensíveis locais."}));}return Err(error);}};
             metric_model = model.id.clone();
-            let _=events.send(json!({"type":"routing","text":format!("{} · {:?}",model.name,kind)}));
+            let _=events.send(json!({"type":"routing","text":if recalled>0{format!("{} · {:?} · {} memórias consideradas",model.name,kind,recalled)}else{format!("{} · {:?}",model.name,kind)}}));
             state.runtime.local_chat(&model,kind,&prefs,context,&token,&mut report).await?;
         }
         Ok(())
@@ -552,6 +669,20 @@ pub async fn chat(
             }
             Err(_) => result = Err("A resposta foi recebida, mas os dados estão ocupados".into()),
         }
+    }
+    // Pedido explícito ("lembre que…", "esqueça…"): processar já, sem esperar a pausa.
+    if result.is_ok() && memory::explicit_command(&request.message) {
+        if let Ok(prefs) = state.prefs() {
+            if prefs.memory_auto {
+                match state.remember(&prefs, &request.conversation, "explicit", &token).await {
+                    Ok(facts) => { let _ = events.send(json!({"type":"memory","facts":facts})); }
+                    Err(error) => { let _ = events.send(json!({"type":"memory_error","text":error})); }
+                }
+            }
+        }
+    }
+    if let Ok(mut last) = state.last_activity.lock() {
+        *last = Instant::now();
     }
     state.finish(&request.id);
     result
@@ -655,67 +786,96 @@ pub async fn semantic_memory(
     let result = async {
         let prefs = state.prefs()?;
         let use_cloud = prefs.usage_mode == UsageMode::CloudOnly || request.request_cloud;
+        // Prefixos de busca só no modelo local; a nuvem recebe exatamente o texto revisado.
+        let text = if search { memory::query_text(&request.text) } else { memory::document_text(&request.text) };
         let (model_id, vector) = if use_cloud {
             cloud_embedding(&state, &prefs, &request, &token).await?
         } else {
-            let model = models::choose(
-                &state.models()?,
-                Capability::Embedding,
-                state.budget(&prefs),
-                prefs.context_tokens,
-                None,
-            )?;
-            let vector = state
-                .runtime
-                .embed(&model, &prefs, &request.text, &token)
-                .await?;
+            let model = state.memory_model(&prefs).ok_or("Ative a memória em Configurações para usar esta ferramenta")?;
+            state.backfill(&prefs, &model, &token).await?;
+            let vector = state.runtime.embed(&model, &prefs, &text, &token).await?;
             (model.id, vector)
         };
-        let db = state.store.lock().map_err(|_| "Dados ocupados")?;
         if !search {
-            db.save_memory(&request.text, &model_id, &vector)
-                .map_err(|_| "Não foi possível salvar memória")?;
+            let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+            let fact = db.insert_fact(request.text.trim(), "nota", Privacy::Uncertain, "manual", None).map_err(|_| "Não foi possível salvar memória")?;
+            db.set_vector(&fact.id, &model_id, &vector).map_err(|_| "Não foi possível salvar memória")?;
             return Ok(json!({"saved":true}));
         }
-        let mut results: Vec<_> = db
-            .memories(&model_id)
-            .map_err(|_| "Falha ao consultar memórias")?
+        let results: Vec<Value> = state.search(&model_id, &vector, &request.text, 0.0, 5)?
             .into_iter()
-            .filter_map(|(content, stored)| {
-                cosine(&vector, &stored).map(|score| json!({"content":content,"score":score}))
-            })
+            .map(|(fact, score)| json!({"content":fact.content,"score":score}))
             .collect();
-        results.sort_by(|a, b| {
-            b["score"]
-                .as_f64()
-                .unwrap_or(0.0)
-                .total_cmp(&a["score"].as_f64().unwrap_or(0.0))
-        });
-        results.truncate(5);
         Ok(json!({"results":results}))
     }
     .await;
     state.finish(&request.id);
     result
 }
-fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
-    if a.is_empty() || a.len() != b.len() {
-        return None;
+
+#[tauri::command]
+pub fn memory_list(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let facts = state.store.lock().map_err(|_| "Dados ocupados")?.facts().map_err(|_| "Falha ao consultar memórias")?;
+    Ok(json!({"facts":facts,"enabled":prefs.memory_auto,"ready":state.memory_model(&prefs).is_some()}))
+}
+#[tauri::command]
+pub fn conversation_memories(state: tauri::State<'_, Core>, id: String) -> Result<Vec<Fact>, String> {
+    state.store.lock().map_err(|_| "Dados ocupados")?.conversation_facts(&id).map_err(|_| "Falha ao consultar memórias".into())
+}
+/// Cria (sem `id`) ou edita uma memória pelo painel. O vetor é recalculado depois, em segundo plano.
+#[tauri::command]
+pub fn memory_save(state: tauri::State<'_, Core>, id: Option<String>, content: String, privacy: Privacy) -> Result<(), String> {
+    let content = content.trim();
+    if content.chars().count() < 3 || content.chars().count() > 1000 {
+        return Err("A memória deve ter entre 3 e 1000 caracteres".into());
     }
-    let (dot, aa, bb) = a
-        .iter()
-        .zip(b)
-        .fold((0.0f64, 0.0, 0.0), |(dot, aa, bb), (&a, &b)| {
-            (
-                dot + f64::from(a) * f64::from(b),
-                aa + f64::from(a).powi(2),
-                bb + f64::from(b).powi(2),
-            )
-        });
-    if aa == 0.0 || bb == 0.0 || !dot.is_finite() {
-        None
-    } else {
-        Some(dot / (aa.sqrt() * bb.sqrt()))
+    let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+    match id {
+        Some(id) => db.update_fact(&id, Some(content), Some(privacy)).map_err(|_| "Memória não encontrada".to_string()),
+        None => db.insert_fact(content, "fato", privacy, "manual", None).map(|_| ()).map_err(|_| "Não foi possível salvar memória".to_string()),
+    }
+}
+#[tauri::command]
+pub fn memory_delete(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    state.store.lock().map_err(|_| "Dados ocupados")?.delete_fact(&id).map_err(|_| "Não foi possível apagar".to_string())?
+        .then_some(())
+        .ok_or_else(|| "Memória não encontrada".into())
+}
+
+/// Chamado periodicamente: extrai memórias de conversas paradas e completa vetores.
+pub async fn memory_tick(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    let Some(state) = app.try_state::<Core>() else { return };
+    let Ok(prefs) = state.prefs() else { return };
+    let idle = state.last_activity.lock().map(|t| t.elapsed() >= Duration::from_secs(memory::IDLE_SECONDS)).unwrap_or(false);
+    if !prefs.memory_auto || !idle || state.memory_model(&prefs).is_none() {
+        return;
+    }
+    let Ok(_gate) = state.runtime.gate.try_lock() else { return };
+    let pending = state.store.lock().ok().and_then(|db| db.pending_extraction().ok().flatten());
+    let Some((conversation, _, _)) = pending else { return };
+    let token = CancellationToken::new();
+    if let Ok(mut slot) = state.background.lock() {
+        *slot = Some(token.clone());
+    }
+    let result = state.remember(&prefs, &conversation, "auto", &token).await;
+    if let Ok(mut slot) = state.background.lock() {
+        *slot = None;
+    }
+    match result {
+        Ok(facts) => { let _ = app.emit("memory-updated", json!({"conversation":conversation,"facts":facts})); }
+        // Sem modelo de conversa local, a extração aguarda; outros erros não repetem em laço.
+        Err(_) if token.is_cancelled() => {}
+        Err(_) => {
+            if let Ok(db) = state.store.lock() {
+                if let Ok(Some((_, until))) = db.extraction_range(&conversation) {
+                    if models::choose(&state.models().unwrap_or_default(), Capability::Text, state.budget(&prefs), prefs.context_tokens, None).is_ok() {
+                        let _ = db.set_memory_cursor(&conversation, until);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -835,16 +995,6 @@ pub async fn voice_task(
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn semantic_similarity_rejects_wrong_dimensions_and_empty_vectors() {
-        assert_eq!(cosine(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
-        assert!(cosine(&[1.0], &[1.0, 2.0]).is_none());
-        assert!(cosine(&[0.0], &[0.0]).is_none());
-    }
-}
 
 #[tauri::command]
 pub async fn import_legacy(
@@ -880,4 +1030,85 @@ pub async fn import_legacy(
     db.import_legacy(&source).map(Some).map_err(|_| {
         "O arquivo não contém um histórico compatível. O banco anterior foi preservado.".into()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Modelos reais já baixados em /var/tmp/ayla-benchmark; dados em pasta temporária.
+    #[tokio::test]
+    #[ignore = "usa modelos reais locais (Gemma 4 E4B + EmbeddingGemma); sem downloads"]
+    async fn real_memory_extraction_recall_update_and_forget() {
+        let bench = Path::new("/var/tmp/ayla-benchmark");
+        let root = std::env::temp_dir().join(format!("ayla-memory-real-{}", store::id()));
+        fs::create_dir_all(root.join("runtimes")).unwrap();
+        for id in ["llama-vulkan", "llama-cpu"] {
+            std::os::unix::fs::symlink(format!("/tmp/ayla-p1-runtime-validation/{id}"), root.join("runtimes").join(id)).unwrap();
+        }
+        let core = Core::open(root.clone()).unwrap();
+        let entry = |id: &str| models::catalog().iter().find(|e| e.id == id).unwrap();
+        let chat = Model { id: "gemma".into(), name: "Gemma".into(), capability: Capability::Text, capabilities: entry("gemma-4-e4b").capabilities.to_vec(), path: bench.join("gemma-4-E4B_q4_0-it.gguf"), companion: Some(bench.join("gemma-4-E4B-it-mmproj.gguf")), bytes: 1, sha256: String::new(), catalog: Some("gemma-4-e4b".into()), memory_bytes: Some(entry("gemma-4-e4b").memory_bytes()) };
+        let embed = Model { id: "emb".into(), name: "Emb".into(), capability: Capability::Embedding, capabilities: vec![], path: bench.join("embeddinggemma-300M-qat-Q4_0.gguf"), companion: None, bytes: 1, sha256: String::new(), catalog: Some("embeddinggemma-300m".into()), memory_bytes: Some(entry("embeddinggemma-300m").memory_bytes()) };
+        {
+            let db = core.store.lock().unwrap();
+            for m in [&chat, &embed] {
+                db.save_model(&m.id, &serde_json::to_string(m).unwrap()).unwrap();
+            }
+        }
+        let prefs = core.prefs().unwrap();
+        let token = CancellationToken::new();
+        let talk = |lines: &[(&str, &str)]| {
+            let db = core.store.lock().unwrap();
+            let c = db.create_conversation("teste").unwrap();
+            for (role, text) in lines {
+                db.add_message(&c.id, role, text, true).unwrap();
+            }
+            c.id
+        };
+        let show = |label: &str, facts: &[Fact]| eprintln!("{label}: {:?}", facts.iter().map(|f| (&f.content, f.privacy)).collect::<Vec<_>>());
+
+        let start = Instant::now();
+        let first = talk(&[
+            ("user", "Oi! Eu moro em Fortaleza e tenho uma gata chamada Mel."),
+            ("assistant", "Que legal! A Mel deve ser uma ótima companhia."),
+            ("user", "Prefiro respostas curtas, sem enrolação. Me ajuda a escolher um nome para um café?"),
+            ("assistant", "Claro: Grão Nobre, Café Brisa ou Ponto do Grão."),
+        ]);
+        let learned = core.remember(&prefs, &first, "auto", &token).await.unwrap();
+        show(&format!("extração 1 ({} ms)", start.elapsed().as_millis()), &learned);
+        assert!(learned.len() >= 2, "deve lembrar fatos duradouros");
+        assert!(!learned.iter().any(|f| f.content.to_lowercase().contains("grão")), "não guarda pedidos pontuais");
+
+        let start = Instant::now();
+        let recalled = core.recall(&prefs, "Qual o nome do meu pet?", &token).await;
+        show(&format!("busca pet ({} ms)", start.elapsed().as_millis()), &recalled);
+        assert!(recalled.iter().any(|f| f.content.contains("Mel")));
+        let unrelated = core.recall(&prefs, "Quanto é 17 vezes 23?", &token).await;
+        show("busca sem relação", &unrelated);
+
+        let second = talk(&[("user", "Novidade: me mudei para Recife semana passada."), ("assistant", "Que mudança! Boa adaptação em Recife.")]);
+        let updated = core.remember(&prefs, &second, "auto", &token).await.unwrap();
+        show("atualização", &updated);
+        let all = core.store.lock().unwrap().facts().unwrap();
+        show("todas", &all);
+        assert!(all.iter().any(|f| f.content.contains("Recife")));
+        assert!(!all.iter().any(|f| f.content.contains("Fortaleza")), "a cidade antiga deve ser substituída");
+
+        let third = talk(&[("user", "Pode esquecer a informação sobre a minha gata."), ("assistant", "Tudo bem, esqueci.")]);
+        core.remember(&prefs, &third, "explicit", &token).await.unwrap();
+        let all = core.store.lock().unwrap().facts().unwrap();
+        show("após esquecer", &all);
+        assert!(!all.iter().any(|f| f.content.contains("Mel")));
+
+        let fourth = talk(&[("user", "Qual a capital da Austrália?"), ("assistant", "Canberra.")]);
+        let nothing = core.remember(&prefs, &fourth, "auto", &token).await.unwrap();
+        show("pergunta geral", &nothing);
+        assert!(nothing.is_empty());
+        eprintln!("RSS workers: {} MB; status {}", core.runtime.resident_bytes() >> 20, core.runtime.status());
+        core.runtime.stop_all();
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

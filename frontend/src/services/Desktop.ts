@@ -7,7 +7,7 @@ export type Sensitivity = 'public' | 'sensitive' | 'uncertain';
 export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
   resource_percent: number | null; usage_mode: UsageMode; cloud_endpoint: string; cloud_model: string;
-  history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number;
+  history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean;
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
@@ -22,9 +22,12 @@ export type Snapshot = {
   worker: { active_model: string | null }; metrics: Metric[]; recommended_profile: Profile;
   catalog: CatalogEntry[]; recommended_model: string | null;
 };
+export type Privacy = 'sensitive' | 'uncertain' | 'public';
+export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number };
+export type MemoryList = { facts: Fact[]; enabled: boolean; ready: boolean };
 export type Conversation = { id: string; title: string; cloud_consent: boolean };
 export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing'; text?: string; received?: number; total?: number };
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error'; text?: string; received?: number; total?: number; facts?: Fact[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 export type ChatRequest = Omit<CapabilityRequest, 'text' | 'cloud_model'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; image: string | null };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Síntese de voz', embedding: 'Memória semântica' };

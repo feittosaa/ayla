@@ -117,13 +117,24 @@ pub fn catalog() -> &'static [CatalogEntry] {
                 CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/mmproj-Qwen3.5-4B-Q8_0.gguf", bytes: 366_894_560, sha256: "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654", projector: true },
             ],
         },
+        CatalogEntry {
+            id: "embeddinggemma-300m",
+            name: "Memória da Ayla (EmbeddingGemma 300M)",
+            summary: "Permite lembrar e encontrar memórias por significado. Roda na CPU, ao lado da conversa.",
+            capabilities: &[Capability::Embedding],
+            // RSS medido na CPU com contexto 2048 (benchmark de 19/11/2026).
+            measured_bytes: 406_847_488,
+            files: &[
+                CatalogFile { url: "https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/8dd0ca2a66a8f14470acb0e2a71f801afbc5fb73/embeddinggemma-300M-qat-Q4_0.gguf", bytes: 277_852_192, sha256: "50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26", projector: false },
+            ],
+        },
     ]
 }
-/// Melhor entrada que cabe no orçamento: a de maior consumo medido.
+/// Melhor modelo de conversa que cabe no orçamento: o de maior consumo medido.
 pub fn recommended(budget: u64, context: u32) -> Option<&'static CatalogEntry> {
     catalog()
         .iter()
-        .filter(|entry| entry.fits(budget, context))
+        .filter(|entry| entry.capabilities.contains(&Capability::Text) && entry.fits(budget, context))
         .max_by_key(|entry| entry.measured_bytes)
 }
 
