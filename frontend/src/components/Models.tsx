@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { native, nativeTask, labels, formatBytes, taskId, errorText, type Capability, type Snapshot } from '../services/Desktop';
+import { native, nativeTask, labels, formatBytes, taskId, errorText, capabilityList, type Capability, type Snapshot } from '../services/Desktop';
+import ModelSetup from './ModelSetup';
 
 type Props = { snapshot: Snapshot; refresh: () => Promise<void> };
 export default function Models({ snapshot, refresh }: Props) {
@@ -32,6 +33,9 @@ export default function Models({ snapshot, refresh }: Props) {
     {error && <p role="alert" className="app-error">{error}</p>}
     {progress && <p role="status">{progress}</p>}
     {busy && active.current && <button onClick={() => void native('cancel_job', { requestId: active.current })}>Interromper download</button>}
+    <section className="panel"><h2>Modelos recomendados</h2><p>Testados em português pela Ayla. O download só começa depois da sua confirmação.</p>
+      {snapshot.catalog.map(entry => <article className="model-row" key={entry.id}><div><b>{entry.name}{entry.id === snapshot.recommended_model ? ' · recomendado' : ''}</b><small>{entry.summary}</small><small>Usa até {formatBytes(entry.memory_bytes)} de memória{entry.fits ? '' : ' · não cabe no orçamento atual'}</small></div><ModelSetup entry={entry} refresh={refresh} /></article>)}
+    </section>
     <section className="panel"><h2>Importar modelo</h2>
       <label>Capacidade<select value={capability} disabled={busy} onChange={e => setCapability(e.target.value as Capability)}>{Object.entries(labels).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
       <label>Nome para identificar<input value={name} disabled={busy} onChange={e => setName(e.target.value)} placeholder="Nome do seu modelo" /></label>
@@ -40,7 +44,7 @@ export default function Models({ snapshot, refresh }: Props) {
     </section>
     <section className="panel"><h2>Biblioteca local</h2>
       {!snapshot.models.length && <p>Nenhum modelo importado. Você pode continuar usando a aplicação.</p>}
-      {snapshot.models.map(model => <article className="model-row" key={model.id}><div><b>{model.name}</b><small>{labels[model.capability]} · {formatBytes(model.bytes)}</small><small>Compatibilidade de execução verificada ao carregar.</small></div><button disabled={busy} onClick={() => setConfirm(model.id)}>Remover cópia</button></article>)}
+      {snapshot.models.map(model => <article className="model-row" key={model.id}><div><b>{model.name}</b><small>{capabilityList(model)} · {formatBytes(model.bytes)}</small><small>Compatibilidade de execução verificada ao carregar.</small></div><button disabled={busy} onClick={() => setConfirm(model.id)}>Remover cópia</button></article>)}
       <p>Orçamento estimado agora: {formatBytes(snapshot.memory_budget_bytes)}. O uso real depende da arquitetura, do contexto e dos buffers do modelo.</p>
       <button disabled={busy} onClick={() => { void native('unload_models').then(refresh).catch(e => setError(errorText(e))); }}>Liberar modelo carregado</button>
     </section>

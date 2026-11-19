@@ -121,6 +121,7 @@ pub fn run() {
             core::services::import_model,
             core::services::remove_model,
             core::services::install_runtime,
+            core::services::install_catalog_model,
             core::services::cancel_job,
             core::services::unload_models,
             core::services::conversations,

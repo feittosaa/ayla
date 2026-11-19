@@ -133,8 +133,27 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
     } else {
         "maximum"
     };
+    let budget = models::memory_budget(&hw, &prefs);
+    let installed = state.models()?;
+    let runtime_root = state.root.join("runtimes");
+    let runtime_bytes = if runtime::llama_installed(&runtime_root) {
+        0
+    } else {
+        runtime::artifacts()
+            .into_iter()
+            .find(|a| a.id == runtime::preferred_llama())
+            .map(|a| a.bytes)
+            .unwrap_or(0)
+    };
+    let catalog: Vec<_> = models::catalog().iter().map(|entry| json!({
+        "id": entry.id, "name": entry.name, "summary": entry.summary, "capabilities": entry.capabilities,
+        "download_bytes": entry.download_bytes() + runtime_bytes, "memory_bytes": entry.memory_bytes(),
+        "installed": installed.iter().any(|m| m.catalog.as_deref() == Some(entry.id)),
+        "fits": entry.fits(budget, prefs.context_tokens),
+    })).collect();
+    let recommended_model = models::recommended(budget, prefs.context_tokens).map(|e| e.id);
     Ok(
-        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":models::memory_budget(&hw,&prefs),"hardware":hw,"models":state.models()?,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended}),
+        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model}),
     )
 }
 #[tauri::command]
@@ -294,6 +313,74 @@ pub async fn install_runtime(
     state.finish(&request_id);
     result
 }
+/// Prepara um modelo do catálogo: instala o llama.cpp se faltar e baixa os
+/// arquivos verificados. Só é chamado após o usuário confirmar o tamanho.
+#[tauri::command]
+pub async fn install_catalog_model(
+    state: tauri::State<'_, Core>,
+    id: String,
+    request_id: String,
+    events: Channel<Value>,
+) -> Result<(), String> {
+    let entry = models::catalog()
+        .iter()
+        .find(|e| e.id == id)
+        .ok_or("Modelo fora do catálogo")?;
+    let _install = state
+        .install_gate
+        .try_lock()
+        .map_err(|_| "Outra instalação está em andamento")?;
+    if state.models()?.iter().any(|m| m.catalog.as_deref() == Some(entry.id)) {
+        return Ok(());
+    }
+    let token = state.job(&request_id)?;
+    let result = async {
+        let runtimes = state.root.join("runtimes");
+        let llama = runtime::artifacts()
+            .into_iter()
+            .find(|a| a.id == runtime::preferred_llama())
+            .ok_or("Componente desconhecido")?;
+        let runtime_bytes = if runtime::llama_installed(&runtimes) { 0 } else { llama.bytes };
+        let total = runtime_bytes + entry.download_bytes();
+        if runtime_bytes > 0 {
+            runtime::install(&runtimes, llama.id, &token, |event| {
+                let received = event["received"].as_u64().unwrap_or(0);
+                let _ = events.send(json!({"type":"download","received":received,"total":total}));
+            })
+            .await?;
+        }
+        let models_root = state.root.join("models");
+        fs::create_dir_all(&models_root).map_err(|_| "Não foi possível criar a pasta de modelos")?;
+        // Restos de downloads interrompidos por encerramento abrupto; nunca registrados.
+        if let Ok(entries) = fs::read_dir(&models_root) {
+            for item in entries.flatten() {
+                if item.file_name().to_string_lossy().ends_with(".installing") {
+                    let _ = fs::remove_dir_all(item.path());
+                }
+            }
+        }
+        let model = runtime::install_model(&models_root, entry, &token, |received| {
+            let _ = events.send(json!({"type":"download","received":runtime_bytes + received,"total":total}));
+        })
+        .await?;
+        let definition = serde_json::to_string(&model).map_err(|_| "Modelo inválido")?;
+        let saved = state
+            .store
+            .lock()
+            .map_err(|_| "Dados ocupados".to_string())
+            .and_then(|db| db.save_model(&model.id, &definition).map_err(|_| "Não foi possível registrar modelo".to_string()));
+        if let Err(error) = saved {
+            if let Some(directory) = model.path.parent() {
+                let _ = fs::remove_dir_all(directory);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+    .await;
+    state.finish(&request_id);
+    result
+}
 #[tauri::command]
 pub fn cancel_job(state: tauri::State<'_, Core>, request_id: String) -> Result<(), String> {
     if let Some(token) = state
@@ -402,9 +489,9 @@ pub async fn chat(
         let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}",prefs.personality,request.message));
         let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
         let models=state.models()?;let mut kind=if request.image.is_some(){Capability::Vision}else{request.capability.unwrap_or_else(||models::request_kind(&request.message,false))};
-        if request.capability.is_none() && kind==Capability::Reasoning && !models.iter().any(|m|m.capability==kind){kind=Capability::Text;}
+        if request.capability.is_none() && kind==Capability::Reasoning && !models.iter().any(|m|m.supports(kind)){kind=Capability::Text;}
         if request.image.is_none(){if let Some(selected)=request.model.as_ref().and_then(|id|models.iter().find(|m|m.id==*id)){
-            if matches!(selected.capability,Capability::Text|Capability::Reasoning|Capability::Vision){kind=selected.capability;}
+            if !selected.supports(kind)&&matches!(selected.capability,Capability::Text|Capability::Reasoning|Capability::Vision){kind=selected.capability;}
         }}
         let mut selection=models::choose(&models,kind,state.budget(&prefs),prefs.context_tokens,request.model.as_deref());
         if selection.is_err() && request.capability.is_none() && request.model.is_none() && kind==Capability::Reasoning {
@@ -435,7 +522,7 @@ pub async fn chat(
             let model=match selection{Ok(model)=>model,Err(error)=>{if prefs.usage_mode!=UsageMode::LocalOnly{let _=events.send(json!({"type":"suggestion","text":"Não há modelo local compatível disponível. Você pode revisar o texto e solicitar cloud, mantendo dados sensíveis locais."}));}return Err(error);}};
             metric_model = model.id.clone();
             let _=events.send(json!({"type":"routing","text":format!("{} · {:?}",model.name,kind)}));
-            state.runtime.local_chat(&model,&prefs,context,&token,&mut report).await?;
+            state.runtime.local_chat(&model,kind,&prefs,context,&token,&mut report).await?;
         }
         Ok(())
     }.await;
