@@ -180,7 +180,18 @@ Limiares calibrados: busca a partir de 0,42 (a melhor nota de uma pergunta sem r
   - **Cache de desenvolvimento:** `AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark` reaproveita arquivos por nome, só se tamanho e SHA-256 conferirem (com hardlink), e guarda downloads novos. O `sha2` compila otimizado no perfil dev.
   - **Aceite:** 34 testes Rust, incluindo o cache (válido, adulterado e alimentação). Instalação nova sem clique, confirmada pelo usuário: conversa pronta com memória ativa. O preparo a partir do cache levou ~5 s. Antes da otimização, o hash em debug deixava a barra parada por minutos, o que levou à correção do progresso.
 - [ ] Referências (memórias) na revisão de envio à nuvem, conforme a regra do `AGENTS.md`.
-- [ ] Benchmark de voz (Whisper small/turbo; Piper dii/miro/cadu/faber; Kokoro) e integração na conversa. Arquivos já baixados em `/var/tmp/ayla-benchmark`.
+- [x] **Benchmark de voz (19/11/2026, CPU).**
+  - **Transcrição** (40 trechos reais do FLEURS pt_br, CC-BY-4.0, ~12 s cada): tiny teve 20% de erro de palavras (0,4 s, 177 MB); small, 6,9% (2,2 s, 751 MB); large-v3-turbo q5, 4,1% (7,1 s, 794 MB). Não há build oficial do whisper.cpp com GPU para Linux.
+  - **Síntese** (4 frases; inteligibilidade medida pelo erro do Whisper small ao reouvir): Piper faber/cadu (CC0) tiveram 16%/12% de erro, 0,5 s por frase e 200 MB. Piper dii/miro têm licença CC BY-NC-SA (não comercial) e ficaram em 25–26%. Kokoro dora/alex/santa (Apache-2.0) tiveram 3–6%, 1,6 s por frase e 730 MB; o carregamento custa ~0,75 s fixo por chamada. Todas leem mal "R$" e datas.
+- **Decisões de voz (19/11/2026):** voz padrão Kokoro Dora; transcrição padrão Whisper small. Nesta etapa, microfone e "ouvir" na conversa: a resposta a uma fala é lida frase a frase durante a geração, e o modo contínuo fica para depois. A voz é opcional: na primeira abertura a Ayla pergunta se a pessoa quer usar voz; se sim, baixa sozinha (~0,9 GB). Dá para ativar depois em Configurações.
+- [x] **Integração de voz na conversa.**
+  - A síntese roda sem Python, pelo binário do sherpa-onnx (Kokoro e VITS). Voz e transcrição usam processos e uma fila próprios e não descarregam o modelo de conversa.
+  - Normalizador determinístico em PT-BR: números, R$, datas, horas e porcentagens por extenso; remove markdown e emojis.
+  - Na conversa: microfone, resposta falada frase a frase durante a geração, "ouvir" e "parar". Pergunta inicial "Quer conversar por voz?" e opção em Configurações; o preparo automático instala o Whisper small, o Kokoro Dora e os motores.
+  - O WebKitGTK negava o microfone: a mídia passou a ser liberada só para áudio, na janela da Ayla, via `webkit2gtk` 2.0.2 (mesma versão do Tauri; dependência direta só no Linux, aprovada pelo usuário). O MediaRecorder travava no WebKitGTK; a gravação passou a capturar PCM pela Web Audio API.
+  - **Aceite:** 37 testes Rust (normalizador e catálogo de voz); 8 testes do cliente (frases, WAV, reamostragem). Teste real (ignorado por padrão): instalação via cache, fala em 1,5 s e transcrição de volta em 3,1 s, com o valor e a data corretos. No desktop, o usuário confirmou microfone, resposta falada e ativação automática da voz.
+  - **Feedback do usuário:** a voz soa estranha; o ícone do microfone era ruim (trocado por SVG); o estilo geral do app ainda é feio; quer ver a transcrição aparecer enquanto fala.
+  - **Limites:** o adaptador Python de síntese (`backend/adapters/speech.py`, `sherpa_abi.py`) ficou sem uso, e a remoção aguarda autorização. Cada frase paga ~0,75 s de carga do Kokoro. A transcrição só acontece ao fim da fala.
 
 ### P2 — Primeira integração com a Moneta
 

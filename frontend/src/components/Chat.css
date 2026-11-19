@@ -19,3 +19,6 @@
 .cloud-review { padding: 16px; border: 1px solid var(--ayla-border); border-radius: 10px; width: 100%; background: var(--ayla-panel); line-height: 1.6; }
 .cloud-review pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 10px 0; max-height: 150px; overflow: auto; }
 @media(max-width: 520px) { .message { max-width: 92%; } .input-bar, .chat-toolbar, .chat-options { padding: 12px; } }
+.listen-button { display: block; margin-top: 6px; font-size: 12px; }
+.mic-button { flex-shrink: 0; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.mic-button.recording { background: var(--ayla-accent); color: var(--ayla-on-accent); border-color: var(--ayla-accent); }

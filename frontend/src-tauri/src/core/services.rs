@@ -5,6 +5,7 @@ use super::{
     policy::{self, Sensitivity, UsageMode},
     preferences::{PreferenceStore, Preferences},
     runtime::{self, Runtime},
+    speech_text,
     store::{self, Store},
 };
 use base64::Engine;
@@ -13,7 +14,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -35,6 +36,8 @@ pub struct Core {
     background: Mutex<Option<CancellationToken>>,
     /// Estado do preparo automático, exibido pela interface.
     setup: Mutex<Value>,
+    /// Voz e transcrição em fila própria: rodam enquanto a conversa gera a resposta.
+    voice_gate: tokio::sync::Mutex<()>,
 }
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
@@ -52,6 +55,7 @@ impl Core {
             last_activity: Mutex::new(Instant::now()),
             background: Mutex::new(None),
             setup: Mutex::new(json!({"active":false})),
+            voice_gate: tokio::sync::Mutex::new(()),
         })
     }
     fn prefs(&self) -> Result<Preferences, String> {
@@ -436,22 +440,43 @@ impl Core {
                 plan.push(entry);
             }
         }
-        if prefs.memory_auto && !installed.iter().any(|m| m.supports(Capability::Embedding)) {
-            plan.extend(models::catalog().iter().filter(|e| e.capabilities.contains(&Capability::Embedding)).take(1));
+        let missing = |kind: Capability| !installed.iter().any(|m| m.supports(kind));
+        let first = |kind: Capability| models::catalog().iter().find(|e| e.capabilities.contains(&kind));
+        if prefs.memory_auto && missing(Capability::Embedding) {
+            plan.extend(first(Capability::Embedding));
+        }
+        if prefs.voice == Some(true) {
+            for kind in [Capability::Transcription, Capability::Speech] {
+                if missing(kind) {
+                    plan.extend(first(kind));
+                }
+            }
         }
         Ok(plan)
     }
     /// Instala as entradas na ordem, com o llama.cpp antes se faltar; progresso acumulado.
     async fn install_entries(&self, entries: &[&'static models::CatalogEntry], token: &CancellationToken, mut progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
         let runtimes = self.root.join("runtimes");
-        let llama = runtime::artifacts().into_iter().find(|a| a.id == runtime::preferred_llama()).ok_or("Componente desconhecido")?;
-        let runtime_bytes = if runtime::llama_installed(&runtimes) { 0 } else { llama.bytes };
+        // Motores que faltam para as entradas pedidas (llama.cpp, whisper.cpp, sherpa-onnx).
+        let mut needed: Vec<runtime::Artifact> = Vec::new();
+        for entry in entries {
+            let id = if entry.runtime == "llama" { runtime::preferred_llama() } else { entry.runtime };
+            let installed = if entry.runtime == "llama" { runtime::llama_installed(&runtimes) } else {
+                runtime::artifacts().iter().any(|a| a.id == id && runtime::find_binary(&runtimes.join(id), a.binary).is_some())
+            };
+            if !installed && !needed.iter().any(|a| a.id == id) {
+                needed.extend(runtime::artifacts().into_iter().find(|a| a.id == id));
+            }
+        }
+        let runtime_bytes: u64 = needed.iter().map(|a| a.bytes).sum();
         let total = runtime_bytes + entries.iter().map(|e| e.download_bytes()).sum::<u64>();
-        if runtime_bytes > 0 {
-            runtime::install(&runtimes, llama.id, token, |event| {
-                progress("Motor de IA", event["received"].as_u64().unwrap_or(0), total)
+        let mut done = 0u64;
+        for artifact in &needed {
+            runtime::install(&runtimes, artifact.id, token, |event| {
+                progress("Motores de IA", done + event["received"].as_u64().unwrap_or(0), total)
             })
             .await?;
+            done += artifact.bytes;
         }
         let models_root = self.root.join("models");
         fs::create_dir_all(&models_root).map_err(|_| "Não foi possível criar a pasta de modelos")?;
@@ -463,7 +488,6 @@ impl Core {
                 }
             }
         }
-        let mut done = runtime_bytes;
         for entry in entries {
             if self.models()?.iter().any(|m| m.catalog.as_deref() == Some(entry.id)) {
                 done += entry.download_bytes();
@@ -495,16 +519,27 @@ impl Core {
         if prefs.usage_mode == UsageMode::CloudOnly {
             return Ok(());
         }
-        let plan = self.default_plan(&prefs)?;
-        if plan.is_empty() {
+        if self.default_plan(&prefs)?.is_empty() {
             return Ok(());
         }
         let Ok(_install) = self.install_gate.try_lock() else { return Ok(()) };
         let token = self.job(SETUP_JOB)?;
         self.set_setup(json!({"active":true,"label":"Preparando","received":0,"total":0}));
-        let result = self.install_entries(&plan, &token, |label, received, total| {
-            self.set_setup(json!({"active":true,"label":label,"received":received,"total":total}));
-        }).await;
+        // Repete enquanto houver o que preparar: a pessoa pode ativar a voz no meio do preparo.
+        let mut result = Ok(());
+        for _ in 0..3 {
+            let plan = match self.prefs().and_then(|p| self.default_plan(&p)) {
+                Ok(plan) if plan.is_empty() => break,
+                Ok(plan) => plan,
+                Err(error) => { result = Err(error); break; }
+            };
+            result = self.install_entries(&plan, &token, |label, received, total| {
+                self.set_setup(json!({"active":true,"label":label,"received":received,"total":total}));
+            }).await;
+            if result.is_err() {
+                break;
+            }
+        }
         self.finish(SETUP_JOB);
         self.set_setup(match &result {
             Ok(()) => json!({"active":false}),
@@ -939,6 +974,37 @@ pub async fn memory_tick(app: &tauri::AppHandle) {
     }
 }
 
+/// Fala local de um trecho de resposta (sem nuvem). Chamado frase a frase pela conversa.
+#[tauri::command]
+pub async fn speak(state: tauri::State<'_, Core>, request_id: String, text: String) -> Result<Value, String> {
+    if text.chars().count() > 5000 {
+        return Err("Trecho longo demais para falar de uma vez".into());
+    }
+    let spoken = speech_text::prepare(&text);
+    if spoken.is_empty() {
+        return Ok(json!({"audio":null}));
+    }
+    let _voice = tokio::time::timeout(Duration::from_secs(60), state.voice_gate.lock())
+        .await
+        .map_err(|_| "Outra tarefa de voz está em andamento")?;
+    let token = state.job(&request_id)?;
+    let work = state.root.join("work").join(store::id());
+    let result = async {
+        let prefs = state.prefs()?;
+        let model = models::choose(&state.models()?, Capability::Speech, state.budget(&prefs), prefs.context_tokens, None)
+            .map_err(|_| "Ative a voz em Configurações para ouvir as respostas")?;
+        fs::create_dir_all(&work).map_err(|_| "Não foi possível preparar a fala")?;
+        let output = work.join("speech.wav");
+        state.runtime.voice(&model, Path::new(""), &spoken, &output, &token).await?;
+        let bytes = fs::read(&output).map_err(|_| "A voz não produziu áudio")?;
+        Ok(json!({"audio":base64::engine::general_purpose::STANDARD.encode(bytes)}))
+    }
+    .await;
+    let _ = fs::remove_dir_all(work);
+    state.finish(&request_id);
+    result
+}
+
 pub(super) fn normalize_wav(
     input: &std::path::Path,
     output: &std::path::Path,
@@ -1008,11 +1074,9 @@ pub async fn voice_task(
     audio: Option<String>,
     voice: Option<String>,
 ) -> Result<Value, String> {
-    let _gate = state
-        .runtime
-        .gate
-        .try_lock()
-        .map_err(|_| "Já existe uma tarefa em andamento")?;
+    let _voice = tokio::time::timeout(Duration::from_secs(60), state.voice_gate.lock())
+        .await
+        .map_err(|_| "Outra tarefa de voz está em andamento")?;
     let token = state.job(&request.id)?;
     let work = state.root.join("work").join(store::id());
     let result=async{
@@ -1045,7 +1109,8 @@ pub async fn voice_task(
             let base=work.join("transcript");state.runtime.voice(&model,&input,"",&base,&token).await?;
             let text=fs::read_to_string(base.with_extension("txt")).map_err(|_|"A transcrição não produziu texto")?;Ok(json!({"text":text}))
         }else{
-            state.runtime.voice(&model,&input,&request.text,&output,&token).await?;
+            let spoken=speech_text::prepare(&request.text);
+            state.runtime.voice(&model,&input,&spoken,&output,&token).await?;
             if fs::metadata(&output).map_err(|_|"A voz não produziu áudio")?.len()>64*1024*1024{return Err("Áudio excede limite de processamento".into());}
             let bytes=fs::read(output).map_err(|_|"Não foi possível ler o áudio")?;Ok(json!({"audio":base64::engine::general_purpose::STANDARD.encode(bytes)}))
         }
@@ -1109,8 +1174,8 @@ mod tests {
         }
         let core = Core::open(root.clone()).unwrap();
         let entry = |id: &str| models::catalog().iter().find(|e| e.id == id).unwrap();
-        let chat = Model { id: "gemma".into(), name: "Gemma".into(), capability: Capability::Text, capabilities: entry("gemma-4-e4b").capabilities.to_vec(), path: bench.join("gemma-4-E4B_q4_0-it.gguf"), companion: Some(bench.join("gemma-4-E4B-it-mmproj.gguf")), bytes: 1, sha256: String::new(), catalog: Some("gemma-4-e4b".into()), memory_bytes: Some(entry("gemma-4-e4b").memory_bytes()) };
-        let embed = Model { id: "emb".into(), name: "Emb".into(), capability: Capability::Embedding, capabilities: vec![], path: bench.join("embeddinggemma-300M-qat-Q4_0.gguf"), companion: None, bytes: 1, sha256: String::new(), catalog: Some("embeddinggemma-300m".into()), memory_bytes: Some(entry("embeddinggemma-300m").memory_bytes()) };
+        let chat = Model { id: "gemma".into(), name: "Gemma".into(), capability: Capability::Text, capabilities: entry("gemma-4-e4b").capabilities.to_vec(), path: bench.join("gemma-4-E4B_q4_0-it.gguf"), companion: Some(bench.join("gemma-4-E4B-it-mmproj.gguf")), bytes: 1, sha256: String::new(), catalog: Some("gemma-4-e4b".into()), memory_bytes: Some(entry("gemma-4-e4b").memory_bytes()), speaker: None };
+        let embed = Model { id: "emb".into(), name: "Emb".into(), capability: Capability::Embedding, capabilities: vec![], path: bench.join("embeddinggemma-300M-qat-Q4_0.gguf"), companion: None, bytes: 1, sha256: String::new(), catalog: Some("embeddinggemma-300m".into()), memory_bytes: Some(entry("embeddinggemma-300m").memory_bytes()), speaker: None };
         {
             let db = core.store.lock().unwrap();
             for m in [&chat, &embed] {

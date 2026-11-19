@@ -38,6 +38,13 @@ base64 = "0.22"
 hound = "3.5"
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
 
-# Verificação SHA-256 de modelos (GBs) lenta sem otimização; só afeta builds de desenvolvimento.
+# Mesma versão usada pelo Tauri (wry): libera o microfone na janela da Ayla no Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+
+# Verificação SHA-256 e extração de pacotes (GBs) lentas sem otimização; só afeta builds de desenvolvimento.
 [profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.libbz2-rs-sys]
 opt-level = 3
