@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, type Capability, type Conversation, type Fact, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { recordWav } from '../services/Audio';
+import { Speaker } from '../services/Speech';
 import './Chat.css';
 
 type Props = { snapshot: Snapshot; refresh: () => Promise<void> };
@@ -16,6 +18,11 @@ export default function Chat({ snapshot, refresh }: Props) {
   const [routing, setRouting] = useState('');
   const [learned, setLearned] = useState<Fact[]>([]);
   const [busy, setBusy] = useState(false); const active = useRef<string | null>(null);
+  const [speaking, setSpeaking] = useState(false);
+  const [listening, setListening] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const recorder = useRef<{ stop: () => void } | null>(null);
+  const speaker = useRef<Speaker | null>(null);
+  if (!speaker.current) speaker.current = new Speaker(setSpeaking, message => setError(`Não consegui falar: ${message}`));
   const cloud = source === 'cloud' || snapshot.preferences.usage_mode === 'cloud_only';
   const needsSetup = snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
   const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
@@ -24,6 +31,13 @@ export default function Chat({ snapshot, refresh }: Props) {
   const start = () => { setError(''); void native('setup_start').catch(e => setError(errorText(e))).finally(() => void refresh()); setTimeout(() => void refresh(), 300); };
   const offerMemory = !needsSetup && !setup.active && snapshot.preferences.memory_auto && !snapshot.models.some(m => supports(m, 'embedding')) && memoryEntry;
   const conversationId = conversation?.id;
+  const canHear = snapshot.models.some(m => supports(m, 'transcription'));
+  const canSpeak = snapshot.models.some(m => supports(m, 'speech'));
+  const voiceEntries = snapshot.catalog.filter(entry => entry.capabilities.includes('transcription') || entry.capabilities.includes('speech'));
+  async function chooseVoice(enabled: boolean) {
+    try { await savePreferences({ ...snapshot.preferences, voice: enabled }); await refresh(); if (enabled) start(); }
+    catch (e) { setError(errorText(e)); }
+  }
 
   useEffect(() => {
     if (!conversationId) { setLearned([]); return; }
@@ -39,7 +53,8 @@ export default function Chat({ snapshot, refresh }: Props) {
 
   useEffect(() => {
     native<Conversation[]>('conversations').then(setConversations).catch(e => setError(errorText(e)));
-    return () => { if (active.current) void native('cancel_job', { requestId: active.current }); };
+    const voice = speaker.current;
+    return () => { if (active.current) void native('cancel_job', { requestId: active.current }); recorder.current?.stop(); voice?.stop(); };
   }, []);
 
   useEffect(() => { setReviewed(false); }, [snapshot.system_prompt]);
@@ -53,15 +68,19 @@ export default function Chat({ snapshot, refresh }: Props) {
     try { const item = await native<Conversation>('create_conversation'); setConversations(prev => [item, ...prev]); await open(item); }
     catch (e) { setError(errorText(e)); }
   }
-  async function send() {
-    if (!input.trim() || active.current) return;
+  async function send(spokenText?: string) {
+    const text = (spokenText ?? input).trim();
+    if (!text || active.current) return;
+    // Quem falou ouve a resposta, frase a frase, enquanto ela é gerada.
+    const speakReply = spokenText !== undefined && canSpeak;
+    speaker.current?.stop();
     const id = taskId(); active.current = id; setBusy(true); setError('');
     let current = conversation;
     if (!current) {
       try { current = await native<Conversation>('create_conversation'); setConversation(current); setConversations(prev => [current!, ...prev]); }
       catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
     }
-    const message = input.trim(); setInput('');
+    const message = text; if (spokenText === undefined) setInput('');
     setMessages(prev => [...prev, { role: 'user', content: message, complete: true }, { role: 'assistant', content: '', complete: false }]);
     const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, image, sensitivity, reviewed, request_cloud: source === 'cloud' };
     try {
@@ -70,11 +89,29 @@ export default function Chat({ snapshot, refresh }: Props) {
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
         if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
         if (event.type === 'memory_error') setError(`Não consegui atualizar a memória: ${event.text}`);
+        if (event.type === 'token' && event.text && speakReply) speaker.current?.push(event.text);
         if (event.type === 'token' && event.text) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; next[next.length - 1] = { ...last, content: last.content + event.text }; return next; });
       });
       setMessages(prev => prev.map((m, index) => index === prev.length - 1 ? { ...m, complete: true } : m));
-    } catch (e) { setError(errorText(e)); }
+      if (speakReply) speaker.current?.flush();
+    } catch (e) { setError(errorText(e)); if (speakReply) speaker.current?.flush(); }
     finally { active.current = null; setBusy(false); setReviewed(false); setImage(null); await refresh(); }
+  }
+  async function listen_() {
+    if (listening === 'recording') { recorder.current?.stop(); return; }
+    if (listening !== 'idle' || busy) return;
+    speaker.current?.stop(); setError('');
+    try {
+      setListening('recording');
+      const session = await recordWav(); recorder.current = session;
+      const audio = await session.result; recorder.current = null;
+      setListening('transcribing');
+      const id = taskId();
+      const result = await native<{ text?: string }>('voice_task', { request: { id, text: '', sensitivity: 'sensitive', reviewed: false, request_cloud: false, cloud_model: null }, transcribe: true, audio, voice: null });
+      setListening('idle');
+      const heard = (result.text || '').trim();
+      if (heard) await send(heard); else setError('Não entendi o áudio. Tente falar de novo.');
+    } catch (e) { recorder.current = null; setListening('idle'); setError(errorText(e)); }
   }
   async function consent(allowed: boolean) {
     if (!conversation) return;
@@ -96,8 +133,15 @@ export default function Chat({ snapshot, refresh }: Props) {
           : suggested ? <><p>{setup.error ? `O preparo não terminou: ${setup.error}` : setup.cancelled ? 'Preparo interrompido.' : 'A Ayla precisa de um modelo de IA para conversar sem internet.'} Recomendado para o seu computador: <b>{suggested.name}</b>.</p><button className="primary-action" onClick={start}>Preparar a Ayla · {formatBytes(suggested.download_bytes + (memoryEntry && snapshot.preferences.memory_auto ? memoryEntry.download_bytes : 0))}</button></>
           : <p>Os modelos recomendados não cabem na memória livre agora (disponível: {formatBytes(snapshot.memory_budget_bytes)}). Feche alguns programas, escolha uma preferência de uso maior em Configurações ou importe um modelo menor nas opções avançadas.</p>}
       </section>}
-      {messages.map((m, i) => <div key={i} className={`message ${m.role}`}>{m.content}{!m.complete && m.content && !busy && <small>Resposta incompleta</small>}</div>)}
+      {!messages.length && snapshot.preferences.voice === null && snapshot.preferences.usage_mode !== 'cloud_only' && <section className="setup-card" aria-label="Usar voz">
+        <h2>Quer conversar por voz também?</h2>
+        <p>Com a voz, você fala com a Ayla pelo microfone e ela responde falando. Tudo funciona neste computador. Download de {formatBytes(voiceEntries.reduce((sum, entry) => sum + entry.download_bytes, 0))}; dá para mudar depois em Configurações.</p>
+        <div className="button-row"><button className="primary-action" onClick={() => void chooseVoice(true)}>Sim, ativar voz</button><button onClick={() => void chooseVoice(false)}>Agora não</button></div>
+      </section>}
+      {messages.map((m, i) => <div key={i} className={`message ${m.role}`}>{m.content}{!m.complete && m.content && !busy && <small>Resposta incompleta</small>}{m.role === 'assistant' && m.complete && m.content && canSpeak && <button className="link-button listen-button" aria-label="Ouvir resposta" onClick={() => speaker.current?.speakAll(m.content)}>ouvir</button>}</div>)}
       {busy && <p className="connection-status">Respondendo…</p>}
+      {listening !== 'idle' && <p className="connection-status" role="status">{listening === 'recording' ? 'Ouvindo… toque no microfone para terminar.' : 'Transcrevendo…'}</p>}
+      {speaking && <p className="connection-status" role="status">Falando… <button className="link-button" onClick={() => speaker.current?.stop()}>parar</button></p>}
       {learned.length > 0 && <div className="memory-notes" aria-label="Memórias desta conversa">{learned.map(fact => <p key={fact.id}>Ayla lembrou: {fact.content} <button className="link-button" onClick={() => void forget(fact)}>desfazer</button></p>)}</div>}
       {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><button className="primary-action" onClick={start}>Ativar memória · {formatBytes(memoryEntry.download_bytes)}</button></section>}
     </div>
@@ -119,6 +163,7 @@ export default function Chat({ snapshot, refresh }: Props) {
       {cloud && <div className="cloud-review"><b>Personalidade que será enviada</b><pre>{snapshot.system_prompt}</pre><b>Seu pedido</b><pre>{input || 'Digite o pedido para revisar.'}</pre><p>Somente a personalidade acima e este pedido. Histórico, memórias e anexos não serão enviados.</p><label><input type="checkbox" checked={reviewed} disabled={busy || sensitivity !== 'public'} onChange={e => setReviewed(e.target.checked)} />Revisei a personalidade e o pedido e confirmo que são públicos.</label></div>}
     </div>
     <form className="input-bar" onSubmit={e => { e.preventDefault(); void send(); }}>
+      {canHear && !cloud && <button type="button" className={listening === 'recording' ? 'mic-button recording' : 'mic-button'} aria-label={listening === 'recording' ? 'Terminar de falar' : 'Falar com a Ayla'} aria-pressed={listening === 'recording'} disabled={busy || listening === 'transcribing'} onClick={() => void listen_()}>{listening === 'recording' ? <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" /></svg> : <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" /></svg>}</button>}
       <input aria-label="Mensagem" value={input} onChange={e => { setInput(e.target.value); setReviewed(false); }} placeholder="Fale com a Ayla…" disabled={busy} />
       {busy ? <button type="button" onClick={() => { if (active.current) void native('cancel_job', { requestId: active.current }); }}>Interromper</button> : <button disabled={!input.trim() || (cloud && !reviewed)}>Enviar</button>}
     </form>

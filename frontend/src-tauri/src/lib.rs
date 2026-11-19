@@ -91,6 +91,29 @@ fn backend_connection(
     Ok(serde_json::json!({ "url": state.url, "token": state.token }))
 }
 
+/// O WebKitGTK nega mídia por padrão. Libera só áudio (microfone), pedido pela
+/// própria interface da Ayla após clique; câmera e outras permissões seguem negadas.
+#[cfg(target_os = "linux")]
+fn allow_microphone(app: &tauri::App) {
+    use webkit2gtk::{glib::Cast, PermissionRequestExt, SettingsExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt};
+    let Some(window) = app.get_webview_window("main") else { return };
+    let _ = window.with_webview(|webview| {
+        let view = webview.inner();
+        if let Some(settings) = WebViewExt::settings(&view) {
+            settings.set_enable_media_stream(true);
+        }
+        view.connect_permission_request(|_, request| {
+            match request.downcast_ref::<UserMediaPermissionRequest>() {
+                Some(media) if media.is_for_audio_device() && !media.is_for_video_device() => request.allow(),
+                _ => request.deny(),
+            }
+            true
+        });
+    });
+}
+#[cfg(not(target_os = "linux"))]
+fn allow_microphone(_: &tauri::App) {}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -109,6 +132,7 @@ pub fn run() {
                     }
                 }
             });
+            allow_microphone(app);
             // Perfil principal pronto sem cliques: prepara o que faltar ao abrir.
             let setup = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -137,6 +161,7 @@ pub fn run() {
             core::services::install_runtime,
             core::services::install_catalog_model,
             core::services::setup_start,
+            core::services::speak,
             core::services::memory_list,
             core::services::memory_save,
             core::services::memory_delete,

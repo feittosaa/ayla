@@ -7,4 +7,5 @@ pub mod preferences;
 pub mod models;
 pub mod runtime;
 pub mod services;
+pub mod speech_text;
 pub mod store;

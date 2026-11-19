@@ -1,35 +1,59 @@
 // Gravação iniciada somente por clique; limita duração e libera o microfone.
-export async function recordWav(): Promise<{ stop: () => void; result: Promise<string> }> {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  let recorder: MediaRecorder;
-  try { recorder = new MediaRecorder(stream); }
-  catch { stream.getTracks().forEach(track => track.stop()); throw new Error('A gravação de áudio não está disponível neste ambiente.'); }
-  const pieces: BlobPart[] = [];
-  let timer: ReturnType<typeof setTimeout>;
+// Captura PCM pela Web Audio API (sem MediaRecorder/codecs, que falham no WebKitGTK)
+// e entrega WAV mono 16 kHz em base64, pronto para o whisper.cpp.
+
+/** WAV PCM16 mono a partir de amostras float [-1, 1]. */
+export function encodeWav(samples: Float32Array, rate: number): Uint8Array {
+  const wav = new ArrayBuffer(44 + samples.length * 2); const view = new DataView(wav);
+  const text = (at: number, value: string) => { for (let i = 0; i < value.length; i++) view.setUint8(at + i, value.charCodeAt(i)); };
+  text(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) view.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767), true);
+  return new Uint8Array(wav);
+}
+
+/** Reamostragem linear simples para 16 kHz (fala; sem dependência de OfflineAudioContext). */
+export function resample(input: Float32Array, from: number, to = 16000): Float32Array {
+  if (from === to) return input;
+  const output = new Float32Array(Math.floor(input.length * to / from));
+  const ratio = from / to;
+  for (let i = 0; i < output.length; i++) {
+    const position = i * ratio; const index = Math.floor(position); const fraction = position - index;
+    output[i] = input[index] * (1 - fraction) + (input[index + 1] ?? input[index]) * fraction;
+  }
+  return output;
+}
+
+function base64(bytes: Uint8Array) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return btoa(binary);
+}
+
+export async function recordWav(limitMs = 30000): Promise<{ stop: () => void; result: Promise<string> }> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  const context = new AudioContext();
+  await context.resume();
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks: Float32Array[] = []; let length = 0;
+  processor.onaudioprocess = event => { const data = event.inputBuffer.getChannelData(0); chunks.push(new Float32Array(data)); length += data.length; };
+  source.connect(processor); processor.connect(context.destination);
+  let finished = false;
+  let finish: () => void = () => {};
   const result = new Promise<string>((resolve, reject) => {
-    recorder.ondataavailable = event => { if (event.data.size) pieces.push(event.data); };
-    recorder.onerror = () => { clearTimeout(timer); stream.getTracks().forEach(t => t.stop()); reject(new Error('Não foi possível gravar o áudio.')); };
-    recorder.onstop = () => {
-      clearTimeout(timer); stream.getTracks().forEach(t => t.stop());
-      void (async () => {
-        const context = new AudioContext();
-        try {
-          const decoded = await context.decodeAudioData(await new Blob(pieces, { type: recorder.mimeType }).arrayBuffer());
-          const frames = Math.ceil(decoded.duration * 16000);
-          const offline = new OfflineAudioContext(1, frames, 16000);
-          const source = offline.createBufferSource(); source.buffer = decoded; source.connect(offline.destination); source.start();
-          const buffer = (await offline.startRendering()).getChannelData(0);
-          const wav = new ArrayBuffer(44 + buffer.length * 2); const view = new DataView(wav);
-          function text(at: number, value: string) { for (let i = 0; i < value.length; i++) view.setUint8(at + i, value.charCodeAt(i)); }
-          text(0, 'RIFF'); view.setUint32(4, 36 + buffer.length * 2, true); text(8, 'WAVE'); text(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, buffer.length * 2, true);
-          for (let i = 0; i < buffer.length; i++) view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, buffer[i])) * 32767, true);
-          let binary = ''; const bytes = new Uint8Array(wav);
-          for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-          resolve(btoa(binary));
-        } finally { await context.close(); }
-      })().catch(reject);
+    finish = () => {
+      if (finished) return; finished = true; clearTimeout(timer);
+      processor.onaudioprocess = null; source.disconnect(); processor.disconnect();
+      stream.getTracks().forEach(track => track.stop());
+      const rate = context.sampleRate; void context.close();
+      if (length < rate * 0.3) { reject(new Error('Gravação curta demais. Toque no microfone, fale e toque de novo.')); return; }
+      const samples = new Float32Array(length); let offset = 0;
+      for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; }
+      resolve(base64(encodeWav(resample(samples, rate), 16000)));
     };
   });
-  recorder.start(); timer = setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, 30000);
-  return { stop: () => { if (recorder.state !== 'inactive') recorder.stop(); }, result };
+  const timer = setTimeout(() => finish(), limitMs);
+  return { stop: () => finish(), result };
 }

@@ -7,7 +7,7 @@ export type Sensitivity = 'public' | 'sensitive' | 'uncertain';
 export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
   resource_percent: number | null; usage_mode: UsageMode; cloud_endpoint: string; cloud_model: string;
-  history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean;
+  history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };

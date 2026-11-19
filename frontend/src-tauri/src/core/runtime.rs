@@ -315,18 +315,35 @@ pub async fn install_model(
     let target = models_root.join(&id);
     fs::create_dir_all(&staging).map_err(|_| "Não foi possível preparar a pasta de modelos")?;
     let result = async {
+        let transcription = entry.capabilities.contains(&Capability::Transcription);
+        let weights_name = if transcription { "model.bin" } else { "model.gguf" };
         let mut done = 0u64;
         for file in entry.files {
-            let name = if file.projector { "projector.gguf" } else { "model.gguf" };
-            download(file.url, file.bytes, file.sha256, &staging.join(name), cancel, |received| {
+            let name = if file.projector { "projector.gguf" } else if file.archive { "package.tar.bz2" } else { weights_name };
+            let path = staging.join(name);
+            download(file.url, file.bytes, file.sha256, &path, cancel, |received| {
                 progress(done + received)
             })
             .await?;
+            if file.archive {
+                let (source, dest, cancellation) = (path.clone(), staging.clone(), cancel.clone());
+                tokio::task::spawn_blocking(move || extract(&source, &dest, true, &cancellation))
+                    .await
+                    .map_err(|_| "Falha ao extrair modelo")?
+                    .map_err(|_| "Pacote de modelo inválido ou instalação interrompida")?;
+                let _ = fs::remove_file(&path);
+            }
             done += file.bytes;
         }
         if cancel.is_cancelled() {
             return Err("Download interrompido".to_string());
         }
+        let path = if entry.files.iter().any(|f| f.archive) {
+            let found = find_binary(&staging, "model.onnx").ok_or("O pacote não contém o modelo de voz esperado")?;
+            target.join(found.strip_prefix(&staging).map_err(|_| "Pacote de modelo inválido")?)
+        } else {
+            target.join(weights_name)
+        };
         fs::rename(&staging, &target).map_err(|_| "Não foi possível concluir a instalação do modelo")?;
         let weights = entry
             .files
@@ -338,7 +355,7 @@ pub async fn install_model(
             name: entry.name.into(),
             capability: entry.capabilities[0],
             capabilities: entry.capabilities.to_vec(),
-            path: target.join("model.gguf"),
+            path,
             companion: entry
                 .files
                 .iter()
@@ -348,6 +365,7 @@ pub async fn install_model(
             sha256: weights.sha256.into(),
             catalog: Some(entry.id.into()),
             memory_bytes: Some(entry.memory_bytes()),
+            speaker: entry.speaker,
         })
     }
     .await;
@@ -723,6 +741,38 @@ impl Runtime {
             .map(str::to_string)
             .ok_or_else(|| "Resposta sem conteúdo".into())
     }
+    /// Linha de comando do sherpa-onnx para o modelo de voz: Kokoro (pasta com
+    /// voices.bin) ou VITS/Piper. Sem Python; o texto já deve vir normalizado.
+    fn speech_command(&self, model: &Model, text: &str, output: &Path) -> Result<Command, String> {
+        let dir = model.path.parent().ok_or("Modelo de voz inválido")?;
+        let mut c = self.command("speech", "sherpa-onnx-offline-tts")?;
+        let arg = |name: &str, path: &Path| format!("--{name}={}", path.display());
+        let data = dir.join("espeak-ng-data");
+        if dir.join("voices.bin").is_file() {
+            c.arg(arg("kokoro-model", &model.path))
+                .arg(arg("kokoro-voices", &dir.join("voices.bin")))
+                .arg(arg("kokoro-tokens", &dir.join("tokens.txt")))
+                .arg(arg("kokoro-data-dir", &data))
+                .arg("--kokoro-lang=pt-br")
+                .arg(format!("--sid={}", model.speaker.unwrap_or(0)));
+        } else {
+            c.arg(arg("vits-model", &model.path)).arg(arg("vits-tokens", &dir.join("tokens.txt")));
+            if data.is_dir() {
+                c.arg(arg("vits-data-dir", &data));
+            }
+            if dir.join("lexicon.txt").is_file() {
+                c.arg(arg("vits-lexicon", &dir.join("lexicon.txt")));
+            }
+        }
+        let threads = (hardware::detect().logical_cpus / 2).max(1);
+        // O texto vai como último argumento; nunca começa com "-" (prepare garante).
+        c.arg(format!("--num-threads={threads}"))
+            .arg(arg("output-filename", output))
+            .arg(text.trim_start_matches('-'));
+        Ok(c)
+    }
+    /// Transcrição (whisper.cpp) ou síntese (sherpa-onnx) em processo próprio,
+    /// sem descarregar o modelo de conversa. Cancelar encerra só este processo.
     pub async fn voice(
         &self,
         model: &Model,
@@ -731,87 +781,40 @@ impl Runtime {
         output: &Path,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
-        self.stop();
         let mut command = if model.capability == Capability::Transcription {
             let mut c = self.command("whisper", "whisper-cli")?;
+            let threads = hardware::detect().logical_cpus.saturating_sub(1).max(1);
             c.args(["-m"])
                 .arg(&model.path)
                 .args(["-f"])
                 .arg(input)
-                .args(["-l", "auto", "-otxt", "-of"])
+                .args(["-l", "auto", "-nt", "-np", "-t", &threads.to_string(), "-otxt", "-of"])
                 .arg(output);
             c
         } else {
-            let library = find_binary(&self.root.join("speech"), "libsherpa-onnx-c-api.so")
-                .ok_or("Instale o componente de síntese de voz")?;
-            let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .ok_or("Pasta da aplicação inválida")?;
-            let python = std::env::var_os("AYLA_PYTHON")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| project.join(".venv/bin/python"));
-            let mut c = Command::new(python);
-            c.arg(project.join("backend/adapters/speech.py"))
-                .env("LD_LIBRARY_PATH", library.parent().unwrap());
-            c.stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            c
+            if text.trim().is_empty() {
+                return Err("Não há texto para falar".into());
+            }
+            self.speech_command(model, text, output)?
         };
         let mut child = command
             .spawn()
             .map_err(|_| "Não foi possível iniciar componente de voz")?;
-        if model.capability == Capability::Speech {
-            use std::io::Write;
-            let library = find_binary(&self.root.join("speech"), "libsherpa-onnx-c-api.so")
-                .ok_or("Componente de voz incompleto")?;
-            let request = json!({"library":library,"model":model.path,"text":text,"output":output,"threads":hardware::detect().logical_cpus.saturating_sub(1).max(1)});
-            if child
-                .stdin
-                .take()
-                .ok_or("Entrada de voz indisponível")?
-                .write_all(request.to_string().as_bytes())
-                .is_err()
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Falha ao enviar texto ao componente de voz".into());
-            }
-        }
-        *self.worker.lock().map_err(|_| "Modelo ocupado")? = Some(Worker {
-            child,
-            model_id: model.id.clone(),
-            url: String::new(),
-            token: String::new(),
-            last_used: Instant::now(),
-            idle_seconds: 180,
-            context: 0,
-        });
         let start = Instant::now();
         loop {
             if cancel.is_cancelled() || start.elapsed() > Duration::from_secs(180) {
-                self.stop();
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err("Tarefa de voz interrompida".into());
             }
-            let status = {
-                let mut guard = self.worker.lock().map_err(|_| "Modelo ocupado")?;
-                guard
-                    .as_mut()
-                    .ok_or("Tarefa interrompida")?
-                    .child
-                    .try_wait()
-                    .map_err(|_| "Falha no componente de voz")?
-            };
-            if let Some(status) = status {
-                self.stop();
+            if let Some(status) = child.try_wait().map_err(|_| "Falha no componente de voz")? {
                 return if status.success() {
                     Ok(())
                 } else {
                     Err("O componente de voz não conseguiu usar este modelo ou arquivo".into())
                 };
             }
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 }
@@ -950,9 +953,11 @@ mod tests {
             summary: "",
             capabilities: &[Capability::Text, Capability::Reasoning, Capability::Vision],
             measured_bytes: 1000,
+            runtime: "llama",
+            speaker: None,
             files: Box::leak(Box::new([
-                super::super::models::CatalogFile { url: url("/w"), bytes: 7, sha256: digest(b"weights"), projector: false },
-                super::super::models::CatalogFile { url: url("/p"), bytes: 4, sha256: projector_sha, projector: true },
+                super::super::models::CatalogFile { url: url("/w"), bytes: 7, sha256: digest(b"weights"), projector: false, archive: false },
+                super::super::models::CatalogFile { url: url("/p"), bytes: 4, sha256: projector_sha, projector: true, archive: false },
             ])),
         }
     }
@@ -1124,6 +1129,7 @@ mod tests {
             sha256: String::new(),
             catalog: None,
             memory_bytes: None,
+            speaker: None,
         };
         let mut prefs = Preferences::default();
         prefs.context_tokens = 2048;
@@ -1245,5 +1251,42 @@ mod tests {
                 .unwrap();
             assert!(find_binary(&root.join(artifact.id), artifact.binary).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    /// Rode com AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark (arquivos já verificados; sem rede).
+    #[tokio::test]
+    #[ignore = "modelos de voz reais via cache local; motores de /tmp/ayla-p1-runtime-validation"]
+    async fn catalog_voice_speaks_normalized_text_and_transcribes_it_back() {
+        let root = std::env::temp_dir().join(format!("ayla-voice-real-{}", super::super::store::id()));
+        fs::create_dir_all(root.join("runtimes")).unwrap();
+        for id in ["whisper", "speech"] {
+            std::os::unix::fs::symlink(format!("/tmp/ayla-p1-runtime-validation/{id}"), root.join("runtimes").join(id)).unwrap();
+        }
+        let entry = |id: &str| super::super::models::catalog().iter().find(|e| e.id == id).unwrap();
+        let token = CancellationToken::new();
+        let start = Instant::now();
+        let voice = install_model(&root.join("models"), entry("kokoro-dora"), &token, |_| {}).await.unwrap();
+        let ear = install_model(&root.join("models"), entry("whisper-small"), &token, |_| {}).await.unwrap();
+        eprintln!("instalação via cache: {} ms; voz em {}", start.elapsed().as_millis(), voice.path.display());
+        assert!(voice.path.ends_with("model.onnx") && voice.speaker == Some(42));
+        let runtime = Runtime::new(root.join("runtimes"));
+        let text = super::super::speech_text::prepare("A compra de **R$ 87,90** foi aprovada em 03/11. 😊");
+        let wav = root.join("fala.wav");
+        let start = Instant::now();
+        runtime.voice(&voice, Path::new(""), &text, &wav, &token).await.unwrap();
+        let spoken_ms = start.elapsed().as_millis();
+        let start = Instant::now();
+        runtime.voice(&ear, &wav, "", &root.join("ouvido"), &token).await.unwrap();
+        let heard = fs::read_to_string(root.join("ouvido.txt")).unwrap().to_lowercase();
+        eprintln!("texto: {text}\nfala: {spoken_ms} ms; transcrição: {} ms → {heard}", start.elapsed().as_millis());
+        // O Whisper escreve valores em dígitos; o que importa é ter ouvido o valor e a data.
+        assert!(heard.contains("87") && heard.contains("novembro"), "a fala deve dizer o valor e a data por extenso");
+        assert!(!text.contains("R$") && !text.contains(".."));
+        assert!(runtime.status()["active_model"].is_null(), "voz não usa o worker de conversa");
+        fs::remove_dir_all(root).unwrap();
     }
 }
