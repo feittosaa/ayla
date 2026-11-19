@@ -109,6 +109,13 @@ pub fn run() {
                     }
                 }
             });
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    core::services::memory_tick(&handle).await;
+                }
+            });
             app.manage(core);
             app.manage(ManagedBackend::default());
             Ok(())
@@ -122,6 +129,10 @@ pub fn run() {
             core::services::remove_model,
             core::services::install_runtime,
             core::services::install_catalog_model,
+            core::services::memory_list,
+            core::services::memory_save,
+            core::services::memory_delete,
+            core::services::conversation_memories,
             core::services::cancel_job,
             core::services::unload_models,
             core::services::conversations,

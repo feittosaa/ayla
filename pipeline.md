@@ -145,6 +145,39 @@ Shortlist inicial reafirmada pelo usuário por imagem: Qwen3.5 0.8B, 4B e 9B; Ge
 
 Fontes: [Qwen 0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B), [Qwen 4B](https://huggingface.co/Qwen/Qwen3.5-4B), [Qwen 9B](https://huggingface.co/Qwen/Qwen3.5-9B), [Gemma 4](https://ai.google.dev/gemma/docs/core), [GPT-OSS](https://deploymentsafety.openai.com/gpt-oss/architecture).
 
+### Memória e voz — próxima frente (antes do P2)
+
+**Decisões de 19/11/2026:**
+
+- **Memória longa automática:** após cada conversa, a IA extrai fatos e preferências e os guarda localmente. Há comandos explícitos ("lembre que…", "esqueça…") e um painel para ver, editar e apagar memórias. Cada memória tem uma marcação de privacidade, que começa como duvidosa e só deixa de ser assim por classificação ou por você no painel. Essa marcação é o que a regra de nuvem consulta.
+- **Memória e nuvem:** referências (memórias, arquivos, conversas anteriores) podem acompanhar um envio à nuvem quando forem relevantes e não tiverem conteúdo sensível ou duvidoso. Elas aparecem listadas na revisão do envio, que continua obrigatória. Histórico e órgãos nunca vão em bloco. O `AGENTS.md` foi atualizado com essa regra.
+- **Armazenamento:** SQLite embutido, com busca por palavras (FTS5) e vetores em Rust. O Qdrant fica para quando o volume exigir; o README continua como visão.
+- **Benchmark autorizado:** até ~2,5 GB em `/var/tmp/ayla-benchmark`. Embeddings: EmbeddingGemma 300M e Qwen3-Embedding 0.6B. Transcrição: Whisper small e large-v3-turbo. Fala: vozes Piper pt-BR e Kokoro.
+
+**Ordem proposta:** benchmark de embeddings → memória longa (esquema, extração, busca híbrida e uso no contexto local) → painel de memórias → referências na revisão de envio à nuvem → benchmark e integração de voz na conversa.
+
+**Benchmark de embeddings (30 fatos sintéticos, 20 perguntas parafraseadas):**
+
+| Modelo | Acerto no 1º / nos 3 primeiros | Consulta na CPU | RAM |
+|---|---|---|---|
+| EmbeddingGemma 300M QAT Q4 | 90% / 95% | 7 ms | 390 MB |
+| Qwen3-Embedding 0.6B Q8 | 85–90% / 100% | 17–38 ms | 900 MB |
+
+Limiares calibrados: busca a partir de 0,42 (a melhor nota de uma pergunta sem relação foi 0,41), mesma memória a partir de 0,88, memória relacionada a partir de 0,45.
+
+**Decisões:** EmbeddingGemma como padrão (licença Gemma Terms of Use, baixado do ggml-org). Worker de memória na CPU ao lado do modelo de conversa (revisa a decisão do P1 de um worker ativo). Aviso de memória nova com nota discreta, desfazer e painel.
+
+- [x] **Memória longa local.**
+  - Banco na v2, com backup automático antes da migração. Tabelas de fatos e de vetores binários por modelo, índice FTS5 e cursor de extração por conversa. As notas antigas viram memórias manuais, com vetores recalculados.
+  - Busca híbrida (vetores + FTS5, fusão por rank). Até 5 memórias entram no prompt de sistema, só em respostas locais.
+  - A extração usa o modelo de conversa com JSON Schema, recebe as memórias relacionadas e decide entre lembrar, substituir ou esquecer. Roda após 45 s sem mensagens ou logo após "lembre que…"/"esqueça…". Uma nova mensagem cancela a extração sem descarregar o modelo.
+  - A classificação automática nunca marca uma memória como pública.
+  - Painel "O que a Ayla lembra" nas Configurações (adicionar, editar, privacidade, apagar, pausar a extração automática). Nota "Ayla lembrou: … · desfazer" na conversa e oferta de ativar a memória (0,3 GB).
+  - **Aceite:** 33 testes Rust (migração com backup, fatos/FTS/vetores, parsing da extração, fusão, catálogo); TypeScript estrito, build, lint e cliente SSE. Teste com modelos reais (ignorado por padrão): extraiu 3 fatos duradouros e ignorou o pedido pontual; achou o pet em 14 ms; nada voltou para uma pergunta sem relação; "me mudei para Recife" substituiu Fortaleza; "esqueça a gata" removeu a memória; uma pergunta geral não gerou memória. No desktop, com dados em `/var/tmp/ayla-memory-smoke`, o usuário confirmou o fluxo completo: preparar, ativar memória, "lembre que", uso em outra conversa e painel. Primeiro trecho em 4,8 s na primeira mensagem (carga dos dois modelos) e 133 ms na seguinte.
+  - **Limites:** a extração depende de um modelo de conversa local; sem ele, as conversas ficam pendentes. Uma falha de extração avança o cursor para não repetir em laço. O worker de memória usa o pacote Vulkan com `-ngl 0` quando só ele está instalado. Busca por força bruta, adequada até ~100 mil memórias. Referências à nuvem ainda não implementadas.
+- [ ] Referências (memórias) na revisão de envio à nuvem, conforme a regra do `AGENTS.md`.
+- [ ] Benchmark de voz (Whisper small/turbo; Piper dii/miro/cadu/faber; Kokoro) e integração na conversa. Arquivos já baixados em `/var/tmp/ayla-benchmark`.
+
 ### P2 — Primeira integração com a Moneta
 
 - [ ] Identificar repositório, responsável, versão e capacidades realmente disponíveis.

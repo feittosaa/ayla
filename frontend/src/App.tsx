@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Chat from './components/Chat';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
+import MemoryPanel from './components/MemoryPanel';
 import { desktopSnapshot, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Snapshot, type UsageMode } from './services/Desktop';
 import './App.css';
 
@@ -51,6 +52,7 @@ export default function App() {
           <button className="primary-action" disabled={saving} onClick={() => void apply()}>{saving ? 'Salvando…' : 'Salvar preferências'}</button>
         </section>
         <section className="panel"><h2>Personalidade</h2><p>Como você quer que a Ayla converse? Vale mudar o tom, o humor e o nível de detalhe. As mudanças valem para as próximas respostas.</p><label htmlFor="personality">Jeito de responder</label><textarea id="personality" rows={5} maxLength={4000} value={draft.personality} placeholder="Ex.: seja acolhedora, direta e use humor leve. Explique com exemplos simples." onChange={e => update({ personality: e.target.value })} /><p>{draft.personality.trim() ? 'Personalidade personalizada.' : 'Usando a personalidade original da Ayla.'} As regras de privacidade continuam valendo.</p><button className="primary-action" disabled={saving} onClick={() => void apply()}>Salvar personalidade</button><button disabled={saving} onClick={async () => { setSaving(true); try { const value = { ...snapshot.preferences, personality: '' }; await savePreferences(value); setDraft(prev => prev ? { ...prev, personality: '' } : value); await refresh(); setNotice('Personalidade original restaurada.'); } catch (e) { setError(errorText(e)); } finally { setSaving(false); } }}>Restaurar personalidade original</button></section>
+        <MemoryPanel snapshot={snapshot} refresh={refresh} />
         <details className="panel"><summary>Opções avançadas</summary><p>Controles opcionais para personalizar o funcionamento da Ayla.</p><div className="button-row"><button onClick={() => setPage('models')}>Modelos e componentes</button><button onClick={() => setPage('capabilities')}>Ferramentas de voz e memória</button></div>
         <section className="panel" aria-labelledby="hardware-title"><h2 id="hardware-title">Seu computador</h2><div className="hardware-summary"><span><b>{gib(snapshot.hardware.ram_total_bytes)} GB</b> de memória</span><span><b>{snapshot.hardware.logical_cpus}</b> processadores lógicos</span></div><p>{snapshot.hardware.gpus.length ? snapshot.hardware.gpus.map(g => `${g.vendor}${g.vram_total_bytes ? ` · ${gib(g.vram_total_bytes)} GB gráficos detectados` : ' · memória gráfica não identificada'}`).join(' / ') : 'Memória gráfica não identificada. Isso não impede o uso da Ayla.'}</p><p>Orçamento disponível agora: {formatBytes(snapshot.memory_budget_bytes)}, com reserva para o sistema.</p><button onClick={() => void refresh()}>Atualizar estado</button></section>
         {page === 'settings' && <>

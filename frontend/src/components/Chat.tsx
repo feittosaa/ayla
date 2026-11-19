@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { listen } from '@tauri-apps/api/event';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
 import ModelSetup from './ModelSetup';
 import './Chat.css';
 
@@ -14,10 +15,26 @@ export default function Chat({ snapshot, refresh }: Props) {
   const [sensitivity, setSensitivity] = useState<Sensitivity>('uncertain');
   const [reviewed, setReviewed] = useState(false); const [error, setError] = useState('');
   const [routing, setRouting] = useState('');
+  const [learned, setLearned] = useState<Fact[]>([]);
   const [busy, setBusy] = useState(false); const active = useRef<string | null>(null);
   const cloud = source === 'cloud' || snapshot.preferences.usage_mode === 'cloud_only';
   const needsSetup = snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
   const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
+  const memoryEntry = snapshot.catalog.find(entry => entry.capabilities.includes('embedding'));
+  const offerMemory = !needsSetup && snapshot.preferences.memory_auto && !snapshot.models.some(m => supports(m, 'embedding')) && memoryEntry;
+  const conversationId = conversation?.id;
+
+  useEffect(() => {
+    if (!conversationId) { setLearned([]); return; }
+    const load = () => native<Fact[]>('conversation_memories', { id: conversationId }).then(setLearned).catch(() => setLearned([]));
+    void load();
+    const stop = listen<{ conversation: string }>('memory-updated', event => { if (event.payload.conversation === conversationId) void load(); });
+    return () => { void stop.then(unlisten => unlisten()); };
+  }, [conversationId]);
+
+  async function forget(fact: Fact) {
+    try { await native('memory_delete', { id: fact.id }); setLearned(prev => prev.filter(f => f.id !== fact.id)); } catch (e) { setError(errorText(e)); }
+  }
 
   useEffect(() => {
     native<Conversation[]>('conversations').then(setConversations).catch(e => setError(errorText(e)));
@@ -50,6 +67,8 @@ export default function Chat({ snapshot, refresh }: Props) {
       await nativeTask<void>('chat', { request }, event => {
         if (event.type === 'routing') setRouting(event.text || '');
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
+        if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
+        if (event.type === 'memory_error') setError(`Não consegui atualizar a memória: ${event.text}`);
         if (event.type === 'token' && event.text) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; next[next.length - 1] = { ...last, content: last.content + event.text }; return next; });
       });
       setMessages(prev => prev.map((m, index) => index === prev.length - 1 ? { ...m, complete: true } : m));
@@ -76,6 +95,8 @@ export default function Chat({ snapshot, refresh }: Props) {
       </section>}
       {messages.map((m, i) => <div key={i} className={`message ${m.role}`}>{m.content}{!m.complete && m.content && !busy && <small>Resposta incompleta</small>}</div>)}
       {busy && <p className="connection-status">Respondendo…</p>}
+      {learned.length > 0 && <div className="memory-notes" aria-label="Memórias desta conversa">{learned.map(fact => <p key={fact.id}>Ayla lembrou: {fact.content} <button className="link-button" onClick={() => void forget(fact)}>desfazer</button></p>)}</div>}
+      {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><ModelSetup entry={memoryEntry} refresh={refresh} action="Ativar memória" /></section>}
     </div>
     {error && <p className="chat-error" role="alert">{error}</p>}
     <div className="chat-options">

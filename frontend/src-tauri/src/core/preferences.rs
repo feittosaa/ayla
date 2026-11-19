@@ -28,6 +28,8 @@ pub struct Preferences {
     pub history_chars: usize,
     pub context_tokens: u32,
     pub idle_seconds: u64,
+    /// Memória longa automática; desligar pausa novas extrações sem apagar nada.
+    pub memory_auto: bool,
 }
 
 /// v2: contexto padrão 2048 → 8192 (modelos com raciocínio esgotavam o limite).
@@ -49,6 +51,7 @@ impl Default for Preferences {
             history_chars: 12000,
             context_tokens: 8192,
             idle_seconds: 120,
+            memory_auto: true,
         }
     }
 }

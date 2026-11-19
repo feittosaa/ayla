@@ -27,7 +27,7 @@
 - Linux é o primeiro alvo; portar para Windows depois. Minimizar atrito técnico para o usuário final.
 - Não fixar um modelo único. A direção é selecionar modelos por pedido, com tipos opcionais escolhidos na instalação e perfis leve, moderado e máximo para diferentes hardwares. Importação livre desde P1; shortlist é sugestão, não restrição. Perfis são orçamentos ajustáveis de RAM (25%, 50%, 75%), com reserva para o sistema.
 - Runtime local gerenciado: llama.cpp para texto/raciocínio/visão/embeddings, whisper.cpp para transcrição e sherpa-onnx para síntese. Modelos são sempre opcionais. Instalação Linux primeiro; Windows depois.
-- Cloud: modos configuráveis; dados sensíveis ou duvidosos ficam locais em todos os modos. Envio exige revisão do conteúdo público e consentimento aplicável; sugestões da IA não autorizam envio. Não anexar histórico, órgãos ou arquivos automaticamente.
+- Cloud: modos configuráveis; dados sensíveis ou duvidosos ficam locais em todos os modos. Envio exige revisão do conteúdo público e consentimento aplicável; sugestões da IA não autorizam envio. Referências (memórias, arquivos ou conversas anteriores) só acompanham um envio quando forem relevantes ao pedido, não tiverem conteúdo sensível ou duvidoso e aparecerem listadas na revisão do envio; nunca enviar histórico ou órgãos em bloco.
 - Não enviar dados, disparar chamadas cloud pagas ou conectar contas reais durante validações sem autorização específica.
 
 ## Execução e preservação
