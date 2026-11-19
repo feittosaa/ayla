@@ -27,13 +27,10 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": "all",
+    "active": false,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
-    ],
-    "externalBin": ["bin/ayla-backend"],
-    "resources": ["bin/ayla-backend.exe"]
+    ]
   }
 }
