@@ -9,7 +9,8 @@ export type Preferences = {
   resource_percent: number | null; usage_mode: UsageMode; cloud_endpoint: string; cloud_model: string;
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number;
 };
-export type Model = { id: string; name: string; capability: Capability; bytes: number; sha256: string };
+export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
+export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
 export type Hardware = {
   ram_total_bytes: number; ram_available_bytes: number; logical_cpus: number;
   gpus: { vendor: string; vram_total_bytes: number | null; vram_available_bytes: number | null }[];
@@ -19,6 +20,7 @@ export type Snapshot = {
   system_prompt: string; preferences: Preferences; hardware: Hardware; models: Model[]; memory_budget_bytes: number;
   runtimes: { id: string; label: string; bytes: number; installed: boolean }[];
   worker: { active_model: string | null }; metrics: Metric[]; recommended_profile: Profile;
+  catalog: CatalogEntry[]; recommended_model: string | null;
 };
 export type Conversation = { id: string; title: string; cloud_consent: boolean };
 export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean };
@@ -37,6 +39,12 @@ export function native<T>(command: string, args?: Record<string, unknown>) { ret
 export async function nativeTask<T>(command: string, args: Record<string, unknown>, onEvent: (event: TaskEvent) => void) {
   const events = new Channel<TaskEvent>(); events.onmessage = onEvent;
   return invoke<T>(command, { ...args, events });
+}
+export function supports(model: Model, kind: Capability) {
+  return (model.capability === kind || Boolean(model.capabilities?.includes(kind))) && (kind !== 'vision' || Boolean(model.companion));
+}
+export function capabilityList(model: Model) {
+  return [...new Set([model.capability, ...(model.capabilities || [])])].filter(kind => supports(model, kind)).map(kind => labels[kind]).join(', ');
 }
 export function taskId() { return crypto.randomUUID(); }
 export function gib(bytes: number) { return (bytes / 2 ** 30).toFixed(1); }

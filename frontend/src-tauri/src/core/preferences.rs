@@ -30,10 +30,14 @@ pub struct Preferences {
     pub idle_seconds: u64,
 }
 
+/// v2: contexto padrão 2048 → 8192 (modelos com raciocínio esgotavam o limite).
+const VERSION: u32 = 2;
+const V1_DEFAULT_CONTEXT: u32 = 2048;
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: VERSION,
             onboarding_complete: false,
             profile: None,
             resource_percent: None,
@@ -43,7 +47,7 @@ impl Default for Preferences {
             personality: String::new(),
             history_messages: 10,
             history_chars: 12000,
-            context_tokens: 2048,
+            context_tokens: 8192,
             idle_seconds: 120,
         }
     }
@@ -78,7 +82,7 @@ impl Preferences {
     }
     pub fn validate(&self) -> io::Result<()> {
         if self.personality.chars().count() > 4000
-            || self.version != 1
+            || self.version != VERSION
             || self.percent() < 5
             || self.percent() > 90
             || self.history_messages < 2
@@ -122,8 +126,15 @@ impl PreferenceStore {
     pub fn load(&self) -> io::Result<Preferences> {
         match fs::read(&self.path) {
             Ok(bytes) => {
-                let value: Preferences =
+                let mut value: Preferences =
                     serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if value.version == 1 {
+                    // O padrão antigo não é distinguível de uma escolha igual; demais valores ficam.
+                    if value.context_tokens == V1_DEFAULT_CONTEXT {
+                        value.context_tokens = Preferences::default().context_tokens;
+                    }
+                    value.version = VERSION;
+                }
                 value.validate()?;
                 Ok(value)
             }
@@ -198,6 +209,30 @@ mod tests {
         assert!(store.save(&value).is_err());
         assert_eq!(store.load().unwrap().resource_percent, Some(30));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn version_one_migrates_default_context_and_preserves_custom_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "ayla-preferences-v1-{}",
+            super::super::store::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = PreferenceStore::new(&dir);
+        fs::write(
+            &store.path,
+            r#"{"version":1,"context_tokens":2048,"personality":"breve"}"#,
+        )
+        .unwrap();
+        let migrated = store.load().unwrap();
+        assert_eq!((migrated.version, migrated.context_tokens), (2, 8192));
+        assert_eq!(migrated.personality, "breve");
+        fs::write(&store.path, r#"{"version":1,"context_tokens":4096}"#).unwrap();
+        assert_eq!(store.load().unwrap().context_tokens, 4096);
+        // Carregar não reescreve o arquivo; a migração persiste no próximo salvamento.
+        assert!(fs::read_to_string(&store.path).unwrap().contains("4096"));
+        fs::write(&store.path, r#"{"version":3}"#).unwrap();
+        assert!(store.load().is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn corrupted_configuration_is_not_silently_overwritten() {

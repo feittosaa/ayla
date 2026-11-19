@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { native, nativeTask, taskId, errorText, labels, type Capability, type Conversation, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import ModelSetup from './ModelSetup';
 import './Chat.css';
 
 type Props = { snapshot: Snapshot; refresh: () => Promise<void> };
@@ -15,6 +16,8 @@ export default function Chat({ snapshot, refresh }: Props) {
   const [routing, setRouting] = useState('');
   const [busy, setBusy] = useState(false); const active = useRef<string | null>(null);
   const cloud = source === 'cloud' || snapshot.preferences.usage_mode === 'cloud_only';
+  const needsSetup = snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
+  const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
 
   useEffect(() => {
     native<Conversation[]>('conversations').then(setConversations).catch(e => setError(errorText(e)));
@@ -65,7 +68,12 @@ export default function Chat({ snapshot, refresh }: Props) {
       <button disabled={busy} onClick={() => void newConversation()}>Nova</button>
     </div>
     <div className="messages" aria-live="polite">
-      {!conversation && <p className="empty-state">O que vamos fazer hoje?</p>}
+      {!conversation && !needsSetup && <p className="empty-state">O que vamos fazer hoje?</p>}
+      {!messages.length && needsSetup && <section className="setup-card" aria-label="Preparar a Ayla">
+        <h2>Vamos preparar a Ayla neste computador</h2>
+        {suggested ? <><p>Para conversar sem internet, a Ayla precisa de um modelo de IA. Recomendado para o seu computador: <b>{suggested.name}</b>. {suggested.summary}</p><ModelSetup entry={suggested} refresh={refresh} action="Preparar a Ayla" /></>
+          : <p>Os modelos recomendados não cabem na memória livre agora (disponível: {formatBytes(snapshot.memory_budget_bytes)}). Feche alguns programas, escolha uma preferência de uso maior em Configurações ou importe um modelo menor nas opções avançadas.</p>}
+      </section>}
       {messages.map((m, i) => <div key={i} className={`message ${m.role}`}>{m.content}{!m.complete && m.content && !busy && <small>Resposta incompleta</small>}</div>)}
       {busy && <p className="connection-status">Respondendo…</p>}
     </div>
@@ -77,7 +85,7 @@ export default function Chat({ snapshot, refresh }: Props) {
         <option value="auto">Tipo automático pelo pedido</option>
         {(['text', 'reasoning', 'vision'] as Capability[]).map(k => <option key={k} value={k}>{labels[k]}</option>)}
       </select>
-      <select aria-label="Modelo local" value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Seleção automática</option>{snapshot.models.filter(m => (kind === 'auto' && ['text', 'reasoning', 'vision'].includes(m.capability)) || m.capability === (image ? 'vision' : kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
+      <select aria-label="Modelo local" value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Seleção automática</option>{snapshot.models.filter(m => image ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
       <select aria-label="Onde responder" value={source} disabled={busy || snapshot.preferences.usage_mode === 'local_only' || snapshot.preferences.usage_mode === 'cloud_only'} onChange={e => { setSource(e.target.value as 'local' | 'cloud'); setReviewed(false); }}><option value="local">Neste computador</option><option value="cloud">Na nuvem</option></select>
       </details>
       <button disabled={busy || cloud} onClick={() => { void native<string | null>('pick_image').then(setImage).catch(e => setError(errorText(e))); }}>Anexar imagem</button>

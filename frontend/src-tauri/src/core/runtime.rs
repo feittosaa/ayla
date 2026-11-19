@@ -1,4 +1,8 @@
-use super::{hardware, models::Capability, models::Model, preferences::Preferences};
+use super::{
+    hardware,
+    models::{Capability, CatalogEntry, Model},
+    preferences::Preferences,
+};
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -102,6 +106,86 @@ fn extract(
     Ok(())
 }
 
+/// Baixa `url` para `destination`, exigindo tamanho e SHA-256 exatos.
+/// Em erro ou cancelamento o arquivo parcial é removido.
+pub async fn download(
+    url: &str,
+    bytes: u64,
+    sha256: &str,
+    destination: &Path,
+    cancel: &CancellationToken,
+    mut progress: impl FnMut(u64),
+) -> Result<(), String> {
+    let result = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| "Falha ao preparar download")?;
+        let response = tokio::select! { _=cancel.cancelled()=>return Err("Download interrompido".to_string()), response=client.get(url).send()=>response.map_err(|_|"Não foi possível iniciar o download. Verifique a conexão.")? };
+        let response = response
+            .error_for_status()
+            .map_err(|_| "O servidor não disponibilizou este arquivo")?;
+        let mut file = tokio::fs::File::create(destination)
+            .await
+            .map_err(|_| "Não foi possível salvar download")?;
+        let mut stream = response.bytes_stream();
+        let mut sha = Sha256::new();
+        let mut received = 0u64;
+        loop {
+            let item = tokio::select! {_=cancel.cancelled()=>return Err("Download interrompido".to_string()),item=stream.next()=>item};
+            let Some(item) = item else { break };
+            let chunk = item.map_err(|_| "Download interrompido pela conexão")?;
+            received += chunk.len() as u64;
+            if received > bytes {
+                return Err("Arquivo com tamanho inesperado".into());
+            }
+            sha.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|_| "Sem espaço em disco para concluir o download")?;
+            progress(received);
+        }
+        file.sync_all()
+            .await
+            .map_err(|_| "Não foi possível concluir o download")?;
+        if received != bytes || format!("{:x}", sha.finalize()) != sha256 {
+            return Err("O arquivo não passou na verificação de integridade".into());
+        }
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
+
+/// Pacote llama.cpp adequado: Vulkan apenas com GPU dedicada e carregador Vulkan presente.
+pub fn preferred_llama() -> &'static str {
+    let gpu = hardware::detect()
+        .gpus
+        .iter()
+        .any(|g| g.vram_total_bytes.unwrap_or(0) >= 2 << 30);
+    let loader = [
+        "/usr/lib64/libvulkan.so.1",
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib/libvulkan.so.1",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file());
+    if gpu && loader {
+        "llama-vulkan"
+    } else {
+        "llama-cpu"
+    }
+}
+pub fn llama_installed(root: &Path) -> bool {
+    ["llama-vulkan", "llama-cpu"]
+        .iter()
+        .any(|id| find_binary(&root.join(id), "llama-server").is_some())
+}
+
 pub async fn install(
     root: &Path,
     id: &str,
@@ -122,32 +206,88 @@ pub async fn install(
     fs::create_dir_all(root).map_err(|_| "Não foi possível criar a pasta de componentes")?;
     let temporary = root.join(format!("{id}.part"));
     let staging = root.join(format!("{id}.installing"));
-    let result=async {
-        let client=reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(60)).build().map_err(|_|"Falha ao preparar download")?;
-        let response=tokio::select!{ _=cancel.cancelled()=>return Err("Instalação interrompida".to_string()), response=client.get(artifact.url).send()=>response.map_err(|_|"Não foi possível baixar o componente")? };
-        let response=response.error_for_status().map_err(|_|"O servidor não disponibilizou este componente")?;
-        let mut file=tokio::fs::File::create(&temporary).await.map_err(|_|"Não foi possível salvar download")?;
-        let mut stream=response.bytes_stream(); let mut sha=Sha256::new(); let mut received=0u64;
-        loop {
-            let item=tokio::select!{_=cancel.cancelled()=>return Err("Instalação interrompida".to_string()),item=stream.next()=>item};
-            let Some(item)=item else{break;}; let bytes=item.map_err(|_|"Download interrompido")?;
-            received+=bytes.len() as u64;if received>artifact.bytes{return Err("Componente com tamanho inesperado".into());}
-            sha.update(&bytes);file.write_all(&bytes).await.map_err(|_|"Sem espaço para salvar componente")?;
-            report(json!({"type":"download","received":received,"total":artifact.bytes}));
+    let result = async {
+        download(artifact.url, artifact.bytes, artifact.sha256, &temporary, cancel, |received| {
+            report(json!({"type":"download","received":received,"total":artifact.bytes}))
+        })
+        .await?;
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|_| "Não foi possível preparar componente")?;
+        let source = temporary.clone();
+        let dest = staging.clone();
+        let cancellation = cancel.clone();
+        tokio::task::spawn_blocking(move || extract(&source, &dest, artifact.url.ends_with(".bz2"), &cancellation))
+            .await
+            .map_err(|_| "Falha ao extrair componente")?
+            .map_err(|_| "Pacote inválido ou instalação interrompida")?;
+        if find_binary(&staging, artifact.binary).is_none() {
+            return Err("O pacote não inclui o componente esperado".into());
         }
-        file.sync_all().await.map_err(|_|"Não foi possível concluir o download")?;drop(file);
-        if received!=artifact.bytes || format!("{:x}",sha.finalize())!=artifact.sha256{return Err("O componente não passou na verificação de integridade".into());}
-        let _=fs::remove_dir_all(&staging);fs::create_dir_all(&staging).map_err(|_|"Não foi possível preparar componente")?;
-        let source=temporary.clone();let dest=staging.clone();let cancellation=cancel.clone();
-        tokio::task::spawn_blocking(move||extract(&source,&dest,artifact.url.ends_with(".bz2"),&cancellation)).await.map_err(|_|"Falha ao extrair componente")?.map_err(|_|"Pacote inválido ou instalação interrompida")?;
-        if find_binary(&staging,artifact.binary).is_none(){return Err("O pacote não inclui o componente esperado".into());}
-        if cancel.is_cancelled(){return Err("Instalação interrompida".into());}
-        fs::rename(&staging,&target).map_err(|_|"Não foi possível concluir a instalação")?;
+        if cancel.is_cancelled() {
+            return Err("Instalação interrompida".into());
+        }
+        fs::rename(&staging, &target).map_err(|_| "Não foi possível concluir a instalação")?;
         Ok(())
-    }.await;
+    }
+    .await;
     let _ = fs::remove_file(&temporary);
     if result.is_err() {
         let _ = fs::remove_dir_all(staging);
+    }
+    result
+}
+
+/// Baixa uma entrada do catálogo para `models/<id>` e devolve o registro pronto.
+/// Nada fica registrado ou visível em `models` antes de todos os arquivos passarem na verificação.
+pub async fn install_model(
+    models_root: &Path,
+    entry: &CatalogEntry,
+    cancel: &CancellationToken,
+    mut progress: impl FnMut(u64),
+) -> Result<Model, String> {
+    let id = super::store::id();
+    let staging = models_root.join(format!("{id}.installing"));
+    let target = models_root.join(&id);
+    fs::create_dir_all(&staging).map_err(|_| "Não foi possível preparar a pasta de modelos")?;
+    let result = async {
+        let mut done = 0u64;
+        for file in entry.files {
+            let name = if file.projector { "projector.gguf" } else { "model.gguf" };
+            download(file.url, file.bytes, file.sha256, &staging.join(name), cancel, |received| {
+                progress(done + received)
+            })
+            .await?;
+            done += file.bytes;
+        }
+        if cancel.is_cancelled() {
+            return Err("Download interrompido".to_string());
+        }
+        fs::rename(&staging, &target).map_err(|_| "Não foi possível concluir a instalação do modelo")?;
+        let weights = entry
+            .files
+            .iter()
+            .find(|f| !f.projector)
+            .ok_or("Catálogo sem arquivo de pesos")?;
+        Ok(Model {
+            id: id.clone(),
+            name: entry.name.into(),
+            capability: entry.capabilities[0],
+            capabilities: entry.capabilities.to_vec(),
+            path: target.join("model.gguf"),
+            companion: entry
+                .files
+                .iter()
+                .any(|f| f.projector)
+                .then(|| target.join("projector.gguf")),
+            bytes: entry.download_bytes(),
+            sha256: weights.sha256.into(),
+            catalog: Some(entry.id.into()),
+            memory_bytes: Some(entry.memory_bytes()),
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
     }
     result
 }
@@ -391,6 +531,7 @@ impl Runtime {
     pub async fn local_chat(
         &self,
         model: &Model,
+        kind: Capability,
         prefs: &Preferences,
         messages: Vec<Value>,
         cancel: &CancellationToken,
@@ -401,7 +542,7 @@ impl Runtime {
             .client
             .post(format!("{url}/v1/chat/completions"))
             .bearer_auth(token)
-            .json(&json!({"messages":messages,"stream":true,"max_tokens":prefs.context_tokens/2}));
+            .json(&chat_body(kind, prefs, messages));
         let result = stream_chat(request, cancel, report).await;
         if cancel.is_cancelled() {
             self.stop();
@@ -534,6 +675,18 @@ impl Drop for Runtime {
     }
 }
 
+/// Corpo do pedido local. Modelos híbridos (ex.: Qwen3.5) raciocinam por
+/// padrão; o modo só fica ligado quando o pedido foi roteado para raciocínio.
+/// Templates sem essa opção a ignoram.
+fn chat_body(kind: Capability, prefs: &Preferences, messages: Vec<Value>) -> Value {
+    json!({
+        "messages": messages,
+        "stream": true,
+        "max_tokens": prefs.context_tokens / 2,
+        "chat_template_kwargs": {"enable_thinking": kind == Capability::Reasoning},
+    })
+}
+
 pub async fn stream_chat(
     request: reqwest::RequestBuilder,
     cancel: &CancellationToken,
@@ -608,6 +761,83 @@ pub async fn stream_chat(
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn thinking_is_enabled_only_for_reasoning_requests() {
+        let prefs = Preferences::initial();
+        for (kind, expected) in [
+            (Capability::Text, false),
+            (Capability::Vision, false),
+            (Capability::Reasoning, true),
+        ] {
+            let body = chat_body(kind, &prefs, vec![json!({"role":"user","content":"oi"})]);
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], expected);
+            assert_eq!(body["max_tokens"], prefs.context_tokens / 2);
+            assert_eq!(body["stream"], true);
+        }
+    }
+    /// Servidor local que responde cada conexão com o corpo indicado pelo caminho.
+    fn serve_files(files: Vec<(&'static str, &'static [u8])>, connections: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..connections {
+                let Ok((mut socket, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = socket.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let body = files.iter().find(|(p, _)| *p == path).map(|(_, b)| *b).unwrap_or(b"");
+                let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(body);
+            }
+        });
+        format!("http://{address}")
+    }
+    fn digest(bytes: &[u8]) -> &'static str {
+        Box::leak(format!("{:x}", Sha256::digest(bytes)).into_boxed_str())
+    }
+    fn entry(base: &str, projector_sha: &'static str) -> CatalogEntry {
+        let url = |path: &str| -> &'static str { Box::leak(format!("{base}{path}").into_boxed_str()) };
+        CatalogEntry {
+            id: "teste",
+            name: "Teste",
+            summary: "",
+            capabilities: &[Capability::Text, Capability::Reasoning, Capability::Vision],
+            measured_bytes: 1000,
+            files: Box::leak(Box::new([
+                super::super::models::CatalogFile { url: url("/w"), bytes: 7, sha256: digest(b"weights"), projector: false },
+                super::super::models::CatalogFile { url: url("/p"), bytes: 4, sha256: projector_sha, projector: true },
+            ])),
+        }
+    }
+    #[tokio::test]
+    async fn catalog_install_verifies_every_file_before_exposing_the_model() {
+        let root = std::env::temp_dir().join(format!("ayla-catalog-{}", super::super::store::id()));
+        let base = serve_files(vec![("/w", b"weights"), ("/p", b"proj")], 2);
+        let mut last = 0;
+        let model = install_model(&root, &entry(&base, digest(b"proj")), &CancellationToken::new(), |r| last = r)
+            .await
+            .unwrap();
+        assert_eq!(last, 11);
+        assert_eq!(fs::read(&model.path).unwrap(), b"weights");
+        assert_eq!(fs::read(model.companion.as_ref().unwrap()).unwrap(), b"proj");
+        assert!(model.supports(Capability::Vision) && model.supports(Capability::Reasoning));
+        assert_eq!((model.catalog.as_deref(), model.memory_bytes), (Some("teste"), Some(1200)));
+        // Hash divergente no segundo arquivo: nada fica em `models` além do modelo anterior.
+        let base = serve_files(vec![("/w", b"weights"), ("/p", b"evil")], 2);
+        let error = install_model(&root, &entry(&base, digest(b"proj")), &CancellationToken::new(), |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.contains("integridade"));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(install_model(&root, &entry("http://127.0.0.1:9", digest(b"proj")), &cancelled, |_| {})
+            .await
+            .is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn stream_preserves_unicode_and_rejects_incomplete_responses() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -720,10 +950,13 @@ mod tests {
             id: format!("test-{capability:?}"),
             name: "temporary fixture".into(),
             capability,
+            capabilities: Vec::new(),
             path: root.join(file),
             companion: None,
             bytes: fs::metadata(root.join(file)).unwrap().len(),
             sha256: String::new(),
+            catalog: None,
+            memory_bytes: None,
         };
         let mut prefs = Preferences::default();
         prefs.context_tokens = 2048;
@@ -740,6 +973,7 @@ mod tests {
             let result = runtime
                 .local_chat(
                     &model,
+                    capability,
                     &prefs,
                     vec![json!({"role":"user","content":prompt})],
                     &token,
@@ -761,7 +995,7 @@ mod tests {
         vision.companion = Some(root.join("mmproj-SmolVLM-256M-Instruct-Q8_0.gguf"));
         let image = base64::engine::general_purpose::STANDARD
             .encode(fs::read(root.join("cats.png")).unwrap());
-        let result = runtime.local_chat(&vision, &prefs, vec![json!({"role":"user","content":[{"type":"text","text":"Describe this image briefly."},{"type":"image_url","image_url":{"url":format!("data:image/png;base64,{image}")}}]})], &token, |_| {}).await.unwrap();
+        let result = runtime.local_chat(&vision, Capability::Vision, &prefs, vec![json!({"role":"user","content":[{"type":"text","text":"Describe this image briefly."},{"type":"image_url","image_url":{"url":format!("data:image/png;base64,{image}")}}]})], &token, |_| {}).await.unwrap();
         eprintln!("Vision: {}", result.0);
         assert!(
             result.0.to_lowercase().contains("cat"),
@@ -824,6 +1058,7 @@ mod tests {
         let result = runtime
             .local_chat(
                 &model,
+                Capability::Text,
                 &prefs,
                 vec![json!({"role":"user","content":"Count from 1 to 1000. /no_think"})],
                 &cancel,

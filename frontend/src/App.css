@@ -61,3 +61,13 @@
 @media(max-width: 520px) { .profiles { grid-template-columns: 1fr; } .panel { padding: 17px; } .app-header { padding: 16px; } .model-row { align-items: flex-start; flex-direction: column; gap: 10px; } .app-header span { font-size: 12px; } }
 @media(prefers-reduced-motion: reduce) { .app-shell button { transition: none; } }
 .dashboard > :is(h1,h2,.button-row) { margin-left: auto; margin-right: auto; }
+.setup-card { margin: auto; max-width: 560px; padding: 26px; background: var(--ayla-panel); color: var(--ayla-text); border: 1px solid var(--ayla-border); border-radius: 14px; line-height: 1.65; }
+.setup-card h2 { margin: 0 0 10px; font-size: 20px; }
+.setup-card p { color: var(--ayla-text-soft); }
+.setup-card b { color: var(--ayla-text); }
+.model-setup { display: flex; flex-direction: column; gap: 10px; }
+.confirm-inline { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 14px; border: 1px solid var(--ayla-accent); border-radius: 10px; background: var(--ayla-bg); }
+.confirm-inline p { width: 100%; margin: 0; color: var(--ayla-text); line-height: 1.6; }
+.setup-progress { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: var(--ayla-text); }
+.setup-progress progress { flex: 1 1 200px; height: 10px; accent-color: var(--ayla-accent); }
+.setup-done { color: var(--ayla-text-soft); }

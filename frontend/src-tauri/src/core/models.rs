@@ -21,20 +21,110 @@ pub enum Capability {
 pub struct Model {
     pub id: String,
     pub name: String,
+    /// Capacidade principal, usada na importação e em registros anteriores.
     pub capability: Capability,
+    /// Capacidades adicionais servidas pelo mesmo arquivo. Registros antigos
+    /// não têm o campo e continuam servindo apenas `capability`.
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
     pub path: PathBuf,
     pub companion: Option<PathBuf>,
     pub bytes: u64,
     pub sha256: String,
+    /// Entrada do catálogo que originou o modelo, quando baixado pela Ayla.
+    #[serde(default)]
+    pub catalog: Option<String>,
+    /// Memória medida no contexto de referência, com margem; ausente em importações.
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
 }
+/// Contexto em que o consumo dos modelos do catálogo foi medido.
+pub const MEASURED_CONTEXT: u32 = 8192;
+const KV_BYTES_PER_TOKEN: u64 = 1024 * 256;
 impl Model {
-    pub fn estimated_memory(&self, context: u32) -> u64 {
-        // Estimativa conservadora de pesos + buffers; runtime pode rejeitar
-        // arquiteturas/contextos mais caros. Não é uma garantia de VRAM.
-        self.bytes
-            .saturating_mul(2)
-            .saturating_add(u64::from(context) * 1024 * 256)
+    pub fn supports(&self, kind: Capability) -> bool {
+        (self.capability == kind || self.capabilities.contains(&kind))
+            && (kind != Capability::Vision || self.companion.is_some())
     }
+    pub fn estimated_memory(&self, context: u32) -> u64 {
+        match self.memory_bytes {
+            // Medição real do catálogo; só o contexto além da referência é estimado.
+            Some(measured) => measured.saturating_add(
+                u64::from(context.saturating_sub(MEASURED_CONTEXT)) * KV_BYTES_PER_TOKEN,
+            ),
+            // Estimativa conservadora de pesos + buffers; runtime pode rejeitar
+            // arquiteturas/contextos mais caros. Não é uma garantia de VRAM.
+            None => self
+                .bytes
+                .saturating_mul(2)
+                .saturating_add(u64::from(context) * KV_BYTES_PER_TOKEN),
+        }
+    }
+}
+
+pub struct CatalogFile {
+    pub url: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+    pub projector: bool,
+}
+pub struct CatalogEntry {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub summary: &'static str,
+    pub capabilities: &'static [Capability],
+    /// RAM + VRAM medidas com projetor carregado e contexto 2048–8192
+    /// (benchmark de 19/11/2026), antes da margem de segurança.
+    pub measured_bytes: u64,
+    pub files: &'static [CatalogFile],
+}
+impl CatalogEntry {
+    pub fn download_bytes(&self) -> u64 {
+        self.files.iter().map(|f| f.bytes).sum()
+    }
+    pub fn memory_bytes(&self) -> u64 {
+        self.measured_bytes.saturating_mul(6) / 5
+    }
+    pub fn fits(&self, budget: u64, context: u32) -> bool {
+        self.memory_bytes().saturating_add(
+            u64::from(context.saturating_sub(MEASURED_CONTEXT)) * KV_BYTES_PER_TOKEN,
+        ) <= budget
+    }
+}
+const CONVERSATION: &[Capability] = &[Capability::Text, Capability::Reasoning, Capability::Vision];
+/// Conjunto inicial aprovado: revisões fixas e verificação SHA-256.
+pub fn catalog() -> &'static [CatalogEntry] {
+    &[
+        CatalogEntry {
+            id: "gemma-4-e4b",
+            name: "Gemma 4 E4B",
+            summary: "Modelo principal: conversa, raciocínio e imagens em português.",
+            capabilities: CONVERSATION,
+            measured_bytes: 7_464_751_104,
+            files: &[
+                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf", bytes: 5_154_941_280, sha256: "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee", projector: false },
+                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B-it-mmproj.gguf", bytes: 991_552_256, sha256: "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578", projector: true },
+            ],
+        },
+        CatalogEntry {
+            id: "qwen3.5-4b",
+            name: "Qwen3.5 4B",
+            summary: "Alternativa leve para computadores com menos memória.",
+            capabilities: CONVERSATION,
+            measured_bytes: 4_748_759_040,
+            files: &[
+                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/Qwen3.5-4B-Q4_K_M.gguf", bytes: 3_032_091_584, sha256: "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14", projector: false },
+                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/mmproj-Qwen3.5-4B-Q8_0.gguf", bytes: 366_894_560, sha256: "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654", projector: true },
+            ],
+        },
+    ]
+}
+/// Melhor entrada que cabe no orçamento: a de maior consumo medido.
+pub fn recommended(budget: u64, context: u32) -> Option<&'static CatalogEntry> {
+    catalog()
+        .iter()
+        .filter(|entry| entry.fits(budget, context))
+        .max_by_key(|entry| entry.measured_bytes)
 }
 
 pub fn request_kind(text: &str, image: bool) -> Capability {
@@ -82,14 +172,20 @@ pub fn choose(
     let mut candidates: Vec<_> = models
         .iter()
         .filter(|m| {
-            m.capability == kind
+            m.supports(kind)
                 && m.path.is_file()
                 && m.estimated_memory(context) <= budget
                 && selected.map(|id| id == m.id).unwrap_or(true)
         })
         .cloned()
         .collect();
-    candidates.sort_by_key(|m| m.bytes);
+    if matches!(kind, Capability::Text | Capability::Reasoning | Capability::Vision) {
+        // Conversa: o maior modelo que cabe tende a responder melhor.
+        candidates.sort_by_key(|m| std::cmp::Reverse(m.bytes));
+    } else {
+        // Voz e memória mantêm a escolha estável; vetores são separados por modelo.
+        candidates.sort_by_key(|m| m.bytes);
+    }
     candidates.into_iter().next().ok_or_else(||"Nenhum modelo deste tipo cabe no orçamento atual. Importe um modelo compatível ou ajuste o perfil.".into())
 }
 
@@ -203,10 +299,13 @@ pub fn import(
                 .into_owned(),
             name,
             capability,
+            capabilities: Vec::new(),
             path,
             companion,
             bytes: total,
             sha256: checksum,
+            catalog: None,
+            memory_bytes: None,
         })
     })();
     if result.is_err() {
@@ -234,6 +333,74 @@ mod tests {
             gpus: vec![],
         };
         assert_eq!(memory_budget(&empty, &Preferences::initial()), 0);
+    }
+    fn model(id: &str, file: &Path, bytes: u64, capabilities: Vec<Capability>, projector: bool) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            capability: Capability::Text,
+            capabilities,
+            path: file.into(),
+            companion: projector.then(|| file.into()),
+            bytes,
+            sha256: String::new(),
+            catalog: None,
+            memory_bytes: None,
+        }
+    }
+    #[test]
+    fn legacy_records_keep_their_single_capability() {
+        let legacy: Model = serde_json::from_str(
+            r#"{"id":"a","name":"a","capability":"reasoning","path":"/x","companion":null,"bytes":1,"sha256":""}"#,
+        )
+        .unwrap();
+        assert!(legacy.supports(Capability::Reasoning));
+        assert!(!legacy.supports(Capability::Text));
+        assert!(legacy.catalog.is_none() && legacy.memory_bytes.is_none());
+    }
+    #[test]
+    fn conversation_prefers_largest_fitting_model_and_vision_requires_projector() {
+        let root = std::env::temp_dir().join(format!("ayla-choose-{}", store::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("m.gguf");
+        fs::write(&file, b"GGUF").unwrap();
+        let all = vec![Capability::Text, Capability::Reasoning, Capability::Vision];
+        let models = vec![
+            model("small", &file, 1 << 30, all.clone(), false),
+            model("large", &file, 3 << 30, all.clone(), true),
+            model("huge", &file, 20 << 30, all, true),
+        ];
+        let budget = 8 << 30;
+        assert_eq!(choose(&models, Capability::Text, budget, 2048, None).unwrap().id, "large");
+        assert_eq!(choose(&models, Capability::Reasoning, budget, 2048, None).unwrap().id, "large");
+        let only_small = &models[..1];
+        assert!(choose(only_small, Capability::Vision, budget, 2048, None).is_err());
+        assert_eq!(choose(&models, Capability::Text, budget, 2048, Some("small")).unwrap().id, "small");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn measured_memory_replaces_generic_estimate() {
+        let mut m = model("m", Path::new("/x"), 5 << 30, vec![], false);
+        assert_eq!(m.estimated_memory(2048), (10 << 30) + 2048 * KV_BYTES_PER_TOKEN);
+        m.memory_bytes = Some(7 << 30);
+        assert_eq!(m.estimated_memory(8192), 7 << 30);
+        assert_eq!(m.estimated_memory(9192), (7 << 30) + 1000 * KV_BYTES_PER_TOKEN);
+    }
+    #[test]
+    fn catalog_is_pinned_verified_and_recommends_by_budget() {
+        for entry in catalog() {
+            assert!(entry.files.iter().filter(|f| f.projector).count() <= 1);
+            for file in entry.files {
+                assert!(file.url.starts_with("https://huggingface.co/"));
+                let revision = file.url.split("/resolve/").nth(1).unwrap().split('/').next().unwrap();
+                assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
+                assert!(file.sha256.len() == 64 && file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+                assert!(file.bytes > 0);
+            }
+        }
+        assert_eq!(recommended(15 << 30, 8192).unwrap().id, "gemma-4-e4b");
+        assert_eq!(recommended(7 << 30, 8192).unwrap().id, "qwen3.5-4b");
+        assert!(recommended(4 << 30, 8192).is_none());
     }
     #[test]
     fn invalid_import_does_not_touch_source_or_leave_partial_assets() {

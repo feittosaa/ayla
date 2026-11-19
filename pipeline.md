@@ -96,7 +96,9 @@ A Moneta pode evoluir independentemente. O contrato mínimo, a disponibilidade d
 - [x] Perfil Ayla automático por padrão: orçamento acompanha hardware, seleção de modelo acompanha pedido; escolhas manuais existentes são preservadas e podem ser restauradas ao automático.
 - [x] Preferência de uso (Automático, Leve, Moderado, Máximo) visível fora das opções avançadas. Modelos, componentes, ferramentas e limites técnicos em opções avançadas recolhidas. Controles técnicos por resposta também recolhidos; revisão de cloud continua visível quando aplicável.
 - [x] Personalidade em configuração simples: texto livre (até 4.000 caracteres), persistência e restauração da original. Aplicada nas próximas respostas locais/cloud; cloud exige revisão do pedido e da personalidade e mantém veto de privacidade. Mudança após revisão invalida envio.
-- [ ] Perfil principal pronto numa instalação nova: definir/homologar conjunto inicial de modelos e entrega automática com confirmação de download. Seleção automática dos modelos já instalados está implementada; instalação manual não atende sozinha à experiência principal pedida.
+- [x] Perfil principal pronto numa instalação nova. Numa instalação sem modelo, a conversa recomenda o melhor modelo do catálogo que cabe no orçamento e mostra o tamanho total para confirmação. Ao confirmar, baixa e verifica o llama.cpp (Vulkan só com GPU dedicada e carregador Vulkan; senão CPU) e o modelo, com progresso e interrupção. A tela Modelos também lista o catálogo. Um arquivo serve várias capacidades, e a conversa escolhe o maior modelo que cabe; voz e memória continuam com a escolha estável. O catálogo usa a memória medida mais 20% de margem. O contexto padrão é 8192, com preferências na versão 2.
+  - **Aceite:** 27 testes Rust (2 ignorados por padrão), incluindo registro legado, seleção, catálogo fixado, instalação com servidor local (sucesso, hash divergente e cancelamento sem resíduos), migração de preferências e flag de raciocínio. Também passaram 21 testes Python, o cliente SSE, TypeScript estrito, build Vite, lint e `git diff --check`. As quatro URLs fixadas conferem em tamanho e SHA-256. No desktop, com dados temporários em `/tmp/ayla-setup-smoke`, o usuário confirmou o download de 6,1 GB e conversou com texto e imagem. O registro ficou com uma única cópia do Gemma, com texto, raciocínio e visão, hashes conferidos e llama-vulkan instalado. Primeiro trecho em 2,4 s, com carga, e 1,6 s.
+  - **Limites:** sem retomada de download interrompido e sem checagem prévia de espaço em disco; a falta de espaço aparece como erro de escrita. O orçamento é calculado sobre a RAM, mas boa parte do modelo vai para a VRAM. No perfil automático, máquinas com menos de 12 GB de RAM (25%) não comportam nenhum modelo do catálogo. Encerrar o app por sinal deixou o `llama-server` órfão (o fechamento normal já estava validado); pendente tratar.
 **Validação deste refinamento:** 20 testes Rust (2 de modelos/rede ignorados por padrão), 21 testes Python, cliente SSE, TypeScript estrito, build Vite, lint JS e `git diff --check` passaram. Revisão em navegador com IPC simulado: conversa, configurações, preferência fora das opções avançadas, salvar perfil, editar/restaurar personalidade, modelos, voz/memória e confirmação de operação. Tema padronizado com cores explícitas para campos, seleções, ações, foco e estados desabilitados. Essa revisão visual não é uma nova homologação nativa de inferência.
 
 - [x] Inspeção visual em navegador com fixtures deste refinamento; aceite desktop nativo anterior preservado como evidência separada.
@@ -115,6 +117,30 @@ Shortlist inicial reafirmada pelo usuário por imagem: Qwen3.5 0.8B, 4B e 9B; Ge
 | GPT-OSS 20B | Raciocínio mais exigente | Cerca de 12 GB; distinguir MXFP4 de Q4 |
 
 **Verificação em 19/11/2026:** os tamanhos citados existem nas fontes oficiais. Os valores acima são estimativas iniciais do usuário, não medições da Ayla. RAM/VRAM total inclui contexto, buffers e componentes multimodais. O “E” de Gemma indica parâmetros efetivos, não o tamanho completo dos pesos. Google lista referências Q4_0 de 4,5 GB para E4B e 6,7 GB para 12B, com condições próprias; a OpenAI referencia sistemas com pelo menos 16 GB para GPT-OSS 20B em MXFP4. Não comparar esses números como se medissem a mesma coisa.
+
+**Decisão de 19/11/2026:** próxima frente é o perfil principal pronto numa instalação nova, antes do P2. Benchmark autorizado com até ~17 GB em pasta temporária: Qwen3.5 0.8B, 4B e 9B e Gemma 4 E4B em Q4, de fontes oficiais, sem definir padrão nem chamar cloud. Gemma 4 12B e GPT-OSS 20B ficam para depois.
+
+**Benchmark preliminar de 19/11/2026.** Hardware: Ryzen 7 7800X3D, 30 GB de RAM, RX 9060 XT com 16 GB (Vulkan). Runtime llama.cpp b12531 gerenciado, com as flags da Ayla e perfil automático de 50%. Persona padrão, 7 prompts em PT-BR, uma execução por prompt e avaliação qualitativa. Arquivos em `/var/tmp/ayla-benchmark`, verificados por SHA-256.
+
+| Modelo (arquivo) | Fonte | GPU tg / CPU tg | Carga | VRAM / RSS | Qualidade observada |
+|---|---|---|---|---|---|
+| Qwen3.5 0.8B Q4_0 (0,56 GB) | ggml-org | 264 / 60 t/s | 0,5 s | 0,65 / 0,54 GiB | Inadequado em PT: errou o cálculo, alucinou e ignorou o JSON. |
+| Qwen3.5 4B Q4_K_M + mmproj Q8 (3,4 GB) | ggml-org | 78 / 11 t/s | 1,6 s | 3,4 / 0,8–1,0 GiB | Boa conversa e boa visão; cálculo certo; errou a correção gramatical; colocou texto de conversa dentro do JSON. |
+| Gemma 4 E4B QAT Q4_0 + mmproj (6,1 GB) | Google | 79 / 14 t/s | 1,7 s | 3,8 / 3,0 GiB | Melhor do conjunto: correção gramatical certa, JSON correto, visão correta e raciocínio curto (~750 tokens). Verboso, com muitos emojis por causa da persona. |
+| Qwen3.5 9B Q4_K_M (5,7 GB) | Unsloth (terceiro, autorizado) | 49 / 8 t/s | 2,1 s | 5,0 / 0,8 GiB | Sem ganho sobre o 4B nestes prompts; errou a gramática e escreveu "remetete" no JSON. Visão não testada. |
+
+- **Raciocínio:** com o contexto padrão de 2048 (máximo de 1024 tokens de resposta), o Qwen 4B e o 9B esgotaram o limite antes de responder. Com 8192, responderam certo, mas após 2.250 e 2.745 tokens (28 s e 51 s até a resposta). O Gemma E4B levou 6,6 s. Nos Qwen, o contexto de 8192 custou pouca VRAM a mais: +0,1 GiB no 4B e +0,6 GiB no 9B.
+- **Correção aplicada:** o Qwen3.5 raciocina por padrão, mas a Ayla não enviava `enable_thinking` e descartava `reasoning_content`, então pedidos de texto também raciocinavam sem exibir nada. Agora o modo só liga em pedidos roteados para raciocínio. Há teste em `runtime.rs`.
+- **Lacunas encontradas:** `models::choose` escolhe o *menor* modelo que cabe no orçamento, então com 0.8B e 4B instalados usaria o 0.8B. O registro também aceita uma única capacidade por arquivo, o que obrigaria importar o mesmo Gemma três vezes (texto, raciocínio e visão).
+- **Limites:** amostra pequena, uma execução por prompt e avaliação feita pelo agente. Não mede transcrição, síntese nem embeddings. Os números de GPU valem para este hardware.
+
+**Decisões após o benchmark (19/11/2026):**
+
+- O catálogo inicial terá Gemma 4 E4B QAT como principal (texto, raciocínio e visão) e Qwen3.5 4B como alternativa leve. Qwen 0.8B e 9B ficam fora.
+- Os arquivos vêm do Hugging Face, com revisão e hash fixos, e só são baixados após confirmação do tamanho.
+- Um arquivo de modelo pode declarar várias capacidades. Os modelos já registrados são migrados com a capacidade que tinham.
+- O contexto padrão passa a ser 8192 tokens, preservando valores escolhidos pelo usuário.
+- A instalação principal cobre só conversa e visão. Voz e memória semântica serão oferecidas no primeiro uso, depois de um benchmark próprio.
 
 **Próximo aceite:** confirmar arquivo, quantização, licença, compatibilidade, qualidade em português, latência e memória no hardware alvo antes de recomendar downloads. A shortlist não cobre modelos especializados de transcrição, síntese ou embeddings. Não baixar a lista inteira: a autorização atual cobre somente até 1,5 GB de modelos temporários de validação do P1.
 
