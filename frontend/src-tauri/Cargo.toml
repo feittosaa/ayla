@@ -6,7 +6,7 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.89"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,3 +23,17 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.10.0", features = [] }
 tauri-plugin-log = "2"
+
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "stream", "rustls"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["fs", "process", "sync", "io-util", "time", "macros"] }
+rusqlite = { version = "0.43", features = ["bundled", "backup"] }
+sha2 = "0.10"
+tauri-plugin-dialog = "2"
+flate2 = "1"
+tar = "0.4"
+bzip2 = "0.6"
+tokio-util = { version = "0.7", features = ["rt"] }
+base64 = "0.22"
+hound = "3.5"
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
