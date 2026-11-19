@@ -21,9 +21,13 @@
 - UI, automações e IA devem usar os mesmos serviços quando aplicável.
 - Moneta e outros projetos separados entram por contratos explícitos; não presumir API, estado ou propriedade dos dados.
 - Não adicionar infraestrutura ou abstrações sem necessidade da entrega em andamento.
-- Desempenho é requisito de arquitetura. Rust é uma das linguagens principais; discutir a divisão Rust/Python antes de expandir o núcleo, com medições de latência, CPU, RAM e uso de GPU quando aplicável.
+- Desempenho é requisito de arquitetura. Rust é uma das linguagens principais; núcleo em Rust e Python apenas em adaptadores auxiliares necessários, com medições de latência, CPU, RAM e uso de GPU quando aplicável.
+- Experiência principal: abrir diretamente na conversa, sem aba Início nem criação manual obrigatória de conversa. Perfil Ayla automático é o padrão. Preferência de uso e personalidade ficam visíveis em Configurações; modelos, componentes e limites técnicos ficam em Opções avançadas. Não exigir conhecimento técnico no fluxo principal.
+- Personalidade é uma configuração simples e independente de modelos, editável e restaurável ao padrão; jamais altera controles de privacidade. Para cloud, incluir a personalidade na revisão explícita do payload.
 - Linux é o primeiro alvo; portar para Windows depois. Minimizar atrito técnico para o usuário final.
-- Não fixar um modelo único. A direção é selecionar modelos por pedido, com tipos opcionais escolhidos na instalação e perfis leve, moderado e máximo para diferentes hardwares. Catálogo e regras ainda serão decididos com o usuário.
+- Não fixar um modelo único. A direção é selecionar modelos por pedido, com tipos opcionais escolhidos na instalação e perfis leve, moderado e máximo para diferentes hardwares. Importação livre desde P1; shortlist é sugestão, não restrição. Perfis são orçamentos ajustáveis de RAM (25%, 50%, 75%), com reserva para o sistema.
+- Runtime local gerenciado: llama.cpp para texto/raciocínio/visão/embeddings, whisper.cpp para transcrição e sherpa-onnx para síntese. Modelos são sempre opcionais. Instalação Linux primeiro; Windows depois.
+- Cloud: modos configuráveis; dados sensíveis ou duvidosos ficam locais em todos os modos. Envio exige revisão do conteúdo público e consentimento aplicável; sugestões da IA não autorizam envio. Não anexar histórico, órgãos ou arquivos automaticamente.
 - Não enviar dados, disparar chamadas cloud pagas ou conectar contas reais durante validações sem autorização específica.
 
 ## Execução e preservação

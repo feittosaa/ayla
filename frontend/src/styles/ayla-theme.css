@@ -1,4 +1,11 @@
 :root {
+  color-scheme: dark;
+  --ayla-control: #242936;
+  --ayla-hover: #303848;
+  --ayla-selected: #33271e;
+  --ayla-on-accent: #201308;
+  --ayla-disabled: #a0a8b8;
+  --ayla-error: #ffb4a2;
   /* 🌞 Cores principais */
   --ayla-bg: #0f1117;
   --ayla-panel: #171923;
@@ -10,7 +17,7 @@
   --ayla-text-soft: #a8a8b3;
 
   /* 🌑 Bordas */
-  --ayla-border: #2a2d3a;
+  --ayla-border: #485166;
 
   /* ✨ Fontes */
   --ayla-font-main: 'Inter', system-ui, sans-serif;
