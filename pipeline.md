@@ -142,6 +142,8 @@ Shortlist inicial reafirmada pelo usuário por imagem: Qwen3.5 0.8B, 4B e 9B; Ge
 - O contexto padrão passa a ser 8192 tokens, preservando valores escolhidos pelo usuário.
 - A instalação principal cobre só conversa e visão. Voz e memória semântica serão oferecidas no primeiro uso, depois de um benchmark próprio.
 
+**Benchmark de texto de 20/11/2026.** Rodada em CPU no Ryzen 7 7800X3D, com entradas frias de 4.096 e 7.168 tokens, continuação com cache e tarefas em português. O Qwen 9B acertou 4/4 turnos de JSON e 6/8 verificações SQL. O Qwen 4B fez 2/4 e 7/8, o Gemma E4B fez 0/4 e 6/8, e o Qwen 0.8B zerou ambos. Com 7.168 tokens frios, o 9B levou 84,86 s até o primeiro token e o 4B levou 61,58 s. Com cache, os tempos caíram para 0,59 s e 0,38 s. Pendente repetir na RX 9060 XT com Vulkan antes de rever o catálogo. [Método, resultados brutos e reprodução](benchmarks/README.md)
+
 **Próximo aceite:** confirmar arquivo, quantização, licença, compatibilidade, qualidade em português, latência e memória no hardware alvo antes de recomendar downloads. A shortlist não cobre modelos especializados de transcrição, síntese ou embeddings. Não baixar a lista inteira: a autorização atual cobre somente até 1,5 GB de modelos temporários de validação do P1.
 
 Fontes: [Qwen 0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B), [Qwen 4B](https://huggingface.co/Qwen/Qwen3.5-4B), [Qwen 9B](https://huggingface.co/Qwen/Qwen3.5-9B), [Gemma 4](https://ai.google.dev/gemma/docs/core), [GPT-OSS](https://deploymentsafety.openai.com/gpt-oss/architecture).
