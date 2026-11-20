@@ -32,6 +32,8 @@ pub fn artifacts() -> Vec<Artifact> {
     vec![
  Artifact{id:"llama-vulkan",label:"Texto, raciocínio, visão e memória · GPU Linux",bytes:36968023,url:"https://github.com/ggml-org/llama.cpp/releases/download/b12531/llama-b12531-bin-ubuntu-vulkan-x64.tar.gz",sha256:"38eaab84338b9c7ec6be450856e0add797526d20e37c28b5c4430cadde8f1a9b",binary:"llama-server"},
  Artifact{id:"llama-cpu",label:"Texto, raciocínio, visão e memória · CPU",bytes:23901164,url:"https://github.com/ggml-org/llama.cpp/releases/download/b12531/llama-b12531-bin-ubuntu-x64.tar.gz",sha256:"5c1bf73c8c338d7934bbe7b43827496685f69b2e2afce2de9c536f755dd94a20",binary:"llama-server"},
+ // Build estático do ffmpeg 7.0.2 (johnvansickle) publicado pelo projeto ffmpeg-static; binário único em .gz.
+ Artifact{id:"ffmpeg",label:"Leitura de áudio, vídeo e GIF",bytes:29354986,url:"https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64.gz",sha256:"bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa",binary:"ffmpeg"},
  Artifact{id:"whisper",label:"Transcrição de voz",bytes:10364195,url:"https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-x64.tar.gz",sha256:"a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",binary:"whisper-cli"},
 ]
 }
@@ -97,6 +99,16 @@ fn extract(
         }
     }
     Ok(())
+}
+
+/// Binário único compactado com gzip (ex.: ffmpeg estático): descompacta e torna executável.
+fn unpack_binary(archive: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut reader = flate2::read::GzDecoder::new(fs::File::open(archive)?).take(512 * 1024 * 1024);
+    let mut file = fs::File::create(destination)?;
+    io::copy(&mut reader, &mut file)?;
+    file.sync_all()?;
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o755))
 }
 
 /// Cache local opcional de downloads (desenvolvimento e testes): `AYLA_MODEL_CACHE`.
@@ -274,7 +286,9 @@ pub async fn install(
         let source = temporary.clone();
         let dest = staging.clone();
         let cancellation = cancel.clone();
-        tokio::task::spawn_blocking(move || extract(&source, &dest, &cancellation))
+        let single = artifact.url.ends_with(".gz") && !artifact.url.ends_with(".tar.gz");
+        let binary = artifact.binary;
+        tokio::task::spawn_blocking(move || if single { unpack_binary(&source, &dest.join(binary)) } else { extract(&source, &dest, &cancellation) })
             .await
             .map_err(|_| "Falha ao extrair componente")?
             .map_err(|_| "Pacote inválido ou instalação interrompida")?;
@@ -746,7 +760,7 @@ impl Runtime {
             .map_err(|_| "Não foi possível iniciar a transcrição")?;
         let start = Instant::now();
         loop {
-            if cancel.is_cancelled() || start.elapsed() > Duration::from_secs(180) {
+            if cancel.is_cancelled() || start.elapsed() > Duration::from_secs(900) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("Tarefa de voz interrompida".into());
@@ -762,6 +776,40 @@ impl Runtime {
         }
     }
 }
+impl Runtime {
+    /// Caminho de um motor instalado (ex.: ffmpeg), se houver.
+    pub fn tool(&self, component: &str, binary: &str) -> Option<PathBuf> {
+        find_binary(&self.root.join(component), binary)
+    }
+}
+
+/// Roda uma ferramenta local (ex.: ffmpeg) com limite de tempo e cancelamento;
+/// devolve a saída de erro, onde o ffmpeg informa duração e problemas.
+pub async fn run_tool(mut command: Command, cancel: &CancellationToken, limit: Duration) -> Result<(bool, String), String> {
+    command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|_| "Não foi possível iniciar o leitor de arquivos")?;
+    let mut stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(pipe) = stderr.as_mut() {
+            let _ = pipe.take(256 * 1024).read_to_string(&mut text);
+        }
+        text
+    });
+    let start = Instant::now();
+    loop {
+        if cancel.is_cancelled() || start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(if cancel.is_cancelled() { "Tarefa interrompida".into() } else { "O arquivo demorou demais para ser lido".into() });
+        }
+        if let Some(status) = child.try_wait().map_err(|_| "Falha no leitor de arquivos")? {
+            return Ok((status.success(), reader.join().unwrap_or_default()));
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.stop_all();

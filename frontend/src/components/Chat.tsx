@@ -1,8 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
-import { ArrowUpIcon, CopyIcon, MicIcon, PaperclipIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
+import { asksForImage } from '../services/Intent';
+import { ArrowUpIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
+import Markdown from './Markdown';
+import FilePreview from './FilePreview';
 import './Chat.css';
 
 type Props = {
@@ -16,13 +20,21 @@ type Props = {
   onBusy: (busy: boolean) => void;
   /** Botão para mostrar a barra do espaço quando ela estiver recolhida. */
   onShowSidebar?: () => void;
+  /** Conversa visível: só ela recebe arquivos arrastados para a janela. */
+  active: boolean;
+  /** Abre uma seção das Configurações (ex.: "nuvem"). */
+  onOpenSettings?: (section: string) => void;
 };
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar }: Props) {
+export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, onOpenSettings }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(''); const [kind, setKind] = useState<Capability | 'auto'>('auto');
-  const [model, setModel] = useState(''); const [image, setImage] = useState<string | null>(null);
+  const [model, setModel] = useState(''); const [attachments, setAttachments] = useState<FileInfo[]>([]);
+  const [adding, setAdding] = useState(false); const [dragging, setDragging] = useState(false); const [status, setStatus] = useState('');
+  /** Escolha explícita de criar imagem; `null` = seguir a frase do pedido. */
+  const [imageChoice, setImageChoice] = useState<boolean | null>(null);
+  const [titleDraft, setTitleDraft] = useState<string | null>(null);
   const [source, setSource] = useState<'local' | 'cloud'>('local');
   const [sensitivity, setSensitivity] = useState<Sensitivity>('uncertain');
   const [reviewed, setReviewed] = useState(false); const [error, setError] = useState('');
@@ -51,7 +63,14 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   // Primeiro preparo: conversa, memória (se ligada) e microfone (padrão), num só download.
   const firstSetup = [suggested, snapshot.preferences.memory_auto ? memoryEntry : undefined, ...(snapshot.preferences.voice !== false ? snapshot.catalog.filter(entry => entry.capabilities.includes('transcription')) : [])]
     .reduce((sum, entry) => sum + (entry && !entry.installed ? entry.download_bytes : 0), 0);
-  const canSend = !busy && listening === 'idle' && Boolean(input.trim()) && (!cloud || reviewed);
+  // Criar imagem só quando a pessoa pede: botão ou frase explícita ("gere uma imagem de…").
+  const asksImage = asksForImage(input);
+  const image = (imageChoice ?? asksImage) && mode !== 'local_only';
+  const imageProvider = snapshot.preferences.image_provider;
+  const canSend = image
+    ? !busy && !adding && listening === 'idle' && Boolean(input.trim()) && reviewed && Boolean(imageProvider && snapshot.preferences.image_model)
+    : !busy && !adding && listening === 'idle' && Boolean(input.trim() || attachments.length) && (!cloud || reviewed);
+  const visual = attachments.some(file => file.kind === 'image' || file.kind === 'gif' || file.kind === 'video');
 
   useEffect(() => {
     if (!conversationId) { setLearned([]); return; }
@@ -90,9 +109,63 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     return () => clearInterval(timer);
   }, [listening]);
 
+  // Arquivos ficam neste computador: cópia guardada pela Ayla, nunca enviada à nuvem.
+  async function attachPaths(paths: string[]) {
+    if (!paths.length) return;
+    if (cloud) { setError('Arquivos ficam neste computador. Responda localmente para usá-los.'); return; }
+    setError(''); setAdding(true);
+    let count = attachments.length;
+    try {
+      for (const path of paths) {
+        if (count >= 5) { setError('Envie até 5 arquivos por mensagem.'); break; }
+        const file = await native<FileInfo>('add_file', { path, project: project?.id ?? null });
+        count += 1; setAttachments(prev => [...prev, file]);
+      }
+    } catch (e) { setError(errorText(e)); } finally { setAdding(false); }
+  }
+  const attachLatest = useRef(attachPaths);
+  useEffect(() => { attachLatest.current = attachPaths; });
+  // Arrastar arquivos para a janela anexa à conversa visível.
+  useEffect(() => {
+    if (!visible) return;
+    let stop: (() => void) | undefined; let gone = false;
+    void getCurrentWebview().onDragDropEvent(event => {
+      const kind = event.payload.type;
+      if (kind === 'enter' || kind === 'over') setDragging(true);
+      else if (kind === 'leave') setDragging(false);
+      else if (kind === 'drop') { setDragging(false); void attachLatest.current(event.payload.paths); }
+    }).then(unlisten => { if (gone) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { gone = true; stop?.(); setDragging(false); };
+  }, [visible]);
+  function removeAttachment(file: FileInfo) {
+    setAttachments(prev => prev.filter(item => item.id !== file.id));
+    void native('remove_file', { id: file.id }).catch(() => {});
+  }
+  async function createImage() {
+    const prompt = input.trim();
+    if (!prompt || active.current) return;
+    const id = taskId(); active.current = id; setBusy(true); setError(''); follow.current = true;
+    let current = conversation;
+    if (!current) {
+      try { current = await native<Conversation>('create_conversation', { project: project?.id ?? null }); created.current = current.id; onConversation(current); }
+      catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
+    }
+    setInput(''); setImageChoice(null);
+    setMessages(prev => [...prev, { role: 'user', content: prompt, complete: true }, { role: 'assistant', content: '', complete: false }]);
+    setStatus('Criando a imagem na nuvem…');
+    try {
+      const reply = await native<{ content: string; attachments: FileInfo[] }>('generate_image', { request: { id, conversation: current.id, prompt, sensitivity, reviewed } });
+      setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { role: 'assistant', content: reply.content, complete: true, attachments: reply.attachments } : m));
+    } catch (e) {
+      // Nada foi salvo: devolve o pedido para a caixa de mensagem.
+      setError(errorText(e)); setMessages(prev => prev.slice(0, -2)); setInput(prompt); setImageChoice(true);
+    } finally { active.current = null; setBusy(false); setReviewed(false); setStatus(''); await refresh(); }
+  }
   async function send(spokenText?: string) {
-    const text = (spokenText ?? input).trim();
-    if (!text || active.current) return;
+    if (image && spokenText === undefined) { await createImage(); return; }
+    const typed = (spokenText ?? input).trim();
+    const text = typed || (attachments.length ? (attachments.length === 1 ? 'Veja o arquivo anexado.' : 'Veja os arquivos anexados.') : '');
+    if (!text || active.current || adding) return;
     const id = taskId(); active.current = id; setBusy(true); setError(''); follow.current = true;
     let current = conversation;
     if (!current) {
@@ -100,19 +173,22 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
     }
     const message = text; if (spokenText === undefined) setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: message, complete: true }, { role: 'assistant', content: '', complete: false }]);
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, image, sensitivity, reviewed, request_cloud: source === 'cloud' };
+    const sent = attachments; setAttachments([]);
+    setMessages(prev => [...prev, { role: 'user', content: message, complete: true, attachments: sent }, { role: 'assistant', content: '', complete: false }]);
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: source === 'cloud' };
     try {
       await nativeTask<void>('chat', { request }, event => {
         if (event.type === 'routing') setRouting(event.text || '');
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
         if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
         if (event.type === 'memory_error') setError(`Não consegui atualizar a memória: ${event.text}`);
+        if (event.type === 'status') setStatus(event.text || '');
+        if (event.type === 'token' && event.text) setStatus('');
         if (event.type === 'token' && event.text) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; next[next.length - 1] = { ...last, content: last.content + event.text }; return next; });
       });
       setMessages(prev => prev.map((m, index) => index === prev.length - 1 ? { ...m, complete: true } : m));
     } catch (e) { setError(errorText(e)); }
-    finally { active.current = null; setBusy(false); setReviewed(false); setImage(null); await refresh(); }
+    finally { active.current = null; setBusy(false); setReviewed(false); setStatus(''); await refresh(); }
   }
   async function listen_() {
     if (listening === 'recording') { recorder.current?.stop(); return; }
@@ -147,17 +223,35 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     try { await native('conversation_consent', { id: conversation.id, allowed }); onConversation({ ...conversation, cloud_consent: allowed }); }
     catch (e) { setError(errorText(e)); }
   }
-  // Imagem colada (Ctrl+V): vira um anexo local, como uma imagem escolhida.
+  // Colar (Ctrl+V) imagens e outros arquivos: viram anexos locais, como os escolhidos.
   function paste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const file = Array.from(event.clipboardData.items).find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile();
-    if (!file) return;
+    const pasted = Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => file !== null);
+    if (!pasted.length) return;
     event.preventDefault();
-    if (cloud) { setError('Imagens ficam neste computador. Responda localmente para usar a imagem.'); return; }
-    setError('');
-    void file.arrayBuffer()
-      .then(buffer => native<string>('paste_image', { data: base64(new Uint8Array(buffer)) }))
-      .then(setImage)
-      .catch(e => setError(errorText(e)));
+    if (cloud) { setError('Arquivos ficam neste computador. Responda localmente para usá-los.'); return; }
+    setError(''); setAdding(true);
+    void (async () => {
+      try {
+        for (const file of pasted.slice(0, Math.max(0, 5 - attachments.length))) {
+          const data = base64(new Uint8Array(await file.arrayBuffer()));
+          const saved = await native<FileInfo>('add_file_data', { name: file.name || 'colado.png', data, project: project?.id ?? null });
+          setAttachments(prev => [...prev, saved]);
+        }
+      } catch (e) { setError(errorText(e)); } finally { setAdding(false); }
+    })();
+  }
+  // Primeira abertura: 100% local ou também nuvem (com contas conectadas em Configurações).
+  async function chooseCloud(useCloud: boolean) {
+    try {
+      await savePreferences({ ...snapshot.preferences, cloud_asked: true, usage_mode: useCloud ? 'explicit_request' : 'local_only' });
+      await refresh();
+      if (useCloud) onOpenSettings?.('nuvem');
+    } catch (e) { setError(errorText(e)); }
+  }
+  async function saveTitle() {
+    const title = (titleDraft ?? '').trim(); setTitleDraft(null);
+    if (!conversation || !title || title === conversation.title) return;
+    try { await native('rename_conversation', { id: conversation.id, title }); onConversation({ ...conversation, title }); } catch (e) { setError(errorText(e)); }
   }
   async function copy(text: string, index: number) {
     try { await navigator.clipboard.writeText(text); setCopied(index); setTimeout(() => setCopied(c => c === index ? null : c), 1500); }
@@ -166,9 +260,13 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
 
   return <>
     <main className="chat-main">
+      {dragging && <div className="drop-overlay" aria-hidden="true"><FileIcon size={28} /><span>Solte para anexar · fica neste computador</span></div>}
       <header className="chat-header">
         {onShowSidebar && <button className="icon-button" aria-label="Mostrar a barra lateral" onClick={onShowSidebar}><SidebarIcon /></button>}
-        <h1>{conversation?.title || 'Nova conversa'}</h1>
+        {titleDraft !== null && conversation
+          ? <form className="title-edit" onSubmit={e => { e.preventDefault(); void saveTitle(); }}><input autoFocus aria-label="Título da conversa" value={titleDraft} maxLength={120} onChange={e => setTitleDraft(e.target.value)} onBlur={() => void saveTitle()} onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setTitleDraft(null); } }} /></form>
+          : <h1 onDoubleClick={() => { if (conversation) setTitleDraft(conversation.title); }}>{conversation?.title || 'Nova conversa'}</h1>}
+        {conversation && titleDraft === null && <button className="icon-button" aria-label="Renomear conversa" title="Renomear" onClick={() => setTitleDraft(conversation.title)}><PencilIcon size={16} /></button>}
         <span className="chip"><span className="dot" aria-hidden="true" />{cloud ? 'Nuvem' : 'Local'}</span>
       </header>
 
@@ -182,14 +280,20 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
               : suggested ? <><p>{setup.error ? `O preparo não terminou: ${setup.error}` : setup.cancelled ? 'Preparo interrompido.' : 'A Ayla precisa de um modelo de IA para conversar sem internet.'} Recomendado para o seu computador: <b>{suggested.name}</b>.</p><button className="primary-action" onClick={start}>Preparar a Ayla · {formatBytes(firstSetup)}</button></>
               : <p>Os modelos recomendados não cabem na memória livre agora (disponível: {formatBytes(snapshot.memory_budget_bytes)}). Feche alguns programas, escolha uma preferência de uso maior em Configurações ou importe um modelo menor nas opções avançadas.</p>}
           </section>}
+          {!messages.length && !project && !snapshot.preferences.cloud_asked && <section className="setup-card" aria-label="Local ou nuvem">
+            <h2>Como a Ayla deve funcionar?</h2>
+            <p>Por padrão, tudo fica neste computador. Se quiser, conecte suas contas de IA na nuvem (ChatGPT, Claude, Gemini e outras) para os pedidos que você revisar e liberar. Dá para mudar depois em Configurações.</p>
+            <div className="button-row"><button className="primary-action" onClick={() => void chooseCloud(false)}>Ficar 100% local</button><button onClick={() => void chooseCloud(true)}>Também usar a nuvem</button></div>
+          </section>}
           {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><button className="primary-action" onClick={start}>Ativar memória · {formatBytes(memoryEntry.download_bytes)}</button></section>}
 
           {messages.map((m, i) => m.role === 'user'
-            ? <div key={i} className="message user">{m.content}</div>
+            ? <div key={i} className="message user">{m.attachments?.length ? <span className="message-files">{m.attachments.map(file => file.kind === 'image' || file.kind === 'gif' ? <FilePreview key={file.id} file={file} /> : <span key={file.id} className="file-chip"><FileIcon size={14} />{file.name}</span>)}</span> : null}{m.content}</div>
             : <div key={i} className="message assistant">
                 <span className="orb small" aria-hidden="true" />
                 <div className="assistant-body">
-                  {m.content ? <div className="assistant-text">{m.content}</div> : busy && i === messages.length - 1 ? <p className="thinking">Pensando…</p> : null}
+                  {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
+                  {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
                   {!m.complete && m.content && !busy && <small className="incomplete">Resposta incompleta</small>}
                   {m.complete && m.content && <div className="message-actions"><button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button></div>}
                 </div>
@@ -206,11 +310,19 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
             <option value="auto">Automático pelo pedido</option>
             {(['text', 'reasoning', 'vision'] as Capability[]).map(k => <option key={k} value={k}>{labels[k]}</option>)}
           </select></label>
-          <label>Modelo<select value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Escolha automática</option>{snapshot.models.filter(m => image ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+          <label>Modelo<select value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Escolha automática</option>{snapshot.models.filter(m => visual ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
           <label>Onde responder<select value={source} disabled={busy || mode === 'local_only' || mode === 'cloud_only'} onChange={e => { setSource(e.target.value as 'local' | 'cloud'); setReviewed(false); }}><option value="local">Neste computador</option><option value="cloud">Na nuvem</option></select></label>
           {mode === 'per_conversation' && conversation && <label className="check"><input type="checkbox" checked={conversation.cloud_consent} disabled={busy} onChange={e => void consent(e.target.checked)} />Permitir nuvem nesta conversa, respeitando a privacidade de cada pedido</label>}
         </div>}
-        {cloud && <div className="cloud-review">
+        {image && <div className="cloud-review" aria-label="Revisão do pedido de imagem">
+          {imageProvider && snapshot.preferences.image_model ? <>
+            <b>Pedido da imagem que será enviado</b><pre>{input || 'Descreva a imagem.'}</pre>
+            <p>Só este texto vai para a plataforma de imagens ({snapshot.preferences.image_model}). Histórico, memórias e anexos ficam neste computador.</p>
+            <label>Privacidade do pedido<select value={sensitivity} disabled={busy} onChange={e => { setSensitivity(e.target.value as Sensitivity); setReviewed(false); }}><option value="uncertain">Ainda não verificada</option><option value="sensitive">Sensível · somente local</option><option value="public">Pública</option></select></label>
+            <label className="check"><input type="checkbox" checked={reviewed} disabled={busy || sensitivity !== 'public'} onChange={e => setReviewed(e.target.checked)} />Revisei o pedido e confirmo que é público.</label>
+          </> : <p>Para criar imagens, conecte uma conta que gere imagens (OpenAI, Google Gemini, xAI ou OpenRouter) e escolha o modelo. <button type="button" className="link-button" onClick={() => onOpenSettings?.('nuvem')}>Abrir Configurações › Nuvem</button></p>}
+        </div>}
+        {cloud && !image && <div className="cloud-review">
           <label>Privacidade do pedido<select value={sensitivity} disabled={busy} onChange={e => { setSensitivity(e.target.value as Sensitivity); setReviewed(false); }}><option value="uncertain">Ainda não verificada</option><option value="sensitive">Sensível · somente local</option><option value="public">Pública</option></select></label>
           <b>Personalidade que será enviada</b><pre>{snapshot.system_prompt}</pre><b>Seu pedido</b><pre>{input || 'Digite o pedido para revisar.'}</pre>
           <p>Somente a personalidade acima e este pedido. Histórico, memórias e anexos não serão enviados.</p>
@@ -218,13 +330,17 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         </div>}
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>
           {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}` : 'Transcrevendo…'}</p>}
-          {image && <p className="attachment">Imagem anexada · fica neste computador <button type="button" className="link-button" disabled={busy} onClick={() => setImage(null)}>Remover</button></p>}
+          {(attachments.length > 0 || adding) && <ul className="composer-files" aria-label="Arquivos anexados">
+            {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><button type="button" className="chip-remove" aria-label={`Remover ${file.name}`} disabled={busy} onClick={() => removeAttachment(file)}><CloseIcon size={14} /></button></li>)}
+            {adding && <li className="file-chip" role="status">Guardando…</li>}
+          </ul>}
           <textarea ref={field} rows={1} aria-label="Mensagem" value={input} readOnly={listening !== 'idle'} disabled={busy}
-            placeholder={listening === 'recording' ? 'Fale; o texto aparece aqui…' : 'Fale com a Ayla…'}
+            placeholder={listening === 'recording' ? 'Fale; o texto aparece aqui…' : image ? 'Descreva a imagem que você quer…' : 'Fale com a Ayla…'}
             onChange={e => { setInput(e.target.value); setReviewed(false); }} onPaste={paste}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (canSend) void send(); } }} />
           <div className="composer-actions">
-            <button type="button" className="icon-button" aria-label="Anexar imagem" disabled={busy || cloud || listening !== 'idle'} onClick={() => { void native<string | null>('pick_image').then(path => { if (path) setImage(path); }).catch(e => setError(errorText(e))); }}><PaperclipIcon /></button>
+            <button type="button" className="icon-button" aria-label="Anexar arquivos" title="Anexar arquivos (ou arraste e cole)" disabled={busy || cloud || adding || listening !== 'idle'} onClick={() => { void native<string[]>('pick_files').then(paths => attachPaths(paths)).catch(e => setError(errorText(e))); }}><PaperclipIcon /></button>
+            {mode !== 'local_only' && <button type="button" className="icon-button" aria-label="Criar imagem" title="Criar imagem (pela nuvem, depois da sua revisão)" aria-pressed={image} disabled={busy || listening !== 'idle'} onClick={() => { setImageChoice(!image); setReviewed(false); }}><ImageIcon /></button>}
             <button type="button" className="icon-button" aria-label="Ajustes desta resposta" aria-expanded={options} aria-controls="response-options" onClick={() => setOptions(o => !o)}><SlidersIcon /></button>
             <span className="spacer" />
             {canHear && !cloud && <button type="button" className={listening === 'recording' ? 'round-button accent' : 'round-button'} aria-label={listening === 'recording' ? 'Terminar de falar' : 'Falar com a Ayla'} aria-pressed={listening === 'recording'} disabled={busy || listening === 'transcribing'} onClick={() => void listen_()}>{listening === 'recording' ? <StopIcon /> : <MicIcon />}</button>}
@@ -233,7 +349,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
               : <button type="submit" className="round-button accent" aria-label="Enviar" disabled={!canSend}><ArrowUpIcon size={18} /></button>}
           </div>
         </form>
-        <p className="composer-note">{cloud ? 'Esta resposta usará a nuvem depois da sua revisão.' : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
+        <p className="composer-note">{image ? 'A imagem será criada na nuvem depois da sua revisão e ficará guardada nesta conversa.' : cloud ? (snapshot.preferences.cloud_provider === 'chatgpt' ? <>Usando o seu plano do ChatGPT, depois da sua revisão · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Esta resposta usará a nuvem depois da sua revisão.') : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
       </div>
     </main>
   </>;

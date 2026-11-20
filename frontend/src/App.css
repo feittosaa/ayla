@@ -61,9 +61,18 @@
 .app-shell .danger-action { background: #5c2620; border-color: #7a3229; color: #ffd9d2; font-weight: 600; }
 .app-shell .danger-action:hover:not(:disabled) { background: #6e2d25; border-color: #8f3b30; }
 
+/* Nuvem */
+.subgroup-title { font-size: 13px; font-weight: 600; color: var(--ayla-text-soft); margin-top: 8px; }
+.cloud-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.badge { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; background: var(--ayla-accent-ring); color: var(--ayla-accent-soft); font-size: 11px; font-weight: 600; vertical-align: middle; }
+.key-form { display: flex; flex-wrap: wrap; gap: 8px; }
+.key-form input { flex: 1 1 220px; min-width: 0; }
+.group-row select { max-width: 100%; }
+
 /* Projetos */
 .project-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .project-header h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.4px; overflow-wrap: anywhere; }
+.file-title { overflow-wrap: anywhere; }
 .about-text { white-space: pre-wrap; line-height: 1.6; overflow-wrap: anywhere; }
 .space-nav { display: flex; flex-direction: column; gap: 2px; }
 

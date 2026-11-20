@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import Space, { ProjectAvatar } from './components/Space';
+import Space from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
-import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, SettingsIcon } from './components/Icons';
-import { desktopSnapshot, supports, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot, type UsageMode } from './services/Desktop';
+import CloudSettings from './components/CloudSettings';
+import { ChevronLeftIcon, ChevronRightIcon, SettingsIcon } from './components/Icons';
+import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
 const profiles: { id: Profile | null; title: string; percent?: number; text: string }[] = [
@@ -14,7 +15,7 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' },
+  { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'avancado', label: 'Opções avançadas' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
@@ -23,7 +24,9 @@ type SpaceId = 'ayla' | 'settings' | string;
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
-  // Espaços já abertos continuam montados: conversas e respostas em andamento não se perdem.
+  // Projeto aberto dentro da Ayla; projetos já abertos continuam montados
+  // (conversas e respostas em andamento não se perdem ao trocar).
+  const [openProject, setOpenProject] = useState<string | null>(null);
   const [visited, setVisited] = useState<string[]>([]);
   const [creating, setCreating] = useState(false); const [projectName, setProjectName] = useState(''); const [projectAbout, setProjectAbout] = useState(''); const [projectError, setProjectError] = useState('');
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -39,7 +42,10 @@ export default function App() {
   useEffect(() => { if (!preparing) return; const timer = setInterval(() => void refresh(), 1000); return () => clearInterval(timer); }, [preparing, refresh]);
   function openSpace(id: SpaceId) {
     setSpace(id); setNotice(''); setError('');
-    if (id !== 'ayla' && id !== 'settings') setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
+  }
+  function showProject(id: string | null) {
+    setSpace('ayla'); setOpenProject(id);
+    if (id) setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
   }
   function go(next: Page, section?: string) {
     setSpace('settings'); setPage(next); setNotice(''); setError('');
@@ -65,7 +71,7 @@ export default function App() {
   function closeNewProject() { setCreating(false); setProjectName(''); setProjectAbout(''); setProjectError(''); }
   async function createProject(event: FormEvent) {
     event.preventDefault(); setProjectError('');
-    try { const project = await native<Project>('create_project', { name: projectName, description: projectAbout }); await refresh(); closeNewProject(); openSpace(project.id); }
+    try { const project = await native<Project>('create_project', { name: projectName, description: projectAbout }); await refresh(); closeNewProject(); showProject(project.id); }
     catch (e) { setProjectError(errorText(e)); }
   }
   function toggleVoice(voice: boolean) {
@@ -83,20 +89,23 @@ export default function App() {
 
   return <div className="app-shell">
     <nav className="rail" aria-label="Espaços">
-      <button className="rail-item" aria-label="Ayla · conversa geral" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
-      <span className="rail-divider" aria-hidden="true" />
-      <div className="rail-projects">
-        {snapshot.projects.map(item => <button key={item.id} className="rail-item" aria-label={`Projeto ${item.name}`} title={item.name} aria-current={space === item.id ? 'page' : undefined} onClick={() => openSpace(item.id)}><ProjectAvatar project={item} /></button>)}
-        <button className="rail-item add" aria-label="Novo projeto" title="Novo projeto" onClick={() => setCreating(true)}><PlusIcon /></button>
-      </div>
+      <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
+      {/* Órgãos (Moneta e outros produtos) entram aqui quando forem integrados. */}
+      <div className="rail-projects" />
       <button className="rail-item" aria-label="Configurações" title="Configurações" aria-current={space === 'settings' ? 'page' : undefined} onClick={() => go('settings')}><SettingsIcon /></button>
     </nav>
 
     <div className="spaces">
-      {['ayla', ...visited].map(id => {
-        const project = id === 'ayla' ? null : snapshot.projects.find(item => item.id === id);
-        if (project === undefined) return null;
-        return <div key={id} className="page" hidden={space !== id}><Space snapshot={snapshot} refresh={refresh} project={project} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); setSpace('ayla'); }} /></div>;
+      <div className="page" hidden={space !== 'ayla' || openProject !== null}>
+        <Space snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
+          projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
+      </div>
+      {visited.map(id => {
+        const project = snapshot.projects.find(item => item.id === id);
+        if (!project) return null;
+        const shown = space === 'ayla' && openProject === id;
+        return <div key={id} className="page" hidden={!shown}><Space snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+          onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
     {space === 'settings' && <div className="settings-layout">
@@ -160,6 +169,8 @@ export default function App() {
               <p className="group-note">As notificações nunca mostram o conteúdo das conversas.</p>
             </section>
 
+            <CloudSettings snapshot={snapshot} saving={saving} save={quickSave} />
+
             <MemoryPanel snapshot={snapshot} refresh={refresh} />
 
             <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
@@ -184,12 +195,11 @@ export default function App() {
                   <p>O orçamento limita a estimativa de carregamento; o consumo real varia entre arquiteturas. Respostas interrompidas ficam identificadas e não entram no contexto.</p>
                   <button className="primary-action" disabled={saving} onClick={() => void apply('Limites salvos.')}>Salvar limites</button>
                 </div>
-                <div className="advanced-block"><h3>Onde a IA trabalha</h3>
-                  <label>Modo de uso<select value={draft.usage_mode} onChange={e => update({ usage_mode: e.target.value as UsageMode })}>{Object.entries(modeLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}</select></label>
-                  <p>Conteúdo sensível ou ainda não verificado fica local em todos os modos. A nuvem recebe o pedido e a personalidade, mostrados para revisão e declarados públicos. Sugestões não autorizam envios.</p>
-                  <label>Endereço do provedor compatível<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label>
-                  <label>Modelo na nuvem para conversa<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label>
-                  <button className="primary-action" disabled={saving} onClick={() => void apply('Modo e provedor salvos.')}>Salvar modo e provedor</button>
+                <div className="advanced-block"><h3>Outro provedor compatível</h3>
+                  <p>Para um serviço compatível com a API da OpenAI que não está na lista de Nuvem. A nuvem recebe só o pedido e a personalidade, revisados e declarados públicos.</p>
+                  <label>Endereço HTTPS<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label>
+                  <label>Modelo<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label>
+                  <button className="primary-action" disabled={saving || !draft.cloud_endpoint} onClick={() => { const value = { ...draft, cloud_provider: 'custom', onboarding_complete: true }; setDraft(value); void savePreferences(value).then(() => refresh()).then(() => setNotice('Provedor próprio salvo e em uso.')).catch(e => setError(errorText(e))); }}>Usar este provedor</button>
                   <label>Chave do provedor<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} /></label>
                   <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar no cofre do sistema</label>
                   <div className="row-actions">

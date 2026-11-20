@@ -6,7 +6,7 @@ export type UsageMode = 'local_only' | 'cloud_only' | 'hybrid' | 'per_conversati
 export type Sensitivity = 'public' | 'sensitive' | 'uncertain';
 export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
-  resource_percent: number | null; usage_mode: UsageMode; cloud_endpoint: string; cloud_model: string;
+  resource_percent: number | null; usage_mode: UsageMode; cloud_provider: string; cloud_endpoint: string; cloud_model: string; cloud_asked: boolean; image_provider: string; image_model: string;
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
   notifications: { reply: boolean; setup: boolean };
 };
@@ -26,15 +26,19 @@ export type Snapshot = {
   projects: Project[];
 };
 export type SetupState = { active: boolean; label?: string; received?: number; total?: number; error?: string; cancelled?: boolean };
+export type CloudProvider = { id: string; name: string; summary: string; login: 'key' | 'open_router' | 'chat_gpt'; keys_url: string | null; default_model: string | null; images: 'generations' | 'open_router_chat' | null; connected: boolean; account: string | null };
 export type Privacy = 'sensitive' | 'uncertain' | 'public';
 export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number; project_id: string | null };
 export type Project = { id: string; name: string; description: string; created_at: number; updated_at: number; conversations: number; memories: number };
 export type MemoryList = { facts: Fact[]; enabled: boolean; ready: boolean };
 export type Conversation = { id: string; title: string; cloud_consent: boolean; project_id: string | null };
-export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error'; text?: string; received?: number; total?: number; facts?: Fact[] };
+export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
+export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
+export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
+export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[] };
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status'; text?: string; received?: number; total?: number; facts?: Fact[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
-export type ChatRequest = Omit<CapabilityRequest, 'text' | 'cloud_model'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; image: string | null };
+export type ChatRequest = Omit<CapabilityRequest, 'text' | 'cloud_model'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[] };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 

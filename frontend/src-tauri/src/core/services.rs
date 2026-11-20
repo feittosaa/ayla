@@ -1,4 +1,6 @@
 use super::{
+    cloud::{self, Api, Login, Secret},
+    files::{self, Kind},
     hardware,
     memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
@@ -6,7 +8,7 @@ use super::{
     policy::{self, Sensitivity, UsageMode},
     preferences::{PreferenceStore, Preferences},
     runtime::{self, Runtime},
-    store::{self, Scope, Store},
+    store::{self, FileInfo, Scope, Store},
 };
 use base64::Engine;
 use serde::Deserialize;
@@ -28,6 +30,8 @@ pub struct Core {
     store: Mutex<Store>,
     pub runtime: Arc<Runtime>,
     install_gate: tokio::sync::Mutex<()>,
+    /// Renovação do acesso ao ChatGPT: uma por vez (o token de renovação é rotativo).
+    cloud_gate: tokio::sync::Mutex<()>,
     jobs: Mutex<HashMap<String, CancellationToken>>,
     keys: Mutex<HashMap<String, String>>,
     /// Última atividade da conversa; a extração automática espera a pausa.
@@ -42,16 +46,18 @@ pub struct Core {
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root).map_err(|_| "Não foi possível abrir seus dados")?;
-        // Imagens coladas que sobraram de um encerramento abrupto.
-        let _ = fs::remove_dir_all(root.join("work").join(PASTED));
+        // Pasta de imagens coladas de versões anteriores (agora viram arquivos guardados).
+        let _ = fs::remove_dir_all(root.join("work").join("pasted"));
         let store = Store::open(&root.join("ayla.db"))
             .map_err(|_| "Não foi possível abrir o banco da Ayla")?;
+        clean_files(&root, &store);
         Ok(Self {
             preferences: Mutex::new(PreferenceStore::new(&root)),
             store: Mutex::new(store),
             runtime: Arc::new(Runtime::new(root.join("runtimes"))),
             root,
             install_gate: tokio::sync::Mutex::new(()),
+            cloud_gate: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(HashMap::new()),
             keys: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(Instant::now()),
@@ -637,7 +643,29 @@ pub fn create_conversation(state: tauri::State<'_, Core>, project: Option<String
     if let Some(id) = &project {
         db.project(id).ok().flatten().ok_or("Projeto não encontrado")?;
     }
-    Ok(json!(db.create_conversation("Nova conversa", project.as_deref()).map_err(|_| "Falha ao criar conversa")?))
+    Ok(json!(db.create_conversation(DEFAULT_TITLE, project.as_deref()).map_err(|_| "Falha ao criar conversa")?))
+}
+
+/// Novo título escolhido pela pessoa.
+#[tauri::command]
+pub fn rename_conversation(state: tauri::State<'_, Core>, id: String, title: String) -> Result<(), String> {
+    let count = title.trim().chars().count();
+    if count == 0 || count > 120 {
+        return Err("Dê à conversa um título de até 120 caracteres".into());
+    }
+    match state.store.lock().map_err(|_| "Dados ocupados")?.rename_conversation(&id, &title) {
+        Ok(true) => Ok(()),
+        _ => Err("Conversa não encontrada".into()),
+    }
+}
+/// Apaga a conversa, as mensagens e os arquivos dela (a interface pede confirmação).
+#[tauri::command]
+pub fn delete_conversation(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    let copies = state.store.lock().map_err(|_| "Dados ocupados")?.delete_conversation(&id).map_err(|_| "Não foi possível apagar a conversa")?.ok_or("Conversa não encontrada")?;
+    for path in copies {
+        remove_copy(&state.root, &path);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -667,8 +695,15 @@ pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, d
 /// Apaga o projeto com conversas e memórias dele (a interface pede confirmação).
 #[tauri::command]
 pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
-    match state.store.lock().map_err(|_| "Dados ocupados")?.delete_project(&id) {
-        Ok(true) => Ok(()),
+    let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+    let copies = db.project_file_paths(&id).unwrap_or_default();
+    match db.delete_project(&id) {
+        Ok(true) => {
+            for path in copies {
+                remove_copy(&state.root, &path);
+            }
+            Ok(())
+        }
         _ => Err("Projeto não encontrado".into()),
     }
 }
@@ -706,8 +741,74 @@ pub struct ChatRequest {
     pub sensitivity: Sensitivity,
     pub reviewed: bool,
     pub request_cloud: bool,
-    pub image: Option<String>,
+    /// Arquivos anexados (ids devolvidos por `add_file`), no máximo 5.
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
+pub const DEFAULT_TITLE: &str = "Nova conversa";
+/// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
+pub fn quick_title(message: &str) -> String {
+    let words: Vec<&str> = message.split_whitespace().collect();
+    let mut title = words.iter().take(6).copied().collect::<Vec<_>>().join(" ");
+    title = title.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string();
+    if title.chars().count() > 48 {
+        title = title.chars().take(47).collect::<String>().trim_end().to_string() + "…";
+    } else if words.len() > 6 {
+        title.push('…');
+    }
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => DEFAULT_TITLE.into(),
+    }
+}
+/// Pedido ao modelo local para um título curto (JSON com o campo `titulo`).
+fn title_request(message: &str) -> Vec<Value> {
+    let excerpt: String = message.chars().take(1200).collect();
+    vec![
+        json!({"role":"system","content":"Você dá nomes curtos a conversas. Responda em português do Brasil com um título de 2 a 6 palavras que resuma o pedido, sem aspas, sem ponto final e sem emojis."}),
+        json!({"role":"user","content":format!("Primeiro pedido da conversa:\n{excerpt}")}),
+    ]
+}
+fn title_schema() -> Value {
+    json!({"type":"object","properties":{"titulo":{"type":"string","maxLength":60}},"required":["titulo"],"additionalProperties":false})
+}
+/// Título válido a partir da resposta do modelo; `None` se vier vazio ou estranho.
+pub fn clean_title(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let title = value["titulo"].as_str()?.lines().next()?.trim().trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '*' | '#') || c.is_whitespace());
+    let title = title.trim_end_matches(['.', '!', ';', ':']).trim();
+    let count = title.chars().count();
+    if count < 2 || count > 60 || title.split_whitespace().count() > 10 {
+        return None;
+    }
+    let mut chars = title.chars();
+    chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+}
+/// Resume o primeiro pedido com o modelo local e troca o título provisório.
+/// Sem modelo local (ou se a pessoa voltar a conversar), fica o provisório.
+async fn smart_title(app: tauri::AppHandle, conversation: String, message: String, quick: String) {
+    use tauri::{Emitter, Manager};
+    let Some(state) = app.try_state::<Core>() else { return };
+    let Ok(prefs) = state.prefs() else { return };
+    let Ok(models_list) = state.models() else { return };
+    let Ok(model) = models::choose(&models_list, Capability::Text, state.budget(&prefs), prefs.context_tokens, None) else { return };
+    // Espera a resposta liberar o modelo; uma nova mensagem cancela este título.
+    let Ok(_gate) = tokio::time::timeout(Duration::from_secs(30), state.runtime.gate.lock()).await else { return };
+    let token = CancellationToken::new();
+    if let Ok(mut slot) = state.background.lock() {
+        *slot = Some(token.clone());
+    }
+    let raw = state.runtime.complete_json(&model, &prefs, title_request(&message), title_schema(), &token).await;
+    if let Ok(mut slot) = state.background.lock() {
+        *slot = None;
+    }
+    let Some(title) = raw.ok().and_then(|raw| clean_title(&raw)) else { return };
+    if state.store.lock().ok().and_then(|db| db.retitle(&conversation, &quick, &title).ok()) == Some(true) {
+        let _ = app.emit("conversation-updated", json!({"id":conversation,"title":title}));
+    }
+}
+
 /// Contexto do projeto no prompt local: nome e "sobre o projeto".
 fn project_block(project: &store::Project) -> String {
     let mut block = format!("\n\nEsta conversa faz parte do projeto \"{}\".", project.name);
@@ -759,22 +860,42 @@ pub async fn chat(
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
         let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}",prefs.personality,request.message));
         let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
-        let models=state.models()?;let mut kind=if request.image.is_some(){Capability::Vision}else{request.capability.unwrap_or_else(||models::request_kind(&request.message,false))};
+        // Anexos ficam neste computador: lidos, transcritos ou convertidos em quadros localmente.
+        if use_cloud && !request.attachments.is_empty(){return Err("Arquivos anexados ficam neste computador. Responda localmente para usá-los.".into());}
+        let attached=state.attachments(&request)?;
+        let mut texts=Vec::new();let mut images=Vec::new();
+        for file in &attached{
+            let prepared=state.prepare_file(&prefs,file,&token,&mut |event:Value|{let _=events.send(event);}).await?;
+            if let Some(text)=prepared.text{texts.push((file.name.clone(),file.kind,text));}
+            images.extend(prepared.images);
+        }
+        images.truncate(files::MAX_IMAGES);
+        // Arquivos de mensagens anteriores continuam disponíveis para perguntas seguintes.
+        if !use_cloud{
+            let earlier=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_files(&request.conversation).unwrap_or_default();
+            for file in earlier{if let Some(text)=file.extracted{if !text.trim().is_empty(){texts.push((file.name,file.kind,text));}}}
+        }
+        let lengths:Vec<usize>=texts.iter().map(|(_,_,t)|t.chars().count()).collect();
+        let blocks:Vec<String>=texts.iter().zip(files::budgets(&lengths,files::PROMPT_BUDGET)).filter(|(_,limit)|*limit>0).map(|((name,kind,text),limit)|files::prompt_block(name,*kind,text,limit)).collect();
+        let models=state.models()?;let mut kind=if !images.is_empty(){Capability::Vision}else{request.capability.unwrap_or_else(||models::request_kind(&request.message,false))};
         if request.capability.is_none() && kind==Capability::Reasoning && !models.iter().any(|m|m.supports(kind)){kind=Capability::Text;}
-        if request.image.is_none(){if let Some(selected)=request.model.as_ref().and_then(|id|models.iter().find(|m|m.id==*id)){
+        if images.is_empty(){if let Some(selected)=request.model.as_ref().and_then(|id|models.iter().find(|m|m.id==*id)){
             if !selected.supports(kind)&&matches!(selected.capability,Capability::Text|Capability::Reasoning|Capability::Vision){kind=selected.capability;}
         }}
         let mut selection=models::choose(&models,kind,state.budget(&prefs),prefs.context_tokens,request.model.as_deref());
         if selection.is_err() && request.capability.is_none() && request.model.is_none() && kind==Capability::Reasoning {
             kind=Capability::Text;selection=models::choose(&models,kind,state.budget(&prefs),prefs.context_tokens,None);
         }
-        let mut content=json!(request.message);
-        if let Some(path)=&request.image{
-            if use_cloud{return Err("Anexos permanecem locais nesta versão; o envio não pode ser verificado automaticamente".into());}
-            if fs::metadata(path).map_err(|_|"Não foi possível ler imagem")?.len()>20*1024*1024{return Err("Imagem excede o limite de processamento".into());}
-            let bytes=fs::read(path).map_err(|_|"Não foi possível ler imagem")?;
-            let mime=if bytes.starts_with(b"\x89PNG"){"image/png"}else if bytes.starts_with(&[0xff,0xd8]){"image/jpeg"}else{return Err("Use uma imagem PNG ou JPEG".into());};
-            content=json!([{"type":"text","text":request.message},{"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}]);
+        let text=if blocks.is_empty(){request.message.clone()}else{format!("{}\n\n{}",request.message,blocks.join("\n\n"))};
+        let mut content=json!(text);
+        if !images.is_empty(){
+            let mut parts=vec![json!({"type":"text","text":text})];
+            for path in &images{
+                let bytes=fs::read(path).map_err(|_|"Não foi possível ler imagem")?;
+                let mime=if bytes.starts_with(b"\x89PNG"){"image/png"}else if bytes.starts_with(&[0xff,0xd8]){"image/jpeg"}else{return Err("Formato de imagem inesperado".into());};
+                parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}));
+            }
+            content=json!(parts);
         }
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
@@ -790,12 +911,12 @@ pub async fn chat(
             metric_model = prefs.cloud_model.clone();
             if !gate.allowed{return Err(gate.reason);}
             if request.personality_preview.as_deref()!=Some(prefs.system_prompt()){return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into());}
-            if prefs.cloud_endpoint.is_empty()||prefs.cloud_model.is_empty(){return Err("Configure um provedor e modelo cloud antes de enviar".into());}
-            let key=state.key()?;
+            if prefs.cloud_model.is_empty(){return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into());}
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
-            let client=reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10)).read_timeout(std::time::Duration::from_secs(90)).redirect(reqwest::redirect::Policy::none()).build().map_err(|_|"Falha no cliente cloud")?;
-            let request=client.post(format!("{}/chat/completions",prefs.cloud_endpoint.trim_end_matches('/'))).bearer_auth(key).json(&json!({"model":prefs.cloud_model,"messages":[{"role":"system","content":prefs.system_prompt()},{"role":"user","content":request.message}],"stream":true}));
-            runtime::stream_chat(request,&token,&mut report).await?;
+            let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
+            let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
+            let outgoing=cloud::chat_request(api,&base,&secret,&prefs.cloud_model,prefs.system_prompt(),&request.message)?;
+            cloud::stream(outgoing,api,&token,&mut report).await?;
         }else{
             let model=match selection{Ok(model)=>model,Err(error)=>{if prefs.usage_mode!=UsageMode::LocalOnly{let _=events.send(json!({"type":"suggestion","text":"Não há modelo local compatível disponível. Você pode revisar o texto e solicitar cloud, mantendo dados sensíveis locais."}));}return Err(error);}};
             metric_model = model.id.clone();
@@ -813,6 +934,8 @@ pub async fn chat(
                         &request.message,
                         &partial,
                         result.is_ok(),
+                        &request.attachments,
+                        &[],
                     )
                     .is_err()
                 {
@@ -845,7 +968,19 @@ pub async fn chat(
     if let Ok(mut last) = state.last_activity.lock() {
         *last = Instant::now();
     }
-    discard_pasted(&state.root, request.image.as_deref());
+    // Título: provisório agora (primeiras palavras), resumido pela Ayla em segundo plano.
+    if result.is_ok() && !token.is_cancelled() {
+        let current = state.store.lock().ok().and_then(|db| db.conversation_title(&request.conversation).ok());
+        if current.as_deref() == Some(DEFAULT_TITLE) {
+            let quick = quick_title(&request.message);
+            if state.store.lock().ok().and_then(|db| db.retitle(&request.conversation, DEFAULT_TITLE, &quick).ok()) == Some(true) {
+                use tauri::Emitter;
+                let _ = app.emit("conversation-updated", json!({"id":request.conversation,"title":quick}));
+                let (handle, conversation, message) = (app.clone(), request.conversation.clone(), request.message.clone());
+                tauri::async_runtime::spawn(async move { smart_title(handle, conversation, message, quick).await });
+            }
+        }
+    }
     // Resposta pronta: avisa se a pessoa saiu da janela (nunca com o conteúdo).
     if result.is_ok() && !token.is_cancelled() {
         if let Ok(prefs) = state.prefs() {
@@ -856,60 +991,522 @@ pub async fn chat(
     result
 }
 
-/// Pasta temporária das imagens coladas; cada uma é apagada depois do envio.
-const PASTED: &str = "pasted";
 
-/// Imagem colada na conversa (área de transferência). Fica só neste computador,
-/// num arquivo temporário usado pelo próximo envio, como uma imagem anexada.
-#[tauri::command]
-pub fn paste_image(state: tauri::State<'_, Core>, data: String) -> Result<String, String> {
-    if data.len() > 28 * 1024 * 1024 {
-        return Err("Imagem excede o limite de processamento".into());
-    }
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Imagem inválida")?;
-    let path = pasted_path(&state.root, &bytes)?;
-    fs::create_dir_all(path.parent().ok_or("Pasta inválida")?).map_err(|_| "Não foi possível guardar a imagem")?;
-    fs::write(&path, bytes).map_err(|_| "Não foi possível guardar a imagem")?;
-    Ok(path.to_string_lossy().into_owned())
-}
-fn pasted_path(root: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    if bytes.len() > 20 * 1024 * 1024 {
-        return Err("Imagem excede o limite de processamento".into());
-    }
-    let extension = if bytes.starts_with(b"\x89PNG") { "png" } else if bytes.starts_with(&[0xff, 0xd8]) { "jpg" } else { return Err("Cole uma imagem PNG ou JPEG".into()) };
-    Ok(root.join("work").join(PASTED).join(format!("{}.{extension}", store::id())))
-}
-/// Apaga a imagem colada depois de usada; anexos escolhidos pela pessoa nunca são tocados.
-fn discard_pasted(root: &std::path::Path, image: Option<&str>) {
-    if let Some(path) = image.map(std::path::Path::new) {
-        if path.parent() == Some(root.join("work").join(PASTED).as_path()) {
-            let _ = fs::remove_file(path);
+/// Apaga a pasta da cópia de um arquivo (`files/<id>/…`), nunca algo fora dela.
+fn remove_copy(root: &std::path::Path, relative: &str) {
+    let path = root.join(relative);
+    if let Some(dir) = path.parent() {
+        if dir.parent() == Some(root.join("files").as_path()) {
+            let _ = fs::remove_dir_all(dir);
         }
     }
 }
+/// Ao abrir: descarta anexos nunca enviados (mais de um dia) e cópias sem registro.
+fn clean_files(root: &std::path::Path, store: &Store) {
+    let _ = store.forget_unsent_files(store::now() - 86_400);
+    let Ok(known) = store.file_paths() else { return };
+    let known: std::collections::HashSet<String> = known.iter().filter_map(|p| p.split('/').nth(1).map(String::from)).collect();
+    if let Ok(entries) = fs::read_dir(root.join("files")) {
+        for entry in entries.flatten() {
+            if !known.contains(&entry.file_name().to_string_lossy().into_owned()) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
+/// Resultado do preparo de um anexo: texto para o prompt e imagens para a visão.
+struct Prepared {
+    text: Option<String>,
+    images: Vec<PathBuf>,
+}
+impl Core {
+    /// Anexos do pedido: existentes, do mesmo espaço da conversa e ainda não enviados.
+    fn attachments(&self, request: &ChatRequest) -> Result<Vec<FileInfo>, String> {
+        if request.attachments.len() > 5 {
+            return Err("Envie até 5 arquivos por mensagem".into());
+        }
+        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+        let project = db.conversation_project(&request.conversation).map_err(|_| "Conversa não encontrada")?;
+        request.attachments.iter().map(|id| {
+            let file = db.file(id).ok().flatten().ok_or("Um arquivo anexado não foi encontrado; anexe de novo")?;
+            if file.project_id != project || file.message_id.is_some() {
+                return Err("Este arquivo pertence a outro espaço ou já foi enviado".to_string());
+            }
+            Ok(file)
+        }).collect()
+    }
+    /// ffmpeg instalado, ou baixado agora (com progresso na conversa).
+    async fn ffmpeg(&self, token: &CancellationToken, report: &mut impl FnMut(Value)) -> Result<PathBuf, String> {
+        if let Some(path) = self.runtime.tool("ffmpeg", "ffmpeg") {
+            return Ok(path);
+        }
+        report(json!({"type":"status","text":"Preparando o leitor de áudio e vídeo…"}));
+        runtime::install(&self.root.join("runtimes"), "ffmpeg", token, |event| {
+            if let (Some(received), Some(total)) = (event["received"].as_u64(), event["total"].as_u64()) {
+                report(json!({"type":"status","text":format!("Preparando o leitor de áudio e vídeo · {} de {} MB", received >> 20, total >> 20)}));
+            }
+        }).await?;
+        self.runtime.tool("ffmpeg", "ffmpeg").ok_or_else(|| "O leitor de áudio e vídeo não foi instalado".into())
+    }
+    /// Lê, transcreve ou extrai quadros de um anexo; resultados ficam em cache.
+    async fn prepare_file(&self, prefs: &Preferences, file: &FileInfo, token: &CancellationToken, report: &mut impl FnMut(Value)) -> Result<Prepared, String> {
+        let source = self.root.join(&file.path);
+        let dir = source.parent().ok_or("Arquivo inválido")?.to_path_buf();
+        if !source.is_file() {
+            return Err(format!("A cópia de {} não está mais disponível", file.name));
+        }
+        match file.kind {
+            Kind::Text | Kind::Pdf => {
+                let text = match file.extracted.clone() {
+                    Some(text) => text,
+                    None => {
+                        report(json!({"type":"status","text":format!("Lendo {}…", file.name)}));
+                        let (path, kind) = (source.clone(), file.kind);
+                        let text = tauri::async_runtime::spawn_blocking(move || if kind == Kind::Pdf { files::pdf_text(&path) } else { files::text_file(&path).map_err(|_| "Não foi possível ler o arquivo".to_string()) })
+                            .await.map_err(|_| "Falha ao ler arquivo")??;
+                        if let Ok(db) = self.store.lock() { let _ = db.set_extracted(&file.id, &text); }
+                        text
+                    }
+                };
+                let text = if text.trim().is_empty() { "(sem texto legível; pode ser um documento escaneado)".to_string() } else { text };
+                Ok(Prepared { text: Some(text), images: Vec::new() })
+            }
+            Kind::Image => {
+                let mut head = [0u8; 4];
+                let read = std::io::Read::read(&mut fs::File::open(&source).map_err(|_| "Não foi possível ler a imagem")?, &mut head).unwrap_or(0);
+                if head[..read].starts_with(b"\x89PNG") || head[..read].starts_with(&[0xff, 0xd8]) {
+                    return Ok(Prepared { text: None, images: vec![source] });
+                }
+                let converted = dir.join("imagem.png");
+                if !converted.is_file() {
+                    let ffmpeg = self.ffmpeg(token, report).await?;
+                    let mut command = std::process::Command::new(ffmpeg);
+                    command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"]).arg(&source).args(["-frames:v", "1", "-vf", "scale='min(1600,iw)':-2", "-y"]).arg(&converted);
+                    runtime::run_tool(command, token, Duration::from_secs(60)).await?;
+                }
+                if !converted.is_file() {
+                    return Err(format!("Não foi possível ler a imagem {}", file.name));
+                }
+                Ok(Prepared { text: None, images: vec![converted] })
+            }
+            Kind::Gif => Ok(Prepared { text: None, images: self.frames(file, &source, &dir, token, report).await? }),
+            Kind::Audio => Ok(Prepared { text: Some(self.transcript(prefs, file, &source, &dir, token, report).await?.unwrap_or_else(|| "(sem fala reconhecível)".into())), images: Vec::new() }),
+            Kind::Video => {
+                let transcript = self.transcript(prefs, file, &source, &dir, token, report).await?;
+                let images = self.frames(file, &source, &dir, token, report).await?;
+                Ok(Prepared { text: Some(transcript.unwrap_or_else(|| "(vídeo sem áudio ou sem fala reconhecível)".into())), images })
+            }
+        }
+    }
+    /// Até 4 quadros representativos (vídeo ao longo da duração; GIF no início).
+    async fn frames(&self, file: &FileInfo, source: &std::path::Path, dir: &std::path::Path, token: &CancellationToken, report: &mut impl FnMut(Value)) -> Result<Vec<PathBuf>, String> {
+        let frame = |i: usize| dir.join(format!("quadro-{i}.jpg"));
+        let existing: Vec<PathBuf> = (0..files::MAX_IMAGES).map(frame).filter(|p| p.is_file()).collect();
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+        let ffmpeg = self.ffmpeg(token, report).await?;
+        report(json!({"type":"status","text":format!("Vendo {}…", file.name)}));
+        let scale = "scale='min(1024,iw)':-2";
+        if file.kind == Kind::Gif {
+            let mut command = std::process::Command::new(&ffmpeg);
+            command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"]).arg(source).args(["-vf", &format!("fps=2,{scale}"), "-frames:v", "4", "-q:v", "3", "-start_number", "0", "-y"]).arg(dir.join("quadro-%d.jpg"));
+            runtime::run_tool(command, token, Duration::from_secs(60)).await?;
+        } else {
+            let mut probe = std::process::Command::new(&ffmpeg);
+            probe.args(["-nostdin", "-hide_banner", "-i"]).arg(source);
+            let (_, info) = runtime::run_tool(probe, token, Duration::from_secs(30)).await?;
+            let times = files::frame_times(files::parse_duration(&info).unwrap_or(0.0), files::MAX_IMAGES);
+            for (i, time) in times.iter().enumerate() {
+                let mut command = std::process::Command::new(&ffmpeg);
+                command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-ss", &format!("{time:.2}"), "-i"]).arg(source).args(["-frames:v", "1", "-vf", scale, "-q:v", "3", "-y"]).arg(frame(i));
+                runtime::run_tool(command, token, Duration::from_secs(60)).await?;
+            }
+        }
+        Ok((0..files::MAX_IMAGES).map(frame).filter(|p| p.is_file()).collect())
+    }
+    /// Transcrição do áudio (até 10 minutos) com o Whisper; `None` se não houver fala ou áudio.
+    async fn transcript(&self, prefs: &Preferences, file: &FileInfo, source: &std::path::Path, dir: &std::path::Path, token: &CancellationToken, report: &mut impl FnMut(Value)) -> Result<Option<String>, String> {
+        if let Some(text) = &file.extracted {
+            return Ok((!text.trim().is_empty()).then(|| text.clone()));
+        }
+        let model = self.transcriber(prefs, false).map_err(|_| "Para entender áudios, ative o microfone em Configurações (a transcrição roda neste computador)".to_string())?;
+        let ffmpeg = self.ffmpeg(token, report).await?;
+        report(json!({"type":"status","text":format!("Ouvindo {}…", file.name)}));
+        let wav = dir.join("audio.wav");
+        let mut command = std::process::Command::new(ffmpeg);
+        command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"]).arg(source).args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-t", "600", "-f", "wav", "-y"]).arg(&wav);
+        let (converted, _) = runtime::run_tool(command, token, Duration::from_secs(300)).await?;
+        if !converted || fs::metadata(&wav).map(|m| m.len() < 2048).unwrap_or(true) {
+            let _ = fs::remove_file(&wav);
+            if file.kind == Kind::Video {
+                if let Ok(db) = self.store.lock() { let _ = db.set_extracted(&file.id, ""); }
+                return Ok(None);
+            }
+            return Err(format!("Não foi possível ler o áudio de {}", file.name));
+        }
+        let base = dir.join("transcricao");
+        let heard = self.runtime.transcribe(&model, &wav, &base, token).await;
+        let _ = fs::remove_file(&wav);
+        heard?;
+        let text = fs::read_to_string(base.with_extension("txt")).unwrap_or_default();
+        let _ = fs::remove_file(base.with_extension("txt"));
+        if let Ok(db) = self.store.lock() { let _ = db.set_extracted(&file.id, text.trim()); }
+        Ok((!text.trim().is_empty()).then(|| text.trim().to_string()))
+    }
+    /// Copia um arquivo para `files/<id>/` e registra; `kept` = adicionado direto em Arquivos.
+    fn store_file(&self, name: &str, write: impl FnOnce(&std::path::Path) -> Result<u64, String>, project: Option<String>, kept: bool) -> Result<FileInfo, String> {
+        if let Some(id) = &project {
+            self.store.lock().map_err(|_| "Dados ocupados")?.project(id).ok().flatten().ok_or("Projeto não encontrado")?;
+        }
+        let id = store::id();
+        let dir = self.root.join("files").join(&id);
+        fs::create_dir_all(&dir).map_err(|_| "Não foi possível guardar o arquivo")?;
+        let name = files::safe_name(name);
+        let dest = dir.join(&name);
+        let result = (|| {
+            let bytes = write(&dest)?;
+            let mut head = [0u8; 16];
+            let read = std::io::Read::read(&mut fs::File::open(&dest).map_err(|_| "Não foi possível ler o arquivo")?, &mut head).unwrap_or(0);
+            let kind = files::kind_of(&name, &head[..read]).ok_or_else(|| format!("Formato não suportado: {name}. Use imagens, GIFs, PDFs, textos, áudios ou vídeos."))?;
+            let sha = models::hash(&dest).map_err(|_| "Não foi possível ler o arquivo")?;
+            let info = FileInfo { id: id.clone(), name: name.clone(), kind, bytes: bytes as i64, created_at: store::now(), conversation_id: None, project_id: project, message_id: None, path: format!("files/{id}/{name}"), extracted: None };
+            self.store.lock().map_err(|_| "Dados ocupados")?.insert_file(&info, &sha, kept).map_err(|_| "Não foi possível registrar o arquivo")?;
+            Ok(info)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        result
+    }
+}
+
+/// Escolher arquivos para anexar (imagens, GIFs, PDFs, textos, áudios e vídeos).
 #[tauri::command]
-pub async fn pick_image(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let all: Vec<&'static str> = [files::IMAGE, files::TEXT, files::AUDIO, files::VIDEO, &["pdf", "gif"]].concat();
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .add_filter("Imagens", &["png", "jpg", "jpeg"])
-            .blocking_pick_file()
-            .and_then(|p| p.into_path().ok())
-            .map(|p| p.to_string_lossy().into_owned())
+        app.dialog().file().add_filter("Arquivos suportados", &all).blocking_pick_files()
+            .unwrap_or_default().into_iter().filter_map(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()).collect()
     })
     .await
-    .map_err(|_| "Não foi possível escolher imagem".into())
+    .map_err(|_| "Não foi possível escolher arquivos".into())
+}
+/// Guarda uma cópia de um arquivo do computador (o original não é alterado).
+/// `keep`: adicionado direto em Arquivos do projeto; senão, anexo da caixa de mensagem.
+#[tauri::command]
+pub async fn add_file(app: tauri::AppHandle, path: String, project: Option<String>, keep: Option<bool>) -> Result<FileInfo, String> {
+    let source = PathBuf::from(&path);
+    let meta = fs::metadata(&source).map_err(|_| "Arquivo não encontrado")?;
+    if !meta.is_file() {
+        return Err("Escolha um arquivo, não uma pasta".into());
+    }
+    if meta.len() > files::MAX_BYTES {
+        return Err("O arquivo passa de 1 GB".into());
+    }
+    let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "arquivo".into());
+    // Cópia de arquivos grandes fora da thread da interface.
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let core = app.state::<Core>();
+        core.store_file(&name, |dest| fs::copy(&source, dest).map_err(|_| "Não foi possível copiar o arquivo".to_string()), project, keep.unwrap_or(false))
+    })
+    .await
+    .map_err(|_| "Falha ao guardar o arquivo")?
+}
+/// Arquivo vindo da área de transferência (ex.: imagem colada).
+#[tauri::command]
+pub fn add_file_data(state: tauri::State<'_, Core>, name: String, data: String, project: Option<String>) -> Result<FileInfo, String> {
+    if data.len() > 90 * 1024 * 1024 {
+        return Err("Arquivo grande demais para colar; use o botão de anexar".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Arquivo inválido")?;
+    state.store_file(&name, |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar o arquivo".to_string()), project, false)
 }
 #[tauri::command]
-pub fn backup_data(state: tauri::State<'_, Core>) -> Result<(), String> {
+pub fn remove_file(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    let path = state.store.lock().map_err(|_| "Dados ocupados")?.delete_file(&id).map_err(|_| "Arquivo não encontrado")?;
+    if let Some(path) = path {
+        remove_copy(&state.root, &path);
+    }
+    Ok(())
+}
+/// Arquivos guardados de um projeto (ou gerais), para a aba Arquivos.
+#[tauri::command]
+pub fn project_files(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Vec<FileInfo>, String> {
+    state.store.lock().map_err(|_| "Dados ocupados")?.project_files(project.as_deref()).map_err(|_| "Falha ao ler arquivos".into())
+}
+
+impl Core {
+    /// Segredo guardado nesta sessão ou no cofre do sistema.
+    fn vault_get(&self, account: &str) -> Option<String> {
+        if let Some(value) = self.keys.lock().ok()?.get(account) {
+            return Some(value.clone());
+        }
+        keyring::Entry::new("dev.feit.ayla", account).and_then(|e| e.get_password()).ok()
+    }
+    /// Guarda no cofre (`remember`) ou só nesta sessão. Sem cofre, avisa e mantém na sessão.
+    fn vault_set(&self, account: &str, secret: &str, remember: bool) -> Result<(), String> {
+        self.keys.lock().map_err(|_| "Credencial ocupada")?.insert(account.to_string(), secret.to_string());
+        if remember {
+            keyring::Entry::new("dev.feit.ayla", account).and_then(|e| e.set_password(secret))
+                .map_err(|_| "O cofre do sistema não está disponível; a conexão vale só até fechar a Ayla.")?;
+        }
+        Ok(())
+    }
+    fn vault_delete(&self, account: &str) -> Result<(), String> {
+        self.keys.lock().map_err(|_| "Credencial ocupada")?.remove(account);
+        match keyring::Entry::new("dev.feit.ayla", account).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err("Desconectado nesta sessão, mas não foi possível confirmar a remoção no cofre do sistema".into()),
+        }
+    }
+    fn chatgpt_session(&self) -> Option<cloud::ChatGptSession> {
+        serde_json::from_str(&self.vault_get(&cloud::vault_account("chatgpt"))?).ok()
+    }
+    /// Identificador estável e aleatório deste computador para o "Entrar com ChatGPT".
+    fn host_id(&self) -> Result<String, String> {
+        let path = self.root.join("host-id");
+        if let Ok(id) = fs::read_to_string(&path) {
+            if id.starts_with("urn:uuid:") {
+                return Ok(id.trim().to_string());
+            }
+        }
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| "Sem fonte de números aleatórios do sistema")?;
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let id = format!("urn:uuid:{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]);
+        fs::write(&path, &id).map_err(|_| "Não foi possível guardar a identificação deste computador")?;
+        Ok(id)
+    }
+    /// API, endereço e credencial para falar com a plataforma (renova o acesso do ChatGPT).
+    async fn cloud_secret(&self, prefs: &Preferences, platform: &str) -> Result<(Api, String, Secret), String> {
+        if platform == "custom" {
+            return Ok((Api::Compatible, prefs.cloud_endpoint.clone(), Secret::Key(self.key()?)));
+        }
+        let provider = cloud::provider(platform).ok_or("Plataforma de nuvem desconhecida")?;
+        if provider.login != Login::ChatGpt {
+            let key = self.vault_get(&cloud::vault_account(provider.id)).ok_or_else(|| format!("Conecte {} em Configurações › Nuvem", provider.name))?;
+            return Ok((provider.api, provider.base.to_string(), Secret::Key(key)));
+        }
+        let _refresh = self.cloud_gate.lock().await;
+        let session = self.chatgpt_session().ok_or("Entre com o ChatGPT em Configurações › Nuvem")?;
+        if !session.needs_refresh(store::now()) {
+            return Ok((Api::ChatGpt, provider.base.to_string(), Secret::ChatGpt(session.access_token)));
+        }
+        match cloud::chatgpt_refresh(&session, store::now()).await {
+            Ok(renewed) => {
+                let saved = serde_json::to_string(&renewed).map_err(|_| "Credencial inválida")?;
+                self.vault_set(&cloud::vault_account("chatgpt"), &saved, true).or_else(|_| self.vault_set(&cloud::vault_account("chatgpt"), &saved, false))?;
+                Ok((Api::ChatGpt, provider.base.to_string(), Secret::ChatGpt(renewed.access_token)))
+            }
+            Err((terminal, message)) => {
+                if terminal {
+                    let _ = self.vault_delete(&cloud::vault_account("chatgpt"));
+                }
+                Err(message)
+            }
+        }
+    }
+}
+
+/// Plataformas de nuvem e se cada uma está conectada (consulta o cofre do sistema).
+#[tauri::command]
+pub fn cloud_providers(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    Ok(json!(cloud::providers().iter().map(|p| {
+        let (connected, account) = if p.login == Login::ChatGpt {
+            let session = state.chatgpt_session();
+            (session.is_some(), session.and_then(|s| s.email))
+        } else {
+            (state.vault_get(&cloud::vault_account(p.id)).is_some(), None)
+        };
+        json!({"id":p.id,"name":p.name,"summary":p.summary,"login":p.login,"keys_url":p.keys_url,"default_model":p.default_model,"images":p.images,"connected":connected,"account":account})
+    }).collect::<Vec<_>>()))
+}
+/// Conecta uma plataforma por chave de API (guardada no cofre ou só nesta sessão).
+#[tauri::command]
+pub fn cloud_connect(state: tauri::State<'_, Core>, provider: String, key: String, remember: bool) -> Result<(), String> {
+    let platform = cloud::provider(&provider).ok_or("Plataforma de nuvem desconhecida")?;
+    let key = key.trim();
+    if platform.login == Login::ChatGpt || key.len() < 8 || key.len() > 4096 || key.chars().any(char::is_whitespace) {
+        return Err("Cole a chave de API completa, sem espaços".into());
+    }
+    state.vault_set(&cloud::vault_account(platform.id), key, remember)
+}
+/// Login pelo navegador: OpenRouter (chave da conta) ou "Entrar com ChatGPT" (plano).
+#[tauri::command]
+pub async fn cloud_login(state: tauri::State<'_, Core>, provider: String, request_id: String) -> Result<Value, String> {
+    let platform = cloud::provider(&provider).ok_or("Plataforma de nuvem desconhecida")?;
+    let token = state.job(&request_id)?;
+    let result = async {
+        match platform.login {
+            Login::OpenRouter => {
+                let key = cloud::openrouter_login(&token).await?;
+                let remembered = state.vault_set(&cloud::vault_account(platform.id), &key, true);
+                Ok(json!({"account":null,"warning":remembered.err()}))
+            }
+            Login::ChatGpt => {
+                let host = state.host_id()?;
+                let previous = state.chatgpt_session();
+                let session = cloud::chatgpt_login(&host, previous.as_ref(), &token, store::now()).await?;
+                let saved = serde_json::to_string(&session).map_err(|_| "Credencial inválida")?;
+                let remembered = state.vault_set(&cloud::vault_account("chatgpt"), &saved, true);
+                Ok(json!({"account":session.email,"warning":remembered.err()}))
+            }
+            Login::Key => Err("Esta plataforma usa chave de API".into()),
+        }
+    }
+    .await;
+    state.finish(&request_id);
+    result
+}
+#[tauri::command]
+pub async fn cloud_disconnect(state: tauri::State<'_, Core>, provider: String) -> Result<(), String> {
+    let platform = cloud::provider(&provider).ok_or("Plataforma de nuvem desconhecida")?;
+    if platform.login == Login::ChatGpt {
+        if let Some(session) = state.chatgpt_session() {
+            cloud::chatgpt_revoke(&session).await;
+        }
+    }
+    state.vault_delete(&cloud::vault_account(platform.id))
+}
+/// Modelos disponíveis na conta conectada.
+#[tauri::command]
+pub async fn cloud_models(state: tauri::State<'_, Core>, provider: String, images: Option<bool>) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let (api, base, secret) = state.cloud_secret(&prefs, &provider).await?;
+    let list = cloud::models(api, &base, &secret, images.unwrap_or(false)).await?;
+    Ok(json!(list.into_iter().map(|(id, name)| json!({"id":id,"name":name})).collect::<Vec<_>>()))
+}
+#[derive(Deserialize)]
+pub struct ImageRequest {
+    pub id: String,
+    pub conversation: String,
+    pub prompt: String,
+    pub sensitivity: Sensitivity,
+    pub reviewed: bool,
+}
+/// Cria uma imagem pela nuvem só quando a pessoa pede, com o pedido revisado e público.
+/// A imagem fica guardada na Ayla, ligada à resposta da conversa (e ao projeto).
+#[tauri::command]
+pub async fn generate_image(state: tauri::State<'_, Core>, request: ImageRequest) -> Result<Value, String> {
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() || prompt.chars().count() > 4000 {
+        return Err("Descreva a imagem em até 4000 caracteres".into());
+    }
+    let token = state.job(&request.id)?;
+    let result = async {
+        let prefs = state.prefs()?;
+        if prefs.usage_mode == UsageMode::LocalOnly {
+            return Err("Ligue a nuvem em Configurações › Nuvem para criar imagens".to_string());
+        }
+        let (consent, project) = {
+            let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+            (db.consent(&request.conversation).map_err(|_| "Conversa não encontrada")?, db.conversation_project(&request.conversation).map_err(|_| "Conversa não encontrada")?)
+        };
+        let gate = policy::cloud_gate(prefs.usage_mode, request.sensitivity, request.reviewed, consent, true, &prompt);
+        if !gate.allowed {
+            return Err(gate.reason);
+        }
+        let provider = cloud::provider(&prefs.image_provider).filter(|p| p.images.is_some()).ok_or("Escolha onde criar imagens em Configurações › Nuvem")?;
+        if prefs.image_model.is_empty() {
+            return Err("Escolha o modelo de imagem em Configurações › Nuvem".to_string());
+        }
+        let key = state.vault_get(&cloud::vault_account(provider.id)).ok_or_else(|| format!("Conecte {} em Configurações › Nuvem", provider.name))?;
+        let (bytes, extension) = tokio::select! {
+            _ = token.cancelled() => return Err("Criação da imagem interrompida".to_string()),
+            made = cloud::generate_image(provider, &key, &prefs.image_model, &prompt) => made?,
+        };
+        let file = state.store_file(&format!("imagem-{}.{extension}", store::now()), |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a imagem".to_string()), project, false)?;
+        let reply = format!("Imagem criada com {} ({}).", provider.name, prefs.image_model);
+        let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+        db.save_turn(&request.conversation, &prompt, &reply, true, &[], &[file.id.clone()]).map_err(|_| "A imagem foi criada, mas não foi possível salvar a conversa")?;
+        let saved = db.file(&file.id).ok().flatten().unwrap_or(file);
+        Ok(json!({"content": reply, "attachments": [saved]}))
+    }
+    .await;
+    if let Ok(mut last) = state.last_activity.lock() {
+        *last = Instant::now();
+    }
+    state.finish(&request.id);
+    result
+}
+/// Imagem guardada para exibir na conversa (data URL); só imagens de até 25 MB.
+#[tauri::command]
+pub fn file_data(state: tauri::State<'_, Core>, id: String) -> Result<Value, String> {
+    let file = state.store.lock().map_err(|_| "Dados ocupados")?.file(&id).ok().flatten().ok_or("Arquivo não encontrado")?;
+    if !matches!(file.kind, Kind::Image | Kind::Gif) || file.bytes > 25 * 1024 * 1024 {
+        return Err("Prévia indisponível para este arquivo".into());
+    }
+    let bytes = fs::read(state.root.join(&file.path)).map_err(|_| "Arquivo não encontrado")?;
+    let mime = match cloud::image_extension(&bytes) { Some("png") => "image/png", Some("jpg") => "image/jpeg", Some("webp") => "image/webp", _ if bytes.starts_with(b"GIF8") => "image/gif", _ => "image/bmp" };
+    Ok(json!({"url": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))}))
+}
+/// Salva uma cópia de um arquivo guardado onde a pessoa escolher.
+#[tauri::command]
+pub async fn export_file(app: tauri::AppHandle, state: tauri::State<'_, Core>, id: String) -> Result<bool, String> {
+    let file = state.store.lock().map_err(|_| "Dados ocupados")?.file(&id).ok().flatten().ok_or("Arquivo não encontrado")?;
+    let source = state.root.join(&file.path);
+    let name = file.name.clone();
+    let target = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(&name).blocking_save_file())
+        .await.map_err(|_| "Não foi possível escolher onde salvar")?;
+    let Some(target) = target else { return Ok(false) };
+    let target = target.into_path().map_err(|_| "Local inválido")?;
+    tauri::async_runtime::spawn_blocking(move || fs::copy(&source, &target)).await.map_err(|_| "Falha ao salvar")?.map_err(|_| "Não foi possível salvar o arquivo")?;
+    Ok(true)
+}
+/// Link clicado numa resposta: só http/https, no navegador do sistema.
+#[tauri::command]
+pub fn open_web(url: String) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(&url).map_err(|_| "Link inválido")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Só links da web podem ser abertos".into());
+    }
+    cloud::open_url(parsed.as_str())
+}
+/// Abre só páginas conhecidas (chaves das plataformas e uso do ChatGPT).
+#[tauri::command]
+pub fn open_link(url: String) -> Result<(), String> {
+    if !cloud::allowed_link(&url) {
+        return Err("Link não permitido".into());
+    }
+    cloud::open_url(&url)
+}
+
+#[tauri::command]
+pub async fn backup_data(state: tauri::State<'_, Core>) -> Result<(), String> {
     let root = state.root.join("backups");
     fs::create_dir_all(&root).map_err(|_| "Não foi possível criar backup")?;
+    let name = format!("ayla-{}", store::id());
     state
         .store
         .lock()
         .map_err(|_| "Dados ocupados")?
-        .backup(&root.join(format!("ayla-{}.db", store::id())))
-        .map_err(|_| "Não foi possível criar backup".into())
+        .backup(&root.join(format!("{name}.db")))
+        .map_err(|_| "Não foi possível criar backup")?;
+    // Arquivos guardados: link físico (sem duplicar espaço; sobrevive se o original for apagado) ou cópia.
+    let (source, target) = (state.root.join("files"), root.join(format!("{name}-arquivos")));
+    if source.is_dir() {
+        tauri::async_runtime::spawn_blocking(move || copy_tree(&source, &target)).await.map_err(|_| "Falha no backup dos arquivos")?.map_err(|_| "Não foi possível copiar os arquivos para o backup".to_string())?;
+    }
+    Ok(())
+}
+fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let destination = target.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else if kind.is_file() && fs::hard_link(entry.path(), &destination).is_err() {
+            fs::copy(entry.path(), &destination)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1276,22 +1873,126 @@ pub async fn import_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Rode com AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark: ffmpeg e Whisper vêm do cache (sem rede).
+    #[tokio::test]
+    #[ignore = "ffmpeg e Whisper reais via cache local; motor do Whisper de /tmp/ayla-p1-runtime-validation"]
+    async fn real_attachments_are_read_transcribed_and_seen() {
+        let speech = std::path::Path::new("/var/tmp/ayla-benchmark/fleurs/pcm16/7377029495898915434.wav");
+        let root = std::env::temp_dir().join(format!("ayla-files-real-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        fs::create_dir_all(root.join("runtimes")).unwrap();
+        std::os::unix::fs::symlink("/tmp/ayla-p1-runtime-validation/whisper", root.join("runtimes").join("whisper")).unwrap();
+        let token = CancellationToken::new();
+        let whisper = runtime::install_model(&root.join("models"), models::catalog().iter().find(|e| e.id == "whisper-small").unwrap(), &token, |_| {}).await.unwrap();
+        core.store.lock().unwrap().save_model(&whisper.id, &serde_json::to_string(&whisper).unwrap()).unwrap();
+        let prefs = core.prefs().unwrap();
+        let mut events = Vec::new();
+        let start = Instant::now();
+        let ffmpeg = core.ffmpeg(&token, &mut |e| events.push(e)).await.unwrap();
+        eprintln!("ffmpeg pronto em {} ms", start.elapsed().as_millis());
+        let make = |name: &str, args: &[&str]| {
+            let out = root.join(name);
+            let status = std::process::Command::new(&ffmpeg).args(["-nostdin", "-loglevel", "error"]).args(args).arg("-y").arg(&out).status().unwrap();
+            assert!(status.success(), "gerar {name}");
+            out
+        };
+        let speech_arg = speech.to_str().unwrap();
+        let video = make("reuniao.mp4", &["-f", "lavfi", "-i", "testsrc=duration=12:size=320x240:rate=10", "-i", speech_arg, "-shortest", "-c:v", "mpeg4", "-c:a", "aac"]);
+        let gif = make("anim.gif", &["-f", "lavfi", "-i", "testsrc=duration=2:size=160x120:rate=5"]);
+        let mp3 = make("audio.mp3", &["-i", speech_arg, "-c:a", "libmp3lame"]);
+        // PDF mínimo com texto em Helvetica, com tabela xref correta.
+        let stream = "BT /F1 18 Tf 20 100 Td (Relatorio da Ayla sobre energia solar) Tj ET";
+        let objects = ["<< /Type /Catalog /Pages 2 0 R >>".to_string(), "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".into(), format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+        }
+        let xref = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets { pdf.push_str(&format!("{offset:010} 00000 n \n")); }
+        pdf.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1));
+        let pdf_path = root.join("relatorio.pdf");
+        fs::write(&pdf_path, pdf).unwrap();
+
+        let add = |path: &std::path::Path| core.store_file(path.file_name().unwrap().to_str().unwrap(), |dest| fs::copy(path, dest).map_err(|e| e.to_string()), None, false).unwrap();
+        let (video, gif, mp3, pdf) = (add(&video), add(&gif), add(&mp3), add(&pdf_path));
+        assert_eq!((video.kind, gif.kind, mp3.kind, pdf.kind), (Kind::Video, Kind::Gif, Kind::Audio, Kind::Pdf));
+        for file in [&video, &gif, &mp3, &pdf] {
+            let start = Instant::now();
+            let prepared = core.prepare_file(&prefs, file, &token, &mut |e| events.push(e)).await.unwrap();
+            eprintln!("{}: {} ms · {} imagens · {:?}", file.name, start.elapsed().as_millis(), prepared.images.len(), prepared.text.as_deref().map(|t| t.chars().take(90).collect::<String>()));
+            match file.kind {
+                Kind::Video => { assert!(prepared.text.unwrap().to_lowercase().contains("acordo")); assert_eq!(prepared.images.len(), 4); }
+                Kind::Gif => assert!(!prepared.images.is_empty() && prepared.text.is_none()),
+                Kind::Audio => assert!(prepared.text.unwrap().to_lowercase().contains("presença militar")),
+                Kind::Pdf => assert!(prepared.text.unwrap().contains("energia solar")),
+                _ => unreachable!(),
+            }
+        }
+        // Segunda vez: tudo do cache, sem ffmpeg nem Whisper.
+        let cached = core.store.lock().unwrap().file(&mp3.id).unwrap().unwrap();
+        let start = Instant::now();
+        assert!(core.prepare_file(&prefs, &cached, &token, &mut |_| {}).await.unwrap().text.is_some());
+        assert!(start.elapsed() < Duration::from_millis(200), "transcrição em cache");
+        assert!(events.iter().any(|e| e["text"].as_str().is_some_and(|t| t.starts_with("Ouvindo"))));
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
-    fn pasted_images_are_validated_and_only_temporary_copies_are_discarded() {
-        let root = std::env::temp_dir().join(format!("ayla-paste-{}", store::id()));
-        assert!(pasted_path(&root, b"GIF89a").is_err());
-        assert!(pasted_path(&root, &vec![0u8; 21 * 1024 * 1024]).is_err());
-        let png = pasted_path(&root, b"\x89PNG\r\n").unwrap();
-        assert!(png.to_string_lossy().ends_with(".png") && png.starts_with(root.join("work").join(PASTED)));
-        assert!(pasted_path(&root, &[0xff, 0xd8, 0xff]).unwrap().to_string_lossy().ends_with(".jpg"));
-        fs::create_dir_all(png.parent().unwrap()).unwrap();
-        fs::write(&png, b"x").unwrap();
-        let chosen = root.join("foto.png");
-        fs::write(&chosen, b"x").unwrap();
-        discard_pasted(&root, chosen.to_str());
-        assert!(chosen.exists(), "anexo escolhido pela pessoa fica intacto");
-        discard_pasted(&root, png.to_str());
-        assert!(!png.exists(), "cópia colada some depois do envio");
+    fn titles_are_short_and_clean() {
+        assert_eq!(quick_title("me ajuda a planejar um jantar pra seis pessoas no sábado?"), "Me ajuda a planejar um jantar…");
+        assert_eq!(quick_title("  oi!  "), "Oi");
+        assert_eq!(quick_title("\n"), DEFAULT_TITLE);
+        assert!(quick_title(&"palavraenorme".repeat(10)).ends_with('…'));
+        assert_eq!(clean_title(r#"{"titulo":"  \"Jantar de sábado.\" "}"#).as_deref(), Some("Jantar de sábado"));
+        assert_eq!(clean_title(r#"{"titulo":"planejamento do TCC"}"#).as_deref(), Some("Planejamento do TCC"));
+        assert_eq!(clean_title(r#"{"titulo":""}"#), None);
+        assert_eq!(clean_title("não é json"), None);
+        assert_eq!(clean_title(r#"{"titulo":"um dois três quatro cinco seis sete oito nove dez onze"}"#), None);
+        let db = Store::open(&std::env::temp_dir().join(format!("ayla-title-{}.db", store::id()))).unwrap();
+        let c = db.create_conversation(DEFAULT_TITLE, None).unwrap();
+        assert!(db.retitle(&c.id, DEFAULT_TITLE, "Jantar").unwrap());
+        assert!(!db.retitle(&c.id, DEFAULT_TITLE, "Outro").unwrap(), "não sobrescreve um título já trocado");
+        assert_eq!(db.conversation_title(&c.id).unwrap(), "Jantar");
+    }
+    #[test]
+    fn files_are_copied_classified_linked_and_cleaned() {
+        let root = std::env::temp_dir().join(format!("ayla-files-core-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let project = core.store.lock().unwrap().create_project("TCC", "").unwrap();
+        let note = core.store_file("../notas.md", |dest| fs::write(dest, b"# Plano").map(|_| 7).map_err(|e| e.to_string()), Some(project.id.clone()), false).unwrap();
+        assert_eq!((note.name.as_str(), note.kind, note.bytes), ("notas.md", Kind::Text, 7));
+        assert_eq!(note.path, format!("files/{}/notas.md", note.id));
+        assert!(root.join(&note.path).is_file());
+        // Formato não suportado: nada fica no disco nem no banco.
+        assert!(core.store_file("app.exe", |dest| fs::write(dest, b"MZ").map(|_| 2).map_err(|e| e.to_string()), None, false).is_err());
+        assert_eq!(fs::read_dir(root.join("files")).unwrap().count(), 1);
+        assert!(core.store_file("x.md", |dest| fs::write(dest, b"x").map(|_| 1).map_err(|e| e.to_string()), Some("inexistente".into()), false).is_err());
+        // Anexo pendente não aparece em Arquivos; depois de enviado, aparece e fica ligado à mensagem.
+        assert!(core.store.lock().unwrap().project_files(Some(&project.id)).unwrap().is_empty());
+        let chat = core.store.lock().unwrap().create_conversation("c", Some(&project.id)).unwrap();
+        core.store.lock().unwrap().save_turn(&chat.id, "resuma", "ok", true, &[note.id.clone()], &[]).unwrap();
+        let listed = core.store.lock().unwrap().project_files(Some(&project.id)).unwrap();
+        assert_eq!(listed.len(), 1);
+        let messages = core.store.lock().unwrap().messages(&chat.id).unwrap();
+        assert_eq!(messages[0].attachments.iter().map(|f| f.id.clone()).collect::<Vec<_>>(), vec![note.id.clone()]);
+        assert!(messages[1].attachments.is_empty());
+        // Cópia sem registro some ao abrir; a registrada fica.
+        fs::create_dir_all(root.join("files").join("orfa")).unwrap();
+        drop(core);
+        let core = Core::open(root.clone()).unwrap();
+        assert!(!root.join("files").join("orfa").exists() && root.join(&note.path).is_file());
+        // Apagar o projeto apaga a cópia.
+        let copies = core.store.lock().unwrap().project_file_paths(&project.id).unwrap();
+        assert!(core.store.lock().unwrap().delete_project(&project.id).unwrap());
+        for path in copies {
+            remove_copy(&core.root, &path);
+        }
+        assert!(!root.join(&note.path).exists());
+        remove_copy(&core.root, "../fora/arquivo");
+        drop(core);
         fs::remove_dir_all(root).unwrap();
     }
     use std::path::Path;

@@ -1,4 +1,6 @@
 //! Serviços nativos compartilhados pelo desktop e, posteriormente, pelos adaptadores.
+pub mod cloud;
+pub mod files;
 pub mod hardware;
 pub mod memory;
 pub mod policy;

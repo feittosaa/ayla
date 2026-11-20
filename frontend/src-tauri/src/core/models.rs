@@ -231,7 +231,7 @@ pub fn choose(
     candidates.into_iter().next().ok_or_else(||"Nenhum modelo deste tipo cabe no orçamento atual. Importe um modelo compatível ou ajuste o perfil.".into())
 }
 
-fn hash(path: &Path) -> io::Result<String> {
+pub fn hash(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut sha = Sha256::new();
     let mut buffer = [0u8; 65536];
