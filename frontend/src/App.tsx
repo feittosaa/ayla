@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
-import Chat from './components/Chat';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import Space, { ProjectAvatar } from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
-import { ChevronLeftIcon, ChevronRightIcon } from './components/Icons';
-import { desktopSnapshot, supports, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Snapshot, type UsageMode } from './services/Desktop';
+import { ChevronLeftIcon, ChevronRightIcon, PlusIcon, SettingsIcon } from './components/Icons';
+import { desktopSnapshot, supports, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot, type UsageMode } from './services/Desktop';
 import './App.css';
 
 const profiles: { id: Profile | null; title: string; percent?: number; text: string }[] = [
@@ -17,10 +17,16 @@ const sections = [
   { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' },
   { id: 'memoria', label: 'Memória' }, { id: 'avancado', label: 'Opções avançadas' },
 ];
-type Page = 'chat' | 'models' | 'capabilities' | 'settings';
+type Page = 'models' | 'capabilities' | 'settings';
+/** Espaço aberto: a conversa geral ("ayla"), um projeto (pelo id) ou as configurações. */
+type SpaceId = 'ayla' | 'settings' | string;
 
 export default function App() {
-  const [page, setPage] = useState<Page>('chat'); const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
+  // Espaços já abertos continuam montados: conversas e respostas em andamento não se perdem.
+  const [visited, setVisited] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false); const [projectName, setProjectName] = useState(''); const [projectAbout, setProjectAbout] = useState(''); const [projectError, setProjectError] = useState('');
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const refresh = useCallback(async () => {
@@ -31,8 +37,12 @@ export default function App() {
   // O preparo automático começa no núcleo ao abrir; acompanhar enquanto estiver ativo.
   const preparing = Boolean(snapshot?.setup?.active) || (snapshot !== null && snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text')));
   useEffect(() => { if (!preparing) return; const timer = setInterval(() => void refresh(), 1000); return () => clearInterval(timer); }, [preparing, refresh]);
+  function openSpace(id: SpaceId) {
+    setSpace(id); setNotice(''); setError('');
+    if (id !== 'ayla' && id !== 'settings') setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
+  }
   function go(next: Page, section?: string) {
-    setPage(next); setNotice(''); setError('');
+    setSpace('settings'); setPage(next); setNotice(''); setError('');
     if (section) setTimeout(() => document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
@@ -52,6 +62,12 @@ export default function App() {
     try { await native('cloud_key', { key, remember, endpoint: draft?.cloud_endpoint || '' }); setKey(''); setNotice(remember ? 'Chave guardada no cofre do sistema.' : 'Chave disponível somente nesta sessão.'); }
     catch (e) { setError(errorText(e)); } finally { setSaving(false); }
   }
+  function closeNewProject() { setCreating(false); setProjectName(''); setProjectAbout(''); setProjectError(''); }
+  async function createProject(event: FormEvent) {
+    event.preventDefault(); setProjectError('');
+    try { const project = await native<Project>('create_project', { name: projectName, description: projectAbout }); await refresh(); closeNewProject(); openSpace(project.id); }
+    catch (e) { setProjectError(errorText(e)); }
+  }
   function toggleVoice(voice: boolean) {
     void quickSave({ voice }).then(() => { if (voice) void native('setup_start').catch(err => setError(errorText(err))).finally(() => void refresh()); });
   }
@@ -66,12 +82,26 @@ export default function App() {
   const transcriber = snapshot.models.some(m => supports(m, 'transcription'));
 
   return <div className="app-shell">
-    <div className="page" hidden={page !== 'chat'}><Chat snapshot={snapshot} refresh={refresh} onSettings={() => go('settings')} /></div>
+    <nav className="rail" aria-label="Espaços">
+      <button className="rail-item" aria-label="Ayla · conversa geral" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
+      <span className="rail-divider" aria-hidden="true" />
+      <div className="rail-projects">
+        {snapshot.projects.map(item => <button key={item.id} className="rail-item" aria-label={`Projeto ${item.name}`} title={item.name} aria-current={space === item.id ? 'page' : undefined} onClick={() => openSpace(item.id)}><ProjectAvatar project={item} /></button>)}
+        <button className="rail-item add" aria-label="Novo projeto" title="Novo projeto" onClick={() => setCreating(true)}><PlusIcon /></button>
+      </div>
+      <button className="rail-item" aria-label="Configurações" title="Configurações" aria-current={space === 'settings' ? 'page' : undefined} onClick={() => go('settings')}><SettingsIcon /></button>
+    </nav>
 
-    {page !== 'chat' && <div className="settings-layout">
+    <div className="spaces">
+      {['ayla', ...visited].map(id => {
+        const project = id === 'ayla' ? null : snapshot.projects.find(item => item.id === id);
+        if (project === undefined) return null;
+        return <div key={id} className="page" hidden={space !== id}><Space snapshot={snapshot} refresh={refresh} project={project} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); setSpace('ayla'); }} /></div>;
+      })}
+
+    {space === 'settings' && <div className="settings-layout">
       <aside className="sidebar settings-sidebar" aria-label="Seções das configurações">
-        <div className="brand"><span className="orb" aria-hidden="true" /><span className="brand-name">Ayla</span></div>
-        <button className="new-chat" onClick={() => go('chat')}><ChevronLeftIcon size={18} />Voltar à conversa</button>
+        <div className="brand"><span className="brand-name">Configurações</span></div>
         <nav className="conversation-list" aria-label="Seções">
           {sections.map(item => <button key={item.id} className="conversation-item" onClick={() => go('settings', item.id)}>{item.label}</button>)}
         </nav>
@@ -79,7 +109,6 @@ export default function App() {
 
       <main className="settings-main">
         <div className="settings-content">
-          <button className="ghost-button back-narrow" onClick={() => go(page === 'settings' ? 'chat' : 'settings')}><ChevronLeftIcon size={18} />{page === 'settings' ? 'Voltar à conversa' : 'Configurações'}</button>
           {page === 'models' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Models snapshot={snapshot} refresh={refresh} /></>}
           {page === 'capabilities' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Capabilities snapshot={snapshot} refresh={refresh} /></>}
 
@@ -186,6 +215,18 @@ export default function App() {
           {notice && <p role="status" className="notice">{notice}</p>}
         </div>
       </main>
+    </div>}
+    </div>
+
+    {creating && <div className="dialog-backdrop" onClick={closeNewProject}>
+      <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title" onSubmit={e => void createProject(e)} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') closeNewProject(); }}>
+        <h2 id="new-project-title">Novo projeto</h2>
+        <p>Um espaço com conversas e memória próprias, focado em algo específico. O que a Ayla aprende nele fica nele.</p>
+        <label>Nome<input autoFocus value={projectName} maxLength={80} onChange={e => setProjectName(e.target.value)} placeholder="Ex.: Mudança para Recife" /></label>
+        <label>Sobre o projeto (opcional)<textarea rows={3} maxLength={2000} value={projectAbout} onChange={e => setProjectAbout(e.target.value)} placeholder="Do que se trata, objetivos, prazos…" /></label>
+        {projectError && <p role="alert" className="app-error">{projectError}</p>}
+        <div className="row-actions"><button className="primary-action" disabled={!projectName.trim()}>Criar projeto</button><button type="button" className="ghost-button" onClick={closeNewProject}>Cancelar</button></div>
+      </form>
     </div>}
   </div>;
 }

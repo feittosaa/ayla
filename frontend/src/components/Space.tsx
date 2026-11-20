@@ -1,0 +1,137 @@
+import { useCallback, useEffect, useState } from 'react';
+import Chat from './Chat';
+import MemoryPanel from './MemoryPanel';
+import { native, errorText, type Conversation, type Project, type Snapshot } from '../services/Desktop';
+import { ChevronRightIcon, CloudIcon, ComputerIcon, PlusIcon, SidebarIcon } from './Icons';
+
+type View = 'chat' | 'overview' | 'memory';
+type Props = {
+  snapshot: Snapshot; refresh: () => Promise<void>;
+  /** `null` é o espaço geral da Ayla; senão, um projeto. */
+  project: Project | null;
+  onDeleted?: () => void;
+};
+
+/** Iniciais e cor estável de um projeto, usadas no trilho e no cabeçalho. */
+export function ProjectAvatar({ project, size = 36 }: { project: Project; size?: number }) {
+  const palette = ['#7d9bff', '#4fc79b', '#e8ad5a', '#e07fb0', '#a294f5', '#5cc2d6'];
+  const hash = [...project.id].reduce((sum, c) => sum + c.charCodeAt(0), 0);
+  const initials = project.name.trim().split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase() || '?';
+  return <span className="avatar" style={{ width: size, height: size, background: palette[hash % palette.length] }} aria-hidden="true">{initials}</span>;
+}
+
+/** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
+export default function Space({ snapshot, refresh, project, onDeleted }: Props) {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [view, setView] = useState<View>(project ? 'overview' : 'chat');
+  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 760);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const projectId = project?.id ?? null;
+  const mode = snapshot.preferences.usage_mode;
+  const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Neste computador; nuvem só com sua revisão';
+
+  useEffect(() => { native<Conversation[]>('conversations', { project: projectId }).then(setConversations).catch(e => setError(errorText(e))); }, [projectId]);
+  const onConversation = useCallback((item: Conversation) => {
+    setConversation(item);
+    setConversations(prev => prev.some(c => c.id === item.id) ? prev.map(c => c.id === item.id ? item : c) : [item, ...prev]);
+  }, []);
+  function openConversation(item: Conversation | null) {
+    if (busy && item?.id !== conversation?.id) return;
+    setConversation(item); setView('chat');
+    if (window.innerWidth < 760) setSidebar(false);
+  }
+
+  return <div className="chat-layout">
+    {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
+      <div className="brand">
+        {project ? <ProjectAvatar project={project} size={28} /> : <span className="orb" aria-hidden="true" />}
+        <span className="brand-name" title={project?.name}>{project ? project.name : 'Ayla'}</span>
+        <button className="icon-button" aria-label="Recolher a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon /></button>
+      </div>
+      {project && <nav className="space-nav" aria-label="Seções do projeto">
+        <button className="conversation-item" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Visão geral</button>
+        <button className="conversation-item" aria-current={view === 'memory' ? 'page' : undefined} onClick={() => setView('memory')}>Memória</button>
+      </nav>}
+      <button className="new-chat" disabled={busy} onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
+      <nav className="conversation-list" aria-label="Conversas">
+        {conversations.length > 0 && <p className="sidebar-label">Conversas</p>}
+        {conversations.map(item => <button key={item.id} className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} disabled={busy && item.id !== conversation?.id} onClick={() => openConversation(item)}>{item.title}</button>)}
+      </nav>
+      {!project && <div className="sidebar-footer"><p className="where">{mode === 'cloud_only' ? <CloudIcon size={18} /> : <ComputerIcon size={18} />}{where}</p></div>}
+    </aside>}
+
+    {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
+    <main className="chat-main" hidden={view !== 'chat'}>
+      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={conversation} onConversation={onConversation} onBusy={setBusy} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} />
+    </main>
+    {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
+    {project && view === 'memory' && <main className="settings-main"><div className="settings-content">
+      {!sidebar && <button className="ghost-button back-button-inline" onClick={() => setSidebar(true)}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
+      <MemoryPanel snapshot={snapshot} refresh={refresh} project={project} />
+    </div></main>}
+  </div>;
+}
+
+type OverviewProps = {
+  project: Project; conversations: Conversation[]; refresh: () => Promise<void>; error: string;
+  onOpen: (conversation: Conversation | null) => void; onDeleted?: () => void; onShowSidebar?: () => void;
+};
+function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, onShowSidebar, error: loadError }: OverviewProps) {
+  const [editing, setEditing] = useState(false); const [name, setName] = useState(project.name); const [description, setDescription] = useState(project.description);
+  const [confirmDelete, setConfirmDelete] = useState(false); const [saving, setSaving] = useState(false); const [error, setError] = useState('');
+  async function save() {
+    setSaving(true); setError('');
+    try { await native('update_project', { id: project.id, name, description }); await refresh(); setEditing(false); }
+    catch (e) { setError(errorText(e)); } finally { setSaving(false); }
+  }
+  async function remove() {
+    setSaving(true); setError('');
+    try { await native('delete_project', { id: project.id }); await refresh(); onDeleted?.(); }
+    catch (e) { setError(errorText(e)); setSaving(false); }
+  }
+  return <main className="settings-main"><div className="settings-content">
+    {onShowSidebar && <button className="ghost-button back-button-inline" onClick={onShowSidebar}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
+    <header className="project-header">
+      <ProjectAvatar project={project} size={48} />
+      <div className="row-text"><h1>{project.name}</h1><p className="row-hint">{project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} · {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}</p></div>
+      <button className="primary-action with-icon" onClick={() => onOpen(null)}><PlusIcon size={18} />Nova conversa</button>
+    </header>
+    {(error || loadError) && <p role="alert" className="app-error">{error || loadError}</p>}
+
+    <section className="settings-group" aria-labelledby="about-title"><h2 id="about-title">Sobre o projeto</h2>
+      <div className="group-card">
+        {editing ? <div className="group-row stacked">
+          <label className="row-title" htmlFor="project-name">Nome</label>
+          <input id="project-name" value={name} maxLength={80} onChange={e => setName(e.target.value)} />
+          <label className="row-title" htmlFor="project-about">Sobre o projeto</label>
+          <span className="row-hint">A Ayla usa isso para entender o foco das conversas deste projeto (só nas respostas neste computador).</span>
+          <textarea id="project-about" rows={4} maxLength={2000} value={description} onChange={e => setDescription(e.target.value)} placeholder="Ex.: TCC sobre energia solar no Nordeste; entrega em junho." />
+          <div className="row-actions"><button className="primary-action" disabled={saving || !name.trim()} onClick={() => void save()}>Salvar</button><button className="ghost-button" onClick={() => { setEditing(false); setName(project.name); setDescription(project.description); }}>Cancelar</button></div>
+        </div> : <div className="group-row">
+          <span className="row-text"><span className={project.description ? 'about-text' : 'row-hint'}>{project.description || 'Conte à Ayla do que se trata este projeto para ela manter o foco.'}</span></span>
+          <button onClick={() => { setName(project.name); setDescription(project.description); setEditing(true); }}>Editar</button>
+        </div>}
+      </div>
+    </section>
+
+    <section className="settings-group" aria-labelledby="recent-title"><h2 id="recent-title">Conversas recentes</h2>
+      <div className="group-card">
+        {!conversations.length && <div className="group-row"><span className="row-hint">Nenhuma conversa ainda. Comece uma nova; ela fica guardada neste projeto.</span></div>}
+        {conversations.slice(0, 6).map(item => <button key={item.id} className="group-row link-row" onClick={() => onOpen(item)}><span className="row-text"><span className="row-title">{item.title}</span></span><ChevronRightIcon size={18} /></button>)}
+      </div>
+    </section>
+
+    <section className="settings-group" aria-labelledby="danger-title"><h2 id="danger-title">Apagar projeto</h2>
+      <div className="group-card">
+        {confirmDelete ? <div className="group-row stacked" role="group" aria-label="Confirmar exclusão">
+          <span>Apagar <b>{project.name}</b> com {project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} e {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}? Isso não pode ser desfeito; o backup em Configurações guarda uma cópia antes.</span>
+          <div className="row-actions"><button className="danger-action" disabled={saving} onClick={() => void remove()}>Apagar de vez</button><button className="ghost-button" onClick={() => setConfirmDelete(false)}>Cancelar</button></div>
+        </div> : <div className="group-row">
+          <span className="row-text"><span className="row-hint">Remove o projeto, as conversas e as memórias dele. As memórias gerais não são afetadas.</span></span>
+          <button onClick={() => setConfirmDelete(true)}>Apagar…</button>
+        </div>}
+      </div>
+    </section>
+  </div></main>;
+}

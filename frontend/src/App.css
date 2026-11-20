@@ -1,5 +1,17 @@
-.app-shell { height: 100%; display: flex; flex-direction: column; color-scheme: dark; }
-.app-shell > .page { flex: 1; min-height: 0; }
+.app-shell { height: 100%; display: flex; color-scheme: dark; }
+.spaces { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.spaces > .page { flex: 1; min-height: 0; }
+
+/* Trilho de espaços: Ayla, projetos (e, no futuro, produtos) e Configurações */
+.rail { flex: 0 0 64px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 0; background: #0d0e10; border-right: 1px solid var(--ayla-border-soft); }
+.rail-projects { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; }
+.rail-divider { width: 28px; height: 1px; margin: 4px 0; background: var(--ayla-border); }
+.app-shell .rail-item { position: relative; width: 48px; height: 48px; min-height: 48px; padding: 0; flex: none; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 14px; background: transparent; color: var(--ayla-text-soft); }
+.app-shell .rail-item:hover:not(:disabled) { background: var(--ayla-hover); border: 0; color: var(--ayla-text); }
+.app-shell .rail-item[aria-current=page] { background: var(--ayla-hover); color: var(--ayla-text); }
+.app-shell .rail-item[aria-current=page]::before { content: ''; position: absolute; left: -8px; top: 12px; bottom: 12px; width: 3px; border-radius: 0 3px 3px 0; background: var(--ayla-accent); }
+.app-shell .rail-item.add { border: 1px dashed var(--ayla-border); }
+.avatar { flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 30%; color: #111214; font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
 .loading { margin: auto; color: var(--ayla-text-soft); }
 
 /* Controles básicos */
@@ -43,8 +55,24 @@
 .settings-content { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }
 .settings-header h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; letter-spacing: -0.5px; }
 .settings-header p { color: var(--ayla-text-soft); line-height: 1.6; }
-.app-shell .back-narrow { display: none; align-self: flex-start; }
 .app-shell .back-button { align-self: flex-start; margin-bottom: -18px; }
+.app-shell .back-button-inline { align-self: flex-start; margin-bottom: -18px; }
+.app-shell .with-icon { display: inline-flex; align-items: center; gap: 8px; }
+.app-shell .danger-action { background: #5c2620; border-color: #7a3229; color: #ffd9d2; font-weight: 600; }
+.app-shell .danger-action:hover:not(:disabled) { background: #6e2d25; border-color: #8f3b30; }
+
+/* Projetos */
+.project-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.project-header h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.4px; overflow-wrap: anywhere; }
+.about-text { white-space: pre-wrap; line-height: 1.6; overflow-wrap: anywhere; }
+.space-nav { display: flex; flex-direction: column; gap: 2px; }
+
+/* Diálogo */
+.dialog-backdrop { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; padding: 20px; background: #000a; }
+.dialog { width: min(480px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 24px; border: 1px solid var(--ayla-border); border-radius: 18px; background: var(--ayla-panel); }
+.dialog h2 { font-size: 18px; font-weight: 600; }
+.dialog p { color: var(--ayla-text-soft); font-size: 14px; line-height: 1.6; }
+.dialog label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ayla-text-soft); }
 .settings-group { display: flex; flex-direction: column; gap: 10px; }
 .settings-group > h2 { font-size: 13px; font-weight: 600; color: var(--ayla-text-soft); }
 .group-note { font-size: 13px; color: var(--ayla-text-faint); padding: 0 4px; }
@@ -126,7 +154,6 @@ label.group-row { cursor: pointer; }
 
 @media (max-width: 760px) {
   .settings-sidebar { display: none; }
-  .app-shell .back-narrow { display: inline-flex; }
   .app-shell .back-button { display: none; }
   .settings-main { padding: 20px 14px 40px; }
   .segmented { grid-template-columns: repeat(2, minmax(0, 1fr)); }
