@@ -3,16 +3,22 @@ import Chat from './components/Chat';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
+import { ChevronLeftIcon, ChevronRightIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, modeLabels, native, savePreferences, type Preferences, type Profile, type Snapshot, type UsageMode } from './services/Desktop';
 import './App.css';
 
-const profiles: { id: Profile; title: string; percent: number; text: string }[] = [
-  { id: 'light', title: 'Leve', percent: 25, text: 'Priorizar economia de recursos.' },
-  { id: 'moderate', title: 'Moderado', percent: 50, text: 'Equilibrar recursos e capacidade.' },
-  { id: 'maximum', title: 'Máximo', percent: 75, text: 'Priorizar capacidade dentro do hardware disponível.' },
+const profiles: { id: Profile | null; title: string; percent?: number; text: string }[] = [
+  { id: null, title: 'Automático', text: 'A Ayla ajusta os recursos ao seu computador.' },
+  { id: 'light', title: 'Leve', percent: 25, text: 'Até 25% da memória. Prioriza economia.' },
+  { id: 'moderate', title: 'Moderado', percent: 50, text: 'Até 50% da memória. Equilibra recursos e capacidade.' },
+  { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
+];
+const sections = [
+  { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' },
+  { id: 'memoria', label: 'Memória' }, { id: 'avancado', label: 'Opções avançadas' },
 ];
 type Page = 'chat' | 'models' | 'capabilities' | 'settings';
-const pages: { id: Page; label: string }[] = [{ id: 'chat', label: 'Conversa' }, { id: 'settings', label: 'Configurações' }];
+
 export default function App() {
   const [page, setPage] = useState<Page>('chat'); const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
@@ -25,10 +31,20 @@ export default function App() {
   // O preparo automático começa no núcleo ao abrir; acompanhar enquanto estiver ativo.
   const preparing = Boolean(snapshot?.setup?.active) || (snapshot !== null && snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text')));
   useEffect(() => { if (!preparing) return; const timer = setInterval(() => void refresh(), 1000); return () => clearInterval(timer); }, [preparing, refresh]);
+  function go(next: Page, section?: string) {
+    setPage(next); setNotice(''); setError('');
+    if (section) setTimeout(() => document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  }
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
-  async function apply() {
+  /** Salva na hora uma mudança simples (interruptores e perfil), sem mexer no que está em edição. */
+  async function quickSave(values: Partial<Preferences>, message = '') {
+    if (!snapshot || saving) return; setSaving(true); setError(''); setNotice('');
+    try { await savePreferences({ ...snapshot.preferences, ...values, onboarding_complete: true }); setDraft(prev => prev ? { ...prev, ...values } : prev); await refresh(); if (message) setNotice(message); }
+    catch (e) { setError(errorText(e)); } finally { setSaving(false); }
+  }
+  async function apply(message = 'Preferências salvas.') {
     if (!draft || saving) return; setSaving(true); setNotice(''); setError('');
-    try { const value = { ...draft, onboarding_complete: true }; await savePreferences(value); setDraft(value); await refresh(); setNotice('Preferências salvas.'); }
+    try { const value = { ...draft, onboarding_complete: true }; await savePreferences(value); setDraft(value); await refresh(); setNotice(message); }
     catch (e) { setError(errorText(e)); } finally { setSaving(false); }
   }
   async function saveKey() {
@@ -36,41 +52,140 @@ export default function App() {
     try { await native('cloud_key', { key, remember, endpoint: draft?.cloud_endpoint || '' }); setKey(''); setNotice(remember ? 'Chave guardada no cofre do sistema.' : 'Chave disponível somente nesta sessão.'); }
     catch (e) { setError(errorText(e)); } finally { setSaving(false); }
   }
-  const providerSaved = Boolean(draft?.cloud_endpoint) && draft?.cloud_endpoint === snapshot?.preferences.cloud_endpoint;
-  const profile = draft?.profile || snapshot?.recommended_profile || 'moderate';
+  function toggleVoice(voice: boolean) {
+    void quickSave({ voice }).then(() => { if (voice) void native('setup_start').catch(err => setError(errorText(err))).finally(() => void refresh()); });
+  }
+
+  if (!snapshot || !draft) return <div className="app-shell"><main className="loading">{error ? <p role="alert" className="app-error">{error}</p> : <p role="status">Preparando seu espaço…</p>}</main></div>;
+
+  const prefs = snapshot.preferences;
+  const providerSaved = Boolean(draft.cloud_endpoint) && draft.cloud_endpoint === prefs.cloud_endpoint;
+  const automatic = prefs.profile === null && prefs.resource_percent === null;
+  const current = automatic ? profiles[0] : profiles.find(p => p.id === prefs.profile && prefs.resource_percent === null);
+  const profile = draft.profile || snapshot.recommended_profile || 'moderate';
+  const transcriber = snapshot.models.some(m => supports(m, 'transcription'));
+
   return <div className="app-shell">
-    <header className="app-header"><strong>Ayla</strong><span>Seu espaço pessoal</span></header>
-    <nav aria-label="Navegação principal">{pages.map(item => <button key={item.id} aria-current={(page === item.id || (item.id === 'settings' && page !== 'chat')) ? 'page' : undefined} onClick={() => { setPage(item.id); setNotice(''); setError(''); }}>{item.label}</button>)}</nav>
-    {!snapshot && <main className="dashboard">{error ? <p role="alert" className="app-error">{error}</p> : <p role="status">Preparando seu espaço…</p>}</main>}
-    {snapshot && draft && <>
-      {page === 'chat' && <main className="chat-page"><Chat snapshot={snapshot} refresh={refresh} /></main>}
-      {page === 'models' && <main className="content-page"><button className="settings-back" onClick={() => setPage('settings')}>← Configurações</button><Models snapshot={snapshot} refresh={refresh} /></main>}
-      {page === 'capabilities' && <main className="content-page"><button className="settings-back" onClick={() => setPage('settings')}>← Configurações</button><Capabilities snapshot={snapshot} refresh={refresh} /></main>}
-      {page === 'settings' && <main className="dashboard">
-        {error && <p role="alert" className="app-error">{error}</p>}
-        <section><h1>Configurações</h1><p>A Ayla cuida das escolhas do dia a dia. Personalize apenas se quiser.</p></section>
-        <section className="panel"><h2>Perfil Ayla</h2><p>{draft.profile === null && draft.resource_percent === null ? 'Automático: recursos ajustados ao seu computador e modelo escolhido conforme o pedido.' : 'Você está usando ajustes personalizados.'}</p><button disabled={saving} onClick={async () => { setSaving(true); try { const value = { ...draft, profile: null, resource_percent: null, onboarding_complete: true }; await savePreferences(value); setDraft(value); await refresh(); setNotice('Perfil automático ativado.'); } catch (e) { setError(errorText(e)); } finally { setSaving(false); } }}>Usar configuração automática</button>{!snapshot.models.length && <p>A conversa com IA ainda precisa de um modelo. Você pode prepará-lo na tela de conversa, com confirmação do download.</p>}</section>
-        <section className="panel" aria-labelledby="profile-title"><h2 id="profile-title">Preferência de uso</h2><p>Perfil sugerido: {profiles.find(p => p.id === snapshot.recommended_profile)?.title}. Você pode ajustar; salvar não baixa nem carrega modelos.</p><fieldset className="profiles"><legend>Perfil de recursos</legend><label className={draft.profile === null && draft.resource_percent === null ? 'selected' : ''}><input type="radio" name="profile" checked={draft.profile === null && draft.resource_percent === null} onChange={() => update({ profile: null, resource_percent: null })} /><span><b>Automático · recomendado</b><small>A Ayla ajusta os recursos ao seu computador.</small></span></label>{profiles.map(item => <label key={item.id} className={draft.profile === item.id ? 'selected' : ''}><input type="radio" name="profile" value={item.id} checked={draft.profile === item.id} onChange={() => update({ profile: item.id, resource_percent: null })} /><span><b>{item.title} · até {item.percent}% da RAM</b><small>{item.text}</small></span></label>)}</fieldset>
-          <details><summary>Ajustes de recursos</summary><label>Limite personalizado de RAM (%)<input type="number" min={5} max={90} value={draft.resource_percent ?? profiles.find(p => p.id === profile)?.percent ?? 50} onChange={e => update({ resource_percent: Number(e.target.value) })} /></label><label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} value={draft.context_tokens} onChange={e => update({ context_tokens: Number(e.target.value) })} /></label><label>Liberar modelo após inatividade (segundos)<input type="number" min={0} max={3600} value={draft.idle_seconds} onChange={e => update({ idle_seconds: Number(e.target.value) })} /></label><p>O orçamento limita a estimativa de carregamento; consumo real varia entre arquiteturas. Modelos incompatíveis produzem um erro sem carregar outro automaticamente.</p></details>
-          <button className="primary-action" disabled={saving} onClick={() => void apply()}>{saving ? 'Salvando…' : 'Salvar preferências'}</button>
-        </section>
-        <section className="panel"><h2>Personalidade</h2><p>Como você quer que a Ayla converse? Vale mudar o tom, o humor e o nível de detalhe. As mudanças valem para as próximas respostas.</p><label htmlFor="personality">Jeito de responder</label><textarea id="personality" rows={5} maxLength={4000} value={draft.personality} placeholder="Ex.: seja acolhedora, direta e use humor leve. Explique com exemplos simples." onChange={e => update({ personality: e.target.value })} /><p>{draft.personality.trim() ? 'Personalidade personalizada.' : 'Usando a personalidade original da Ayla.'} As regras de privacidade continuam valendo.</p><button className="primary-action" disabled={saving} onClick={() => void apply()}>Salvar personalidade</button><button disabled={saving} onClick={async () => { setSaving(true); try { const value = { ...snapshot.preferences, personality: '' }; await savePreferences(value); setDraft(prev => prev ? { ...prev, personality: '' } : value); await refresh(); setNotice('Personalidade original restaurada.'); } catch (e) { setError(errorText(e)); } finally { setSaving(false); } }}>Restaurar personalidade original</button></section>
-        <MemoryPanel snapshot={snapshot} refresh={refresh} />
-        <section className="panel" aria-labelledby="voice-title"><h2 id="voice-title">Voz</h2>
-          <p>Fale com a Ayla pelo microfone e ouça as respostas. Transcrição e voz rodam neste computador.</p>
-          <label className="memory-toggle"><input type="checkbox" checked={snapshot.preferences.voice === true} disabled={saving} onChange={e => { const voice = e.target.checked; setSaving(true); void savePreferences({ ...snapshot.preferences, voice }).then(async () => { setDraft(prev => prev ? { ...prev, voice } : prev); await refresh(); if (voice) void native('setup_start').catch(err => setError(errorText(err))).finally(() => void refresh()); }).catch(err => setError(errorText(err))).finally(() => setSaving(false)); }} />Usar voz (microfone e respostas faladas)</label>
-          {snapshot.preferences.voice === true && <p>{snapshot.models.some(m => supports(m, 'transcription')) && snapshot.models.some(m => supports(m, 'speech')) ? `Pronta: ${snapshot.models.filter(m => supports(m, 'transcription') || supports(m, 'speech')).map(m => m.name).join(' e ')}.` : snapshot.setup?.active ? 'Preparando a voz…' : <button onClick={() => void native('setup_start').catch(err => setError(errorText(err))).finally(() => void refresh())}>Preparar voz</button>}</p>}
-        </section>
-        <details className="panel"><summary>Opções avançadas</summary><p>Controles opcionais para personalizar o funcionamento da Ayla.</p><div className="button-row"><button onClick={() => setPage('models')}>Modelos e componentes</button><button onClick={() => setPage('capabilities')}>Ferramentas de voz e memória</button></div>
-        <section className="panel" aria-labelledby="hardware-title"><h2 id="hardware-title">Seu computador</h2><div className="hardware-summary"><span><b>{gib(snapshot.hardware.ram_total_bytes)} GB</b> de memória</span><span><b>{snapshot.hardware.logical_cpus}</b> processadores lógicos</span></div><p>{snapshot.hardware.gpus.length ? snapshot.hardware.gpus.map(g => `${g.vendor}${g.vram_total_bytes ? ` · ${gib(g.vram_total_bytes)} GB gráficos detectados` : ' · memória gráfica não identificada'}`).join(' / ') : 'Memória gráfica não identificada. Isso não impede o uso da Ayla.'}</p><p>Orçamento disponível agora: {formatBytes(snapshot.memory_budget_bytes)}, com reserva para o sistema.</p><button onClick={() => void refresh()}>Atualizar estado</button></section>
-        {page === 'settings' && <>
-          <section className="panel"><h2>Onde a IA trabalha</h2><label>Modo de uso<select value={draft.usage_mode} onChange={e => update({ usage_mode: e.target.value as UsageMode })}>{Object.entries(modeLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}</select></label><p>Conteúdo sensível ou ainda não verificado fica local em todos os modos. A nuvem recebe o pedido e a personalidade, mostrados para revisão e declarados públicos. Sugestões não autorizam envios.</p><label>Endereço do provedor compatível<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label><label>Modelo cloud para conversa<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label><button className="primary-action" disabled={saving} onClick={() => void apply()}>Salvar modo e provedor</button><label>Chave do provedor<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} /></label><label><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar no cofre do sistema</label><button disabled={saving || !key || !providerSaved} onClick={() => void saveKey()}>{remember ? 'Guardar chave no cofre' : 'Usar chave nesta sessão'}</button><button disabled={saving || !providerSaved} onClick={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</button></section>
-          <section className="panel"><h2>Memória e dados</h2><label>Mensagens recentes no contexto<input type="number" min={2} max={200} value={draft.history_messages} onChange={e => update({ history_messages: Number(e.target.value) })} /></label><label>Limite de caracteres do histórico<input type="number" min={1000} max={200000} value={draft.history_chars} onChange={e => update({ history_chars: Number(e.target.value) })} /></label><p>As conversas são isoladas; respostas interrompidas ficam identificadas e não entram no contexto. Histórico antigo permanece no banco local, sem resumos aleatórios.</p><button disabled={saving} onClick={() => void apply()}>Salvar limites</button><button onClick={() => { void native<number | null>('import_legacy').then(count => { if (count !== null) setNotice(`Histórico importado: ${count} mensagens em uma conversa separada. Fonte original preservada.`); }).catch(e => setError(errorText(e))); }}>Importar cópia do histórico anterior</button><button onClick={() => { void native('backup_data').then(() => setNotice('Backup consistente criado na pasta de dados da Ayla.')).catch(e => setError(errorText(e))); }}>Criar backup</button></section>
-          <section className="panel"><h2>Medições locais</h2><p>As últimas tarefas registram tempo até o primeiro trecho, duração e quantidade de trechos. Trechos de streaming não equivalem necessariamente a tokens do modelo.</p>{!snapshot.metrics.length && <p>Ainda sem medições de geração.</p>}{snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.cancelled ? ' · interrompida' : ''}</p>)}</section>
-        </>}
-        </details>
-        {notice && <p role="status">{notice}</p>}
-      </main>}
-    </>}
+    <div className="page" hidden={page !== 'chat'}><Chat snapshot={snapshot} refresh={refresh} onSettings={() => go('settings')} /></div>
+
+    {page !== 'chat' && <div className="settings-layout">
+      <aside className="sidebar settings-sidebar" aria-label="Seções das configurações">
+        <div className="brand"><span className="orb" aria-hidden="true" /><span className="brand-name">Ayla</span></div>
+        <button className="new-chat" onClick={() => go('chat')}><ChevronLeftIcon size={18} />Voltar à conversa</button>
+        <nav className="conversation-list" aria-label="Seções">
+          {sections.map(item => <button key={item.id} className="conversation-item" onClick={() => go('settings', item.id)}>{item.label}</button>)}
+        </nav>
+      </aside>
+
+      <main className="settings-main">
+        <div className="settings-content">
+          <button className="ghost-button back-narrow" onClick={() => go(page === 'settings' ? 'chat' : 'settings')}><ChevronLeftIcon size={18} />{page === 'settings' ? 'Voltar à conversa' : 'Configurações'}</button>
+          {page === 'models' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Models snapshot={snapshot} refresh={refresh} /></>}
+          {page === 'capabilities' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Capabilities snapshot={snapshot} refresh={refresh} /></>}
+
+          {page === 'settings' && <>
+            <header className="settings-header"><h1>Configurações</h1><p>A Ayla cuida das escolhas do dia a dia. Mude só o que quiser.</p></header>
+            {error && <p role="alert" className="app-error">{error}</p>}
+
+            <section id="uso" className="settings-group" aria-labelledby="uso-title"><h2 id="uso-title">Uso e personalidade</h2>
+              <div className="group-card">
+                <fieldset className="group-row stacked">
+                  <legend className="row-title">Preferência de uso</legend>
+                  <span className="row-hint">Quanto do computador a Ayla pode usar. Mudar aqui não baixa nem carrega modelos.</span>
+                  <div className="segmented">{profiles.map(item => <label key={item.title}><input type="radio" name="profile" checked={current === item} disabled={saving} onChange={() => void quickSave({ profile: item.id, resource_percent: null }, `Preferência de uso: ${item.title}.`)} /><span>{item.title}</span></label>)}</div>
+                  <span className="row-hint">{current ? current.text : `Personalizado: até ${prefs.resource_percent ?? profiles.find(p => p.id === prefs.profile)?.percent}% da memória.`}{automatic && ` Sugestão para este computador: ${profiles.find(p => p.id === snapshot.recommended_profile)?.title}.`}</span>
+                </fieldset>
+                <div className="group-row stacked">
+                  <label className="row-title" htmlFor="personality">Personalidade</label>
+                  <span className="row-hint">Como você quer que a Ayla converse: tom, humor e nível de detalhe. Não muda as regras de privacidade.</span>
+                  <textarea id="personality" rows={4} maxLength={4000} value={draft.personality} placeholder="Ex.: seja acolhedora, direta e use humor leve. Explique com exemplos simples." onChange={e => update({ personality: e.target.value })} />
+                  <div className="row-actions">
+                    <button className="primary-action" disabled={saving || draft.personality === prefs.personality} onClick={() => void apply('Personalidade salva.')}>Salvar</button>
+                    <button className="ghost-button" disabled={saving || !prefs.personality.trim()} onClick={() => { setDraft(prev => prev ? { ...prev, personality: '' } : prev); void quickSave({ personality: '' }, 'Personalidade original restaurada.'); }}>Restaurar a original</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section id="microfone" className="settings-group" aria-labelledby="mic-title"><h2 id="mic-title">Microfone</h2>
+              <div className="group-card">
+                <label className="group-row">
+                  <span className="row-text"><span className="row-title">Falar com a Ayla</span><span className="row-hint">{prefs.voice === false ? 'A transcrição roda neste computador; a Ayla responde em texto.' : transcriber ? 'Pronto neste computador. A Ayla responde em texto.' : snapshot.setup?.active ? 'Preparando o microfone…' : 'Ativado, mas ainda falta preparar a transcrição.'}</span></span>
+                  <input type="checkbox" role="switch" className="switch" checked={prefs.voice !== false} disabled={saving} onChange={e => toggleVoice(e.target.checked)} />
+                </label>
+                {prefs.voice !== false && !transcriber && !snapshot.setup?.active && <div className="group-row"><span className="row-text"><span className="row-title">Transcrição</span></span><button onClick={() => void native('setup_start').catch(err => setError(errorText(err))).finally(() => void refresh())}>Preparar agora</button></div>}
+              </div>
+            </section>
+
+            <section id="notificacoes" className="settings-group" aria-labelledby="notify-title"><h2 id="notify-title">Notificações</h2>
+              <div className="group-card">
+                <label className="group-row">
+                  <span className="row-text"><span className="row-title">Resposta pronta</span><span className="row-hint">Quando você estiver em outra janela</span></span>
+                  <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.reply} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, reply: e.target.checked } })} />
+                </label>
+                <label className="group-row">
+                  <span className="row-text"><span className="row-title">Preparo de modelos</span><span className="row-hint">Quando um download termina ou dá erro</span></span>
+                  <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.setup} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, setup: e.target.checked } })} />
+                </label>
+              </div>
+              <p className="group-note">As notificações nunca mostram o conteúdo das conversas.</p>
+            </section>
+
+            <MemoryPanel snapshot={snapshot} refresh={refresh} />
+
+            <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
+              <div className="group-card">
+                <button className="group-row link-row" onClick={() => go('models')}><span className="row-text"><span className="row-title">Modelos e componentes</span><span className="row-hint">Baixar, importar e remover modelos e motores</span></span><ChevronRightIcon size={18} /></button>
+                <button className="group-row link-row" onClick={() => go('capabilities')}><span className="row-text"><span className="row-title">Ferramentas de transcrição e memória</span><span className="row-hint">Transcrever arquivos e buscar memórias por significado</span></span><ChevronRightIcon size={18} /></button>
+              </div>
+              <details className="group-card advanced-details">
+                <summary>Recursos, nuvem e dados</summary>
+                <div className="advanced-block"><h3>Seu computador</h3>
+                  <p><b>{gib(snapshot.hardware.ram_total_bytes)} GB</b> de memória · <b>{snapshot.hardware.logical_cpus}</b> processadores lógicos</p>
+                  <p>{snapshot.hardware.gpus.length ? snapshot.hardware.gpus.map(g => `${g.vendor}${g.vram_total_bytes ? ` · ${gib(g.vram_total_bytes)} GB gráficos detectados` : ' · memória gráfica não identificada'}`).join(' / ') : 'Memória gráfica não identificada. Isso não impede o uso da Ayla.'}</p>
+                  <p>Orçamento disponível agora: {formatBytes(snapshot.memory_budget_bytes)}, com reserva para o sistema.</p>
+                  <button onClick={() => void refresh()}>Atualizar</button>
+                </div>
+                <div className="advanced-block"><h3>Limites técnicos</h3>
+                  <label>Limite personalizado de memória (%)<input type="number" min={5} max={90} value={draft.resource_percent ?? profiles.find(p => p.id === profile)?.percent ?? 50} onChange={e => update({ resource_percent: Number(e.target.value) })} /></label>
+                  <label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} value={draft.context_tokens} onChange={e => update({ context_tokens: Number(e.target.value) })} /></label>
+                  <label>Liberar modelo após inatividade (segundos)<input type="number" min={0} max={3600} value={draft.idle_seconds} onChange={e => update({ idle_seconds: Number(e.target.value) })} /></label>
+                  <label>Mensagens recentes no contexto<input type="number" min={2} max={200} value={draft.history_messages} onChange={e => update({ history_messages: Number(e.target.value) })} /></label>
+                  <label>Limite de caracteres do histórico<input type="number" min={1000} max={200000} value={draft.history_chars} onChange={e => update({ history_chars: Number(e.target.value) })} /></label>
+                  <p>O orçamento limita a estimativa de carregamento; o consumo real varia entre arquiteturas. Respostas interrompidas ficam identificadas e não entram no contexto.</p>
+                  <button className="primary-action" disabled={saving} onClick={() => void apply('Limites salvos.')}>Salvar limites</button>
+                </div>
+                <div className="advanced-block"><h3>Onde a IA trabalha</h3>
+                  <label>Modo de uso<select value={draft.usage_mode} onChange={e => update({ usage_mode: e.target.value as UsageMode })}>{Object.entries(modeLabels).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}</select></label>
+                  <p>Conteúdo sensível ou ainda não verificado fica local em todos os modos. A nuvem recebe o pedido e a personalidade, mostrados para revisão e declarados públicos. Sugestões não autorizam envios.</p>
+                  <label>Endereço do provedor compatível<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label>
+                  <label>Modelo na nuvem para conversa<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label>
+                  <button className="primary-action" disabled={saving} onClick={() => void apply('Modo e provedor salvos.')}>Salvar modo e provedor</button>
+                  <label>Chave do provedor<input type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} /></label>
+                  <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar no cofre do sistema</label>
+                  <div className="row-actions">
+                    <button disabled={saving || !key || !providerSaved} onClick={() => void saveKey()}>{remember ? 'Guardar chave no cofre' : 'Usar chave nesta sessão'}</button>
+                    <button disabled={saving || !providerSaved} onClick={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</button>
+                  </div>
+                </div>
+                <div className="advanced-block"><h3>Dados</h3>
+                  <p>As conversas ficam isoladas no banco local. O histórico antigo permanece guardado, sem resumos automáticos.</p>
+                  <div className="row-actions">
+                    <button onClick={() => { void native('backup_data').then(() => setNotice('Backup criado na pasta de dados da Ayla.')).catch(e => setError(errorText(e))); }}>Criar backup</button>
+                    <button onClick={() => { void native<number | null>('import_legacy').then(count => { if (count !== null) setNotice(`Histórico importado: ${count} mensagens em uma conversa separada. Fonte original preservada.`); }).catch(e => setError(errorText(e))); }}>Importar histórico anterior</button>
+                  </div>
+                </div>
+                <div className="advanced-block"><h3>Medições locais</h3>
+                  <p>Tempo até o primeiro trecho, duração e quantidade de trechos das últimas respostas.</p>
+                  {!snapshot.metrics.length && <p>Ainda sem medições.</p>}
+                  {snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.cancelled ? ' · interrompida' : ''}</p>)}
+                </div>
+              </details>
+            </section>
+          </>}
+          {notice && <p role="status" className="notice">{notice}</p>}
+        </div>
+      </main>
+    </div>}
   </div>;
 }

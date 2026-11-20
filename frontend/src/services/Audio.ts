@@ -25,13 +25,15 @@ export function resample(input: Float32Array, from: number, to = 16000): Float32
   return output;
 }
 
-function base64(bytes: Uint8Array) {
+export function base64(bytes: Uint8Array) {
   let binary = '';
   for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
   return btoa(binary);
 }
 
-export async function recordWav(limitMs = 30000): Promise<{ stop: () => void; result: Promise<string> }> {
+export type Recording = { stop: () => void; result: Promise<string>; peek: () => string | null };
+
+export async function recordWav(limitMs = 30000): Promise<Recording> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
   const context = new AudioContext();
   await context.resume();
@@ -41,6 +43,7 @@ export async function recordWav(limitMs = 30000): Promise<{ stop: () => void; re
   processor.onaudioprocess = event => { const data = event.inputBuffer.getChannelData(0); chunks.push(new Float32Array(data)); length += data.length; };
   source.connect(processor); processor.connect(context.destination);
   let finished = false;
+  const collect = () => { const samples = new Float32Array(length); let offset = 0; for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; } return samples; };
   let finish: () => void = () => {};
   const result = new Promise<string>((resolve, reject) => {
     finish = () => {
@@ -49,11 +52,11 @@ export async function recordWav(limitMs = 30000): Promise<{ stop: () => void; re
       stream.getTracks().forEach(track => track.stop());
       const rate = context.sampleRate; void context.close();
       if (length < rate * 0.3) { reject(new Error('Gravação curta demais. Toque no microfone, fale e toque de novo.')); return; }
-      const samples = new Float32Array(length); let offset = 0;
-      for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; }
-      resolve(base64(encodeWav(resample(samples, rate), 16000)));
+      resolve(base64(encodeWav(resample(collect(), rate), 16000)));
     };
   });
   const timer = setTimeout(() => finish(), limitMs);
-  return { stop: () => finish(), result };
+  // Áudio gravado até agora, para a prévia ao vivo.
+  const peek = () => finished || length < context.sampleRate * 0.5 ? null : base64(encodeWav(resample(collect(), context.sampleRate), 16000));
+  return { stop: () => finish(), result, peek };
 }

@@ -37,10 +37,10 @@ export default function Models({ snapshot, refresh }: Props) {
       {snapshot.catalog.map(entry => <article className="model-row" key={entry.id}><div><b>{entry.name}{entry.id === snapshot.recommended_model ? ' · recomendado' : ''}</b><small>{entry.summary}</small><small>Usa até {formatBytes(entry.memory_bytes)} de memória{entry.fits ? '' : ' · não cabe no orçamento atual'}</small></div><ModelSetup entry={entry} refresh={refresh} /></article>)}
     </section>
     <section className="panel"><h2>Importar modelo</h2>
-      <label>Capacidade<select value={capability} disabled={busy} onChange={e => setCapability(e.target.value as Capability)}>{Object.entries(labels).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
+      <label>Capacidade<select value={capability} disabled={busy} onChange={e => setCapability(e.target.value as Capability)}>{Object.entries(labels).filter(([key]) => key !== 'speech').map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
       <label>Nome para identificar<input value={name} disabled={busy} onChange={e => setName(e.target.value)} placeholder="Nome do seu modelo" /></label>
-      <p>{capability === 'speech' ? 'Escolha uma pasta de modelo VITS para sherpa-onnx, com arquivo ONNX, tokens.txt e dados auxiliares.' : capability === 'transcription' ? 'Escolha um modelo GGML do whisper.cpp.' : capability === 'vision' ? 'Escolha o modelo GGUF e, em seguida, seu projetor multimodal compatível.' : 'Escolha um arquivo GGUF compatível com llama.cpp.'}</p>
-      <button className="primary-action" disabled={busy} onClick={() => void importModel()}>Escolher {capability === 'speech' ? 'pasta' : 'arquivo'} e importar</button>
+      <p>{capability === 'transcription' ? 'Escolha um modelo GGML do whisper.cpp.' : capability === 'vision' ? 'Escolha o modelo GGUF e, em seguida, seu projetor multimodal compatível.' : 'Escolha um arquivo GGUF compatível com llama.cpp.'}</p>
+      <button className="primary-action" disabled={busy} onClick={() => void importModel()}>Escolher arquivo e importar</button>
     </section>
     <section className="panel"><h2>Biblioteca local</h2>
       {!snapshot.models.length && <p>Nenhum modelo importado. Você pode continuar usando a aplicação.</p>}

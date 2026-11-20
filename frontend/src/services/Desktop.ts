@@ -8,6 +8,7 @@ export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
   resource_percent: number | null; usage_mode: UsageMode; cloud_endpoint: string; cloud_model: string;
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
+  notifications: { reply: boolean; setup: boolean };
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
@@ -32,7 +33,7 @@ export type Message = { role: 'user' | 'assistant'; content: string; complete: b
 export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error'; text?: string; received?: number; total?: number; facts?: Fact[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 export type ChatRequest = Omit<CapabilityRequest, 'text' | 'cloud_model'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; image: string | null };
-export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Síntese de voz', embedding: 'Memória semântica' };
+export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 
 export async function desktopSnapshot(): Promise<Snapshot> {

@@ -117,6 +117,7 @@ fn allow_microphone(_: &tauri::App) {}
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let directory = std::env::var_os("AYLA_DATA_DIR")
                 .map(std::path::PathBuf::from)
@@ -136,8 +137,13 @@ pub fn run() {
             // Perfil principal pronto sem cliques: prepara o que faltar ao abrir.
             let setup = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Some(core) = setup.try_state::<Core>() {
-                    let _ = core.prepare_defaults().await;
+                // O núcleo é registrado logo abaixo; esperar por ele evita uma corrida.
+                for _ in 0..200 {
+                    if let Some(core) = setup.try_state::<Core>() {
+                        let _ = core.prepare_defaults(&setup).await;
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             });
             let handle = app.handle().clone();
@@ -161,7 +167,8 @@ pub fn run() {
             core::services::install_runtime,
             core::services::install_catalog_model,
             core::services::setup_start,
-            core::services::speak,
+            core::services::transcribe_preview,
+            core::services::paste_image,
             core::services::memory_list,
             core::services::memory_save,
             core::services::memory_delete,

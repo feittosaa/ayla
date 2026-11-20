@@ -492,7 +492,7 @@ A infraestrutura inicial da Ayla já possui:
 
 Os próximos passos devem priorizar **fundação arquitetural e performance**, antes de adicionar dezenas de novas capacidades.
 
-Consulte [`PIPELINE.md`](PIPELINE.md) para o planejamento de implementação.
+Consulte [`pipeline.md`](pipeline.md) para o planejamento de implementação.
 
 ---
 
