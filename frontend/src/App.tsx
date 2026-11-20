@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
+import { DesktopSettings, quickStyle, useDesktopView } from './components/DesktopIntegration';
 import Space from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
-import { ChevronLeftIcon, ChevronRightIcon, SettingsIcon } from './components/Icons';
+import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
@@ -15,7 +16,7 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'nuvem', label: 'Nuvem' },
+  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'avancado', label: 'Opções avançadas' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
@@ -32,6 +33,18 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
+  const [desktopError, setDesktopError] = useState('');
+  const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
+  const view = useDesktopView(onQuick, setDesktopError);
+  const panelReady = Boolean((snapshot && draft) || error);
+  useLayoutEffect(() => {
+    if (panelReady && view.quick && view.pending != null) {
+      void native('quick_ready', { generation: view.pending }).catch(e => setDesktopError(errorText(e)));
+    }
+  }, [panelReady, view.quick, view.pending]);
+  function desktopAction(action: string) {
+    void native('desktop_action', {action}).catch(e => setDesktopError(errorText(e)));
+  }
   const refresh = useCallback(async () => {
     try { const value = await desktopSnapshot(); setSnapshot(value); setDraft(prev => prev || value.preferences); }
     catch (e) { setError(errorText(e)); }
@@ -39,7 +52,17 @@ export default function App() {
   useEffect(() => { void refresh(); }, [refresh]);
   // O preparo automático começa no núcleo ao abrir; acompanhar enquanto estiver ativo.
   const preparing = Boolean(snapshot?.setup?.active) || (snapshot !== null && snapshot.preferences.usage_mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text')));
-  useEffect(() => { if (!preparing) return; const timer = setInterval(() => void refresh(), 1000); return () => clearInterval(timer); }, [preparing, refresh]);
+  useEffect(() => {
+    if (!preparing) return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    function sync() {
+      clearInterval(timer);
+      if (!document.hidden) { void refresh(); timer = setInterval(() => void refresh(), 1000); }
+    }
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', sync); };
+  }, [preparing, refresh]);
   function openSpace(id: SpaceId) {
     setSpace(id); setNotice(''); setError('');
   }
@@ -87,7 +110,9 @@ export default function App() {
   const profile = draft.profile || snapshot.recommended_profile || 'moderate';
   const transcriber = snapshot.models.some(m => supports(m, 'transcription'));
 
-  return <div className="app-shell">
+  return <div className={view.quick ? 'app-shell quick-view' : 'app-shell'} style={view.quick ? quickStyle(view.theme, prefs.desktop) : undefined}>
+    {view.quick && <div className="quick-toolbar"><span>Visão rápida</span><button type="button" className="icon-button quick-expand" title="Abrir janela da Ayla" aria-label="Abrir janela da Ayla" onClick={() => desktopAction('open')}><ExpandIcon size={18} /></button></div>}
+    {desktopError && <div className="desktop-error" role="alert">{desktopError} <button onClick={()=>setDesktopError('')}>Fechar</button></div>}
     <nav className="rail" aria-label="Espaços">
       <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
       {/* Órgãos (Moneta e outros produtos) entram aqui quando forem integrados. */}
@@ -97,14 +122,14 @@ export default function App() {
 
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
-        <Space snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
+        <Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
           projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
@@ -145,6 +170,7 @@ export default function App() {
               </div>
             </section>
 
+            <DesktopSettings value={prefs.desktop} saving={saving} save={desktop => void quickSave({desktop})} run={desktopAction} />
             <section id="microfone" className="settings-group" aria-labelledby="mic-title"><h2 id="mic-title">Microfone</h2>
               <div className="group-card">
                 <label className="group-row">

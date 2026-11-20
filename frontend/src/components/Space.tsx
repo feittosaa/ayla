@@ -12,6 +12,7 @@ type Props = {
   project: Project | null;
   /** Espaço visível no momento. */
   active: boolean;
+  compact?: boolean;
   onDeleted?: () => void;
   onOpenSettings?: (section: string) => void;
   /** Na barra da Ayla: lista de projetos, abrir e criar. */
@@ -31,11 +32,14 @@ export function ProjectAvatar({ project, size = 36 }: { project: Project; size?:
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, active, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
+export default function Space({ snapshot, refresh, project, active, compact = false, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [view, setView] = useState<View>(project ? 'overview' : 'chat');
-  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 760);
+  const [normalSidebar, setNormalSidebar] = useState(() => window.innerWidth >= 760);
+  const [compactSidebar, setCompactSidebar] = useState(false);
+  const sidebar = compact ? compactSidebar : normalSidebar;
+  const setSidebar = compact ? setCompactSidebar : setNormalSidebar;
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const [editing, setEditing] = useState<string | null>(null); const [draftTitle, setDraftTitle] = useState(''); const [confirming, setConfirming] = useState<string | null>(null);
   const projectId = project?.id ?? null;

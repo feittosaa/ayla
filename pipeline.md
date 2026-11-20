@@ -32,7 +32,7 @@ Ayla é uma plataforma pessoal offline-first de dados, serviços e automações.
 
 | Projeto/serviço | Papel e próximo requisito |
 |---|---|
-| **Moneta** | Projeto financeiro desenvolvido separadamente. Não foi localizado repositório, responsável, versão ou contrato nas fontes consultadas. Identificar esses dados antes da integração; começar por consulta de contas/transações sem IA. |
+| **Moneta** | Projeto financeiro desenvolvido separadamente. Checkout irmão `../moneta` identificado na revisão, com rotas `GET /api/finance` e `GET /api/portfolio`. Confirmar a versão e acordar o contrato antes de consumir os dados na Ayla. |
 | **Pluggy** | Sincronização bancária prevista na Moneta. Credenciais, acesso, atualização e falhas pertencem ao projeto responsável; não implementar sincronização duplicada na Ayla. Só bloqueia a validação com dados bancários reais. |
 | **Securo** | Referência financeira citada no README; não é dependência de execução. Verificar licença antes de reutilizar código. |
 | **llama.cpp** | Runtime gerenciado para texto, raciocínio, visão e embeddings; pacotes Linux x86_64 CPU/Vulkan versionados, verificados por SHA-256. Ollama permanece somente no adaptador legado. |
@@ -247,7 +247,29 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
   - **Aceite:** 53 testes Rust (inclui base64, `data:` URL e link, plataformas que criam imagens, títulos), 9 do cliente (inclui a detecção de pedido de imagem), TypeScript estrito, lint e build.
   - **Limites:** geração local fica para depois (decisão do usuário). Sem edição de imagem nem variações; tamanho padrão de cada plataforma.
 
-- [x] **Renomear e apagar conversas** (pedido de 20/11/2026; falta conferir no desktop). Lápis e lixeira em cada conversa da barra (aparecem ao passar o mouse ou com o teclado), duplo clique para renomear, e lápis no título da conversa aberta. Apagar pede confirmação e remove mensagens e arquivos dela (anexos e imagens criadas, também do disco). **Escolha a confirmar com o usuário:** as memórias aprendidas na conversa ficam (sem o vínculo) e podem ser apagadas em Memória. Renomear à mão impede que o título resumido automático sobrescreva. Teste Rust cobre renomear, apagar, arquivos e memórias mantidas (54 no total).
+- [x] **Renomear e apagar conversas** (pedido de 20/11/2026; falta conferir no desktop). Lápis e lixeira em cada conversa da barra (aparecem ao passar o mouse ou com o teclado), duplo clique para renomear, e lápis no título da conversa aberta. Apagar pede confirmação e remove mensagens e arquivos dela (anexos e imagens criadas, também do disco). **Decisão confirmada em 20/11/2026:** as memórias aprendidas na conversa ficam (sem o vínculo) e podem ser apagadas em Memória. Renomear à mão impede que o título resumido automático sobrescreva. Teste Rust cobre renomear, apagar, arquivos e memórias mantidas (54 no total).
+
+### Próximas entregas — ordem confirmada em 20/11/2026
+
+1. **Linux.** Fechar a rodada desktop de anexos, troca de projeto durante uma resposta, prévia do microfone e aviso fora de foco. Integrar a Ayla ao desktop com acesso pela lateral esquerda. Início com a sessão e permanência em segundo plano ligados por padrão, cada um desativável em Configurações.
+2. **Iris.** Começar pela consulta local a arquivos já guardados no projeto. Primeiro caso proposto: perguntar sobre um PDF e identificar o arquivo de origem na resposta.
+3. **Moneta.** Integrar o produto separado após a Iris, começando pelas consultas de leitura do P2.
+
+**Referência do desktop:** nos dotfiles, o painel original é um `PanelWindow` do QuickShell/illogical-impulse ancorado à esquerda sob Hyprland. O carregamento foi desligado e os acessos por botão, atalho e cantos foram retirados. Decisão confirmada: o botão abre uma visão rápida da janela Tauri, com uma seta para abrir a janela normal, com o tema do sistema e personalização própria. O app completo usa o tema Foco. A distribuição começa pelo terminal no Linux; o formato desejado para o futuro port Windows é um instalador `.exe`.
+
+**Implementado na branch:** um processo por diretório de dados na sessão D-Bus. O menu exibe uma única entrada, Ayla, e `ayla --quick` alterna a lateral. No Hyprland, a janela usa o monitor em foco, a escala e os espaços ocupados pela barra. No painel, a Ayla lê a paleta Material gerada pelo QuickShell, a família de fonte e o arredondamento. Configurações permite personalizar fundo, destaque, fonte e cantos, controlar início e segundo plano e encerrar o processo. A primeira abertura visível prepara os modelos. A seta usa o mesmo fluxo de abertura do menu e conserva o WebView e a conversa em andamento. Correção de memória em segundo plano: uma extração com erro já não tenta travar o banco duas vezes e preserva mensagens mais novas para a próxima rodada.
+
+**Instalação Linux:** `./install.sh` no pacote x86_64 instala o binário e o ícone para o usuário, a entrada de pesquisa e o autostart XDG. Ao atualizar, remove a entrada separada de visão rápida. No checkout, o mesmo comando compila com a interface embutida. `./install.sh --quickshell` inclui o botão na barra horizontal do illogical-impulse e a inicialização no Hyprland com backup dos arquivos editados. A preferência de início é consultada antes de criar o banco ou a janela. Outros compositores podem escolher a posição da janela compacta.
+
+**Verificações da rodada:**
+- Release compilada no Fedora 43. Instalação e reinstalação testadas em diretórios XDG temporários, com cópias dos dotfiles. O botão e o início de sessão aparecem uma vez. Entradas validadas por `desktop-file-validate` e encontradas pela pesquisa do GIO. Binário instalado com início desativado sai antes de abrir o banco.
+- Fluxo da interface React com IPC simulado: anexar, enviar, aplicar o tema da visão rápida, expandir durante a resposta, trocar de projeto, retornar e reabrir a conversa com anexo. Áudio simulado verificou a exibição da prévia e o envio do texto final. Em testes separados com arquivos locais reais, passaram Whisper tiny/small, PDF, GIF, vídeo e áudio. Cliente, TypeScript, lint e build passaram.
+- 51 testes Rust passaram na suíte padrão, incluindo preservação de memórias, escopo de projetos, preferências e geometria. Seis testes que abrem sockets falharam por restrição do ambiente. O backend Python legado parou no primeiro teste de transporte após 16 aprovações.
+- **Aceite nativo pendente:** esta sessão não acessa os sockets do Wayland, do D-Bus pessoal e do Hyprland. Falta observar o botão na barra real, posição nos monitores, foco, expansão e retorno, voz do microfone com prévia, notificação fora de foco e comportamento em um login real. Nenhuma instalação foi aplicada à sessão pessoal nesta rodada.
+
+**Ajuste após o primeiro uso no Fedora (20/11/2026).** O usuário confirmou que o painel abre. Para corrigir o salto, as regras de posição e animação do Hyprland são aplicadas antes de exibir a janela. A visão rápida desliza pela esquerda ao abrir e fechar, recolhe com clique fora e mantém a conversa ao expandir pela seta. Foram retirados o X e os contornos fixos do painel. A compilação, a geometria em escala e rotação, a configuração do Hyprland, o fluxo React com IPC simulado e a reinstalação em diretórios temporários passaram. Falta conferir o movimento e o clique fora na sessão gráfica do usuário.
+
+**Janela normal no Hyprland.** A seta e a pesquisa de aplicativos abrem a Ayla como tile. A janela principal entra no layout com maximização e tela cheia desativadas. Se já estiver visível nesse layout, só recebe foco. A configuração foi validada no Hyprland 0.51.1 e os testes de estado passaram. O usuário atualizou o pacote e confirmou a abertura em tile na própria sessão do Hyprland.
 
 ### P2 — Primeira integração com a Moneta
 
@@ -257,7 +279,7 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 - [ ] Entregar consultas de contas/transações na UI, com estados vazio e indisponível.
 - [ ] Validar com Moneta real e, quando disponível, sua sincronização Pluggy.
 
-**Depende de:** serviços mínimos do P1 e contrato da Moneta. **Aceite:** consultar finanças sem LLM, sem duplicar o domínio e sem derrubar a Ayla se a Moneta estiver offline.
+**Depende de:** serviços mínimos do P1 e contrato da Moneta. Na ordem atual, vem após a Iris. **Aceite:** consultar finanças sem LLM, sem duplicar o domínio e sem derrubar a Ayla se a Moneta estiver offline.
 
 ### P3 — IA sobre serviços reais
 
@@ -270,11 +292,11 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 
 ### Depois
 
-Athena e outros órgãos → Biblioteca e retrospectivas. Mercúrio permanece como proposta de comparação de preços. Evolução de voz e multimodalidade será guiada pelos casos de uso e medições do P1. Instalador Linux e, posteriormente, port Windows terão escopo próprio.
+Athena e outros órgãos → Biblioteca e retrospectivas. Mercúrio permanece como proposta de comparação de preços. Evolução de voz e multimodalidade será guiada pelos casos de uso e medições do P1. Instalação Linux por terminal entrou na rodada desktop acima. O port Windows e seu instalador .exe terão escopo próprio.
 
 ## 5. Comandos de desenvolvimento e verificação
 
-- Desktop Linux: na pasta `frontend`, `npm run tauri -- dev`. Para testar sem baixar modelos de novo: `AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark AYLA_DATA_DIR=<pasta descartável>`. Requer Rust/Cargo (mínimo declarado 1.89 pelas dependências Linux; validado em 1.99.1) e WebKitGTK. A `.venv` é necessária para síntese local pelo adaptador auxiliar e para o backend legado; a tela inicial nativa não depende dela. Nenhuma IA precisa estar instalada. `AYLA_PYTHON` permite apontar outro interpretador.
+- Desktop Linux: na pasta `frontend`, `npm run tauri -- dev`. Para testar sem baixar modelos de novo: `AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark AYLA_DATA_DIR=<pasta descartável>`. Requer Rust/Cargo (mínimo declarado 1.89 pelas dependências Linux; validado em 1.99.1) e WebKitGTK. A `.venv` é necessária para o backend Python legado; a tela inicial nativa não depende dela. Nenhuma IA precisa estar instalada. `AYLA_PYTHON` permite apontar outro interpretador.
 - Backend: da raiz, `PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests -v`.
 - Cliente/build: em `frontend`, `npm test`, `npm run build` e `npm run lint`.
 - Tipos: em `frontend`, `tsc --noEmit --strict --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --lib es2022,dom --allowImportingTsExtensions --skipLibCheck src/App.tsx src/components/Chat.tsx src/services/Api.ts` (compilador disponível neste ambiente).

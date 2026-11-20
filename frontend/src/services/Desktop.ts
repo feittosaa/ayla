@@ -8,6 +8,7 @@ export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
   resource_percent: number | null; usage_mode: UsageMode; cloud_provider: string; cloud_endpoint: string; cloud_model: string; cloud_asked: boolean; image_provider: string; image_model: string;
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
+  desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean };
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
