@@ -101,8 +101,30 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
 
   // Acompanha a resposta enquanto a pessoa estiver no fim da conversa.
   useLayoutEffect(() => { const el = thread.current; if (el && follow.current) el.scrollTop = el.scrollHeight; }, [messages, learned]);
-  // Campo cresce com o texto, até um limite.
-  useLayoutEffect(() => { const el = field.current; if (!el) return; el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 200)}px`; }, [input]);
+  useLayoutEffect(() => {
+    const el = field.current;
+    if (!el || !visible) return;
+    if (!input) {
+      // O campo vazio usa a altura natural de rows={1}.
+      el.style.height = '';
+      return;
+    }
+    // Mede o texto sem incluir a altura anterior do campo.
+    function fit() {
+      if (!el || !el.clientWidth) return;
+      el.style.height = '0px';
+      el.style.height = `${el.scrollHeight}px`;
+    }
+    fit();
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      fit();
+      width = el.clientWidth;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [input, visible]);
   useEffect(() => {
     if (listening !== 'recording') return;
     setSeconds(0); const timer = setInterval(() => setSeconds(s => s + 1), 1000);

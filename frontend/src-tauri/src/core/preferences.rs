@@ -44,6 +44,31 @@ pub struct Preferences {
     pub voice: Option<bool>,
     /// Notificações do sistema; arquivos anteriores recebem o padrão (todas ligadas).
     pub notifications: Notifications,
+    pub desktop: DesktopPreferences,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DesktopPreferences {
+    pub autostart: bool,
+    pub background: bool,
+    pub system_theme: bool,
+    pub panel_color: String,
+    pub panel_accent: String,
+    pub panel_font: String,
+    pub panel_radius: u8,
+}
+impl Default for DesktopPreferences {
+    fn default() -> Self {
+        Self {
+            autostart: true, background: true, system_theme: true,
+            panel_color: "#202124".into(), panel_accent: "#ff9f43".into(),
+            panel_font: "system-ui".into(), panel_radius: 18,
+        }
+    }
+}
+pub fn hex_color(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -86,6 +111,7 @@ impl Default for Preferences {
             memory_auto: true,
             voice: Some(true),
             notifications: Notifications::default(),
+            desktop: DesktopPreferences::default(),
         }
     }
 }
@@ -131,7 +157,10 @@ impl Preferences {
         }
     }
     pub fn validate(&self) -> io::Result<()> {
-        if self.personality.chars().count() > 4000
+        if !hex_color(&self.desktop.panel_color) || !hex_color(&self.desktop.panel_accent)
+            || self.desktop.panel_radius > 48 || self.desktop.panel_font.chars().count() > 100
+            || self.desktop.panel_font.chars().any(char::is_control)
+            || self.personality.chars().count() > 4000
             || self.version != VERSION
             || self.percent() < 5
             || self.percent() > 90
@@ -220,6 +249,24 @@ impl PreferenceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_defaults_and_opt_out_survive_reopening() {
+        let root = std::env::temp_dir().join(format!("ayla-desktop-prefs-{}", super::super::store::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("preferences.json"), r#"{"version":2}"#).unwrap();
+        let store = PreferenceStore::new(&root);
+        let mut prefs = store.load().unwrap();
+        assert!(prefs.desktop.autostart && prefs.desktop.background && prefs.desktop.system_theme);
+        prefs.desktop.autostart = false;
+        prefs.desktop.background = false;
+        prefs.desktop.system_theme = false;
+        prefs.desktop.panel_radius = 0;
+        store.save(&prefs).unwrap();
+        assert_eq!(store.load().unwrap().desktop, prefs.desktop);
+        prefs.desktop.panel_color = "invalid".into();
+        assert!(store.save(&prefs).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn automatic_profile_adapts_to_hardware_without_overriding_manual_choices() {
         assert_eq!(Preferences::automatic_percent(8 << 30), 25);

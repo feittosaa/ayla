@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Wire interface of hyprland-protocols/unstable/hyprland-focus-grab-v1.xml, version 1. -->
+<protocol name="hyprland_focus_grab_v1">
+  <interface name="hyprland_focus_grab_manager_v1" version="1">
+    <request name="create_grab"><arg name="grab" type="new_id" interface="hyprland_focus_grab_v1"/></request>
+    <request name="destroy" type="destructor"/>
+  </interface>
+  <interface name="hyprland_focus_grab_v1" version="1">
+    <request name="add_surface"><arg name="surface" type="object" interface="wl_surface"/></request>
+    <request name="remove_surface"><arg name="surface" type="object" interface="wl_surface"/></request>
+    <request name="commit"/>
+    <request name="destroy" type="destructor"/>
+    <event name="cleared"/>
+  </interface>
+</protocol>

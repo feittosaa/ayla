@@ -1,4 +1,5 @@
 mod core;
+mod desktop;
 use core::services::Core;
 use std::fs::File;
 use std::io::{self, Read};
@@ -115,10 +116,16 @@ fn allow_microphone(app: &tauri::App) {
 fn allow_microphone(_: &tauri::App) {}
 
 pub fn run() {
+    let initial = desktop::Launch::from_args();
+    let (_instance, requests) = match desktop::register(initial) {
+        Ok(Some(primary)) => primary,
+        Ok(None) => return,
+        Err(error) => { eprintln!("Falha ao registrar a Ayla na sessão: {error}"); return; }
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             let directory = std::env::var_os("AYLA_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
@@ -134,18 +141,6 @@ pub fn run() {
                 }
             });
             allow_microphone(app);
-            // Perfil principal pronto sem cliques: prepara o que faltar ao abrir.
-            let setup = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                // O núcleo é registrado logo abaixo; esperar por ele evita uma corrida.
-                for _ in 0..200 {
-                    if let Some(core) = setup.try_state::<Core>() {
-                        let _ = core.prepare_defaults(&setup).await;
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -155,9 +150,26 @@ pub fn run() {
             });
             app.manage(core);
             app.manage(ManagedBackend::default());
+            app.manage(Mutex::new(desktop::View::default()));
+            desktop::launch(app.handle(), initial).map_err(io::Error::other)?;
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                for request in requests {
+                    let app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Err(error) = desktop::launch(&app, request) {
+                            use tauri::Emitter;
+                            let _ = app.emit("desktop-warning", error);
+                        }
+                    });
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            desktop::desktop_view,
+            desktop::quick_ready,
+            desktop::desktop_action,
             backend_connection,
             core::services::desktop_snapshot,
             core::services::save_preferences,
@@ -208,7 +220,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Não foi possível iniciar a Ayla")
         .run(|app, event| {
+            if let tauri::RunEvent::WindowEvent { ref label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } = event {
+                if let Some(win) = app.get_webview_window(label) {
+                    if app.state::<Core>().prefs().is_ok_and(|p| p.desktop.background) && win.hide().is_ok() {
+                        api.prevent_close();
+                        app.state::<Mutex<desktop::View>>().lock().map(|mut v| v.cancel_placement()).ok();
+                    }
+                }
+            }
             if let tauri::RunEvent::Exit = event {
+                desktop::clear_rules();
                 if let Some(core) = app.try_state::<Core>() {
                     core.shutdown();
                 }

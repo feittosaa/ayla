@@ -66,7 +66,7 @@ impl Core {
             voice_gate: tokio::sync::Mutex::new(()),
         })
     }
-    fn prefs(&self) -> Result<Preferences, String> {
+    pub(crate) fn prefs(&self) -> Result<Preferences, String> {
         self.preferences
             .lock()
             .map_err(|_| "Configuração ocupada")?
@@ -1186,12 +1186,12 @@ impl Core {
 #[tauri::command]
 pub async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let all: Vec<&'static str> = [files::IMAGE, files::TEXT, files::AUDIO, files::VIDEO, &["pdf", "gif"]].concat();
-    tauri::async_runtime::spawn_blocking(move || {
+    let handle = app.clone();
+    crate::desktop::panel_dialog(&handle, move || {
         app.dialog().file().add_filter("Arquivos suportados", &all).blocking_pick_files()
             .unwrap_or_default().into_iter().filter_map(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()).collect()
     })
     .await
-    .map_err(|_| "Não foi possível escolher arquivos".into())
 }
 /// Guarda uma cópia de um arquivo do computador (o original não é alterado).
 /// `keep`: adicionado direto em Arquivos do projeto; senão, anexo da caixa de mensagem.
@@ -1451,8 +1451,8 @@ pub async fn export_file(app: tauri::AppHandle, state: tauri::State<'_, Core>, i
     let file = state.store.lock().map_err(|_| "Dados ocupados")?.file(&id).ok().flatten().ok_or("Arquivo não encontrado")?;
     let source = state.root.join(&file.path);
     let name = file.name.clone();
-    let target = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(&name).blocking_save_file())
-        .await.map_err(|_| "Não foi possível escolher onde salvar")?;
+    let handle = app.clone();
+    let target = crate::desktop::panel_dialog(&handle, move || app.dialog().file().set_file_name(&name).blocking_save_file()).await?;
     let Some(target) = target else { return Ok(false) };
     let target = target.into_path().map_err(|_| "Local inválido")?;
     tauri::async_runtime::spawn_blocking(move || fs::copy(&source, &target)).await.map_err(|_| "Falha ao salvar")?.map_err(|_| "Não foi possível salvar o arquivo")?;
@@ -1650,12 +1650,13 @@ pub async fn memory_tick(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<Core>() else { return };
     let Ok(prefs) = state.prefs() else { return };
     let idle = state.last_activity.lock().map(|t| t.elapsed() >= Duration::from_secs(memory::IDLE_SECONDS)).unwrap_or(false);
-    if !prefs.memory_auto || !idle || state.memory_model(&prefs).is_none() {
+    if !prefs.memory_auto || !idle {
         return;
     }
     let Ok(_gate) = state.runtime.gate.try_lock() else { return };
     let pending = state.store.lock().ok().and_then(|db| db.pending_extraction().ok().flatten());
-    let Some((conversation, _, _)) = pending else { return };
+    let Some((conversation, _, until)) = pending else { return };
+    if state.memory_model(&prefs).is_none() { return; }
     let token = CancellationToken::new();
     if let Ok(mut slot) = state.background.lock() {
         *slot = Some(token.clone());
@@ -1668,21 +1669,22 @@ pub async fn memory_tick(app: &tauri::AppHandle) {
         Ok(facts) => { let _ = app.emit("memory-updated", json!({"conversation":conversation,"facts":facts})); }
         // Sem modelo de conversa local, a extração aguarda; outros erros não repetem em laço.
         Err(_) if token.is_cancelled() => {}
-        Err(_) => {
-            if let Ok(db) = state.store.lock() {
-                if let Ok(Some((_, until))) = db.extraction_range(&conversation) {
-                    if models::choose(&state.models().unwrap_or_default(), Capability::Text, state.budget(&prefs), prefs.context_tokens, None).is_ok() {
-                        let _ = db.set_memory_cursor(&conversation, until);
-                    }
-                }
-            }
-        }
+        Err(_) => state.advance_failed_extraction(&prefs, &conversation, until),
     }
 }
 
 /// Modelo de transcrição só para prévia ao vivo; nunca usado no texto final.
 pub const PREVIEW_TRANSCRIBER: &str = "whisper-tiny";
 impl Core {
+    fn advance_failed_extraction(&self, prefs: &Preferences, conversation: &str, until: i64) {
+        // Consultar os modelos antes de travar o banco para escrever o cursor.
+        let Ok(models) = self.models() else { return };
+        if models::choose(&models, Capability::Text, self.budget(prefs), prefs.context_tokens, None).is_ok() {
+            if let Ok(db) = self.store.lock() {
+                let _ = db.set_memory_cursor(conversation, until);
+            }
+        }
+    }
     /// Transcritor final (ou de prévia). Sem o preferido, usa o outro disponível.
     fn transcriber(&self, prefs: &Preferences, preview: bool) -> Result<Model, String> {
         let all = self.models()?;
@@ -1996,6 +1998,36 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     use std::path::Path;
+
+    #[test]
+    fn failed_extraction_keeps_later_messages_pending() {
+        let root = std::env::temp_dir().join(format!("ayla-memory-cursor-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let prefs = core.prefs().unwrap();
+        let (conversation, until) = {
+            let db = core.store.lock().unwrap();
+            let id = db.create_conversation("Teste", None).unwrap().id;
+            db.add_message(&id, "user", "Primeiro turno", true).unwrap();
+            let (_, until) = db.extraction_range(&id).unwrap().unwrap();
+            db.add_message(&id, "user", "Turno posterior", true).unwrap();
+            (id, until)
+        };
+        core.advance_failed_extraction(&prefs, &conversation, until);
+        let path = root.join("teste.gguf");
+        fs::write(&path, b"modelo de teste").unwrap();
+        {
+            let db = core.store.lock().unwrap();
+            assert_eq!(db.extraction_range(&conversation).unwrap().unwrap().0, 0);
+            let model = json!({"id":"teste","name":"Teste","capability":"text","bytes":0,"memory_bytes":0,"path":path,"sha256":""});
+            db.save_model("teste", &model.to_string()).unwrap();
+        }
+        core.advance_failed_extraction(&prefs, &conversation, until);
+        let (cursor, last) = core.store.lock().unwrap().extraction_range(&conversation).unwrap().unwrap();
+        assert_eq!(cursor, until);
+        assert!(last > cursor);
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Modelos reais já baixados em /var/tmp/ayla-benchmark; dados em pasta temporária.
     #[tokio::test]
