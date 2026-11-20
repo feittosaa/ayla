@@ -33,6 +33,41 @@ pub struct Conversation {
     pub id: String,
     pub title: String,
     pub cloud_consent: bool,
+    pub project_id: Option<String>,
+}
+/// Espaço focado em algo específico, com conversas e memórias próprias.
+#[derive(Clone, Debug, Serialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    /// "Sobre o projeto": entra no contexto das respostas locais do projeto.
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub conversations: i64,
+    pub memories: i64,
+}
+/// Quais memórias uma operação enxerga: as do projeto e, opcionalmente, as gerais.
+/// Na conversa geral (`project: None`), só as gerais.
+#[derive(Clone, Copy, Debug)]
+pub struct Scope<'a> {
+    pub project: Option<&'a str>,
+    pub include_general: bool,
+}
+impl<'a> Scope<'a> {
+    /// Respostas: o projeto vê também as memórias gerais.
+    pub fn visible(project: Option<&'a str>) -> Self {
+        Self { project, include_general: true }
+    }
+    /// Extração e painel: só o escopo exato; o que se aprende no projeto fica nele.
+    pub fn exact(project: Option<&'a str>) -> Self {
+        Self { project, include_general: false }
+    }
+}
+const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
+const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
+fn scoped(sql: &str) -> String {
+    sql.replace("{scope}", SCOPE_FILTER)
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Message {
@@ -57,7 +92,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -71,12 +106,12 @@ impl Store {
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         }
-        if version == 1 {
+        if version == 1 || version == 2 {
             // Backup consistente antes de alterar um banco com dados do usuário.
             let backups = path.parent().unwrap_or(Path::new(".")).join("backups");
             std::fs::create_dir_all(&backups)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Self { conn }.backup(&backups.join(format!("ayla-antes-v2-{}.db", id())))?;
+            Self { conn }.backup(&backups.join(format!("ayla-antes-v3-{}.db", id())))?;
             conn = Connection::open(path)?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -84,7 +119,22 @@ impl Store {
         if version <= 1 {
             Self::migrate_v2(&mut conn)?;
         }
+        if version <= 2 {
+            Self::migrate_v3(&mut conn)?;
+        }
         Ok(Self { conn })
+    }
+    /// v3: projetos. Conversas e memórias ganham um projeto opcional; sem projeto,
+    /// continuam gerais. Apagar um projeto apaga suas conversas e memórias.
+    fn migrate_v3(conn: &mut Connection) -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            ALTER TABLE conversations ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+            ALTER TABLE facts ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+            CREATE INDEX conversations_project ON conversations(project_id);
+            CREATE INDEX facts_project ON facts(project_id);
+            PRAGMA user_version=3;")?;
+        tx.commit()
     }
     /// v2: memória longa (fatos, vetores binários por modelo, índice FTS5) e
     /// cursor de extração por conversa. Notas antigas viram fatos manuais.
@@ -109,29 +159,70 @@ impl Store {
         tx.execute_batch("UPDATE conversations SET memory_cursor=COALESCE((SELECT MAX(id) FROM messages WHERE conversation_id=conversations.id),0); PRAGMA user_version=2;")?;
         tx.commit()
     }
-    pub fn create_conversation(&self, title: &str) -> rusqlite::Result<Conversation> {
+    pub fn create_conversation(&self, title: &str, project: Option<&str>) -> rusqlite::Result<Conversation> {
         let conversation = Conversation {
             id: id(),
             title: title.chars().take(120).collect(),
             cloud_consent: false,
+            project_id: project.map(Into::into),
         };
         self.conn.execute(
-            "INSERT INTO conversations(id,title) VALUES(?1,?2)",
-            params![conversation.id, conversation.title],
+            "INSERT INTO conversations(id,title,project_id) VALUES(?1,?2,?3)",
+            params![conversation.id, conversation.title, conversation.project_id],
         )?;
         Ok(conversation)
     }
-    pub fn conversations(&self) -> rusqlite::Result<Vec<Conversation>> {
+    /// Conversas de um projeto, ou as gerais quando `project` é `None`.
+    pub fn conversations(&self, project: Option<&str>) -> rusqlite::Result<Vec<Conversation>> {
         self.conn
-            .prepare("SELECT id,title,cloud_consent FROM conversations ORDER BY rowid DESC")?
-            .query_map([], |r| {
+            .prepare("SELECT id,title,cloud_consent,project_id FROM conversations WHERE project_id IS ?1 ORDER BY rowid DESC")?
+            .query_map([project], |r| {
                 Ok(Conversation {
                     id: r.get(0)?,
                     title: r.get(1)?,
                     cloud_consent: r.get(2)?,
+                    project_id: r.get(3)?,
                 })
             })?
             .collect()
+    }
+    pub fn conversation_project(&self, conversation: &str) -> rusqlite::Result<Option<String>> {
+        self.conn.query_row("SELECT project_id FROM conversations WHERE id=?1", [conversation], |r| r.get(0))
+    }
+    pub fn create_project(&self, name: &str, description: &str) -> rusqlite::Result<Project> {
+        let (id, now) = (id(), now());
+        self.conn.execute(
+            "INSERT INTO projects VALUES(?1,?2,?3,?4,?4)",
+            params![id, name.trim().chars().take(80).collect::<String>(), description.trim().chars().take(2000).collect::<String>(), now],
+        )?;
+        self.project(&id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+    pub fn update_project(&self, id: &str, name: &str, description: &str) -> rusqlite::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE projects SET name=?2, description=?3, updated_at=?4 WHERE id=?1",
+            params![id, name.trim().chars().take(80).collect::<String>(), description.trim().chars().take(2000).collect::<String>(), now()],
+        )?;
+        if changed == 0 { Err(rusqlite::Error::QueryReturnedNoRows) } else { Ok(()) }
+    }
+    /// Apaga o projeto com suas conversas, mensagens e memórias.
+    pub fn delete_project(&self, id: &str) -> rusqlite::Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM facts WHERE project_id=?1", [id])?;
+        tx.execute("DELETE FROM conversations WHERE project_id=?1", [id])?;
+        let deleted = tx.execute("DELETE FROM projects WHERE id=?1", [id])? == 1;
+        tx.commit()?;
+        Ok(deleted)
+    }
+    fn project_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
+        Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, conversations: r.get(5)?, memories: r.get(6)? })
+    }
+    const PROJECT_SELECT: &'static str = "SELECT p.id,p.name,p.description,p.created_at,p.updated_at,(SELECT count(*) FROM conversations WHERE project_id=p.id),(SELECT count(*) FROM facts WHERE project_id=p.id) FROM projects p";
+    pub fn project(&self, id: &str) -> rusqlite::Result<Option<Project>> {
+        let mut rows = self.conn.prepare(&format!("{} WHERE p.id=?1", Self::PROJECT_SELECT))?.query_map([id], Self::project_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.pop())
+    }
+    pub fn projects(&self) -> rusqlite::Result<Vec<Project>> {
+        self.conn.prepare(&format!("{} ORDER BY p.created_at, p.rowid", Self::PROJECT_SELECT))?.query_map([], Self::project_row)?.collect()
     }
     pub fn consent(&self, id: &str) -> rusqlite::Result<bool> {
         self.conn.query_row(
@@ -250,6 +341,7 @@ impl Store {
         privacy: Privacy,
         origin: &str,
         conversation: Option<&str>,
+        project: Option<&str>,
     ) -> rusqlite::Result<Fact> {
         let now = now();
         let fact = Fact {
@@ -261,10 +353,11 @@ impl Store {
             conversation_id: conversation.map(Into::into),
             created_at: now,
             updated_at: now,
+            project_id: project.map(Into::into),
         };
         self.conn.execute(
-            "INSERT INTO facts VALUES(?1,?2,?3,?4,?5,?6,?7,?7)",
-            params![fact.id, fact.content, fact.kind, privacy.as_str(), fact.origin, fact.conversation_id, now],
+            &format!("INSERT INTO facts({FACT_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?8)"),
+            params![fact.id, fact.content, fact.kind, privacy.as_str(), fact.origin, fact.conversation_id, now, fact.project_id],
         )?;
         Ok(fact)
     }
@@ -300,17 +393,19 @@ impl Store {
             conversation_id: r.get(5)?,
             created_at: r.get(6)?,
             updated_at: r.get(7)?,
+            project_id: r.get(8)?,
         })
     }
-    pub fn facts(&self) -> rusqlite::Result<Vec<Fact>> {
+    /// Memórias de um escopo exato (painel): as gerais ou as de um projeto.
+    pub fn facts(&self, project: Option<&str>) -> rusqlite::Result<Vec<Fact>> {
         self.conn
-            .prepare("SELECT id,content,kind,privacy,origin,conversation_id,created_at,updated_at FROM facts ORDER BY updated_at DESC, rowid DESC LIMIT 5000")?
-            .query_map([], Self::fact_row)?
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE project_id IS ?1 ORDER BY updated_at DESC, rowid DESC LIMIT 5000"))?
+            .query_map([project], Self::fact_row)?
             .collect()
     }
     pub fn facts_by_ids(&self, ids: &[String]) -> rusqlite::Result<Vec<Fact>> {
         let mut out = Vec::new();
-        let mut statement = self.conn.prepare("SELECT id,content,kind,privacy,origin,conversation_id,created_at,updated_at FROM facts WHERE id=?1")?;
+        let mut statement = self.conn.prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE id=?1"))?;
         for id in ids {
             if let Some(fact) = statement.query_map([id], Self::fact_row)?.next() {
                 out.push(fact?);
@@ -321,7 +416,7 @@ impl Store {
     /// Memórias criadas automaticamente ou a pedido nesta conversa (para a nota com desfazer).
     pub fn conversation_facts(&self, conversation: &str) -> rusqlite::Result<Vec<Fact>> {
         self.conn
-            .prepare("SELECT id,content,kind,privacy,origin,conversation_id,created_at,updated_at FROM facts WHERE conversation_id=?1 AND origin<>'manual' ORDER BY rowid")?
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE conversation_id=?1 AND origin<>'manual' ORDER BY rowid"))?
             .query_map([conversation], Self::fact_row)?
             .collect()
     }
@@ -332,10 +427,10 @@ impl Store {
         )?;
         Ok(())
     }
-    pub fn vectors(&self, model: &str) -> rusqlite::Result<Vec<(String, Vec<f32>)>> {
+    pub fn vectors(&self, model: &str, scope: Scope) -> rusqlite::Result<Vec<(String, Vec<f32>)>> {
         self.conn
-            .prepare("SELECT fact_id,vector FROM fact_vectors WHERE model_id=?1")?
-            .query_map([model], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .prepare(&scoped("SELECT fact_id,vector FROM fact_vectors JOIN facts ON facts.id=fact_vectors.fact_id WHERE model_id=?1 AND {scope}").replace("?S1", "?2").replace("?S2", "?3"))?
+            .query_map(params![model, scope.project, scope.include_general], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?
             .filter_map(|row| match row {
                 Ok((id, raw)) => memory::decode(&raw).map(|v| Ok((id, v))),
                 Err(e) => Some(Err(e)),
@@ -344,14 +439,14 @@ impl Store {
     }
     pub fn facts_without_vector(&self, model: &str, limit: usize) -> rusqlite::Result<Vec<Fact>> {
         self.conn
-            .prepare("SELECT id,content,kind,privacy,origin,conversation_id,created_at,updated_at FROM facts WHERE NOT EXISTS(SELECT 1 FROM fact_vectors WHERE fact_id=facts.id AND model_id=?1) ORDER BY rowid LIMIT ?2")?
+            .prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE NOT EXISTS(SELECT 1 FROM fact_vectors WHERE fact_id=facts.id AND model_id=?1) ORDER BY rowid LIMIT ?2"))?
             .query_map(params![model, limit as i64], Self::fact_row)?
             .collect()
     }
-    pub fn search_text(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<String>> {
+    pub fn search_text(&self, query: &str, limit: usize, scope: Scope) -> rusqlite::Result<Vec<String>> {
         self.conn
-            .prepare("SELECT facts.id FROM facts_fts JOIN facts ON facts.rowid=facts_fts.rowid WHERE facts_fts MATCH ?1 ORDER BY bm25(facts_fts) LIMIT ?2")?
-            .query_map(params![query, limit as i64], |r| r.get(0))?
+            .prepare(&scoped("SELECT facts.id FROM facts_fts JOIN facts ON facts.rowid=facts_fts.rowid WHERE facts_fts MATCH ?1 AND {scope} ORDER BY bm25(facts_fts) LIMIT ?2").replace("?S1", "?3").replace("?S2", "?4"))?
+            .query_map(params![query, limit as i64, scope.project, scope.include_general], |r| r.get(0))?
             .collect()
     }
     /// Conversa com mensagens completas ainda não processadas pela extração.
@@ -454,8 +549,8 @@ mod tests {
     fn migrations_are_idempotent_and_conversations_are_isolated() {
         let path = std::env::temp_dir().join(format!("ayla-store-{}.db", id()));
         let db = Store::open(&path).unwrap();
-        let a = db.create_conversation("A").unwrap();
-        let b = db.create_conversation("B").unwrap();
+        let a = db.create_conversation("A", None).unwrap();
+        let b = db.create_conversation("B", None).unwrap();
         db.add_message(&a.id, "user", "apenas A", true).unwrap();
         db.add_message(&a.id, "assistant", "parcial", false)
             .unwrap();
@@ -467,7 +562,7 @@ mod tests {
         assert!(db.context(&a.id, 10, 1).unwrap().is_empty());
         assert!(!db.consent(&a.id).unwrap());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 2);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 3);
         std::fs::remove_file(path).unwrap();
     }
     #[test]
@@ -488,12 +583,12 @@ mod tests {
                 PRAGMA user_version=1;").unwrap();
         }
         let db = Store::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 2);
+        assert_eq!(db.version().unwrap(), 3);
         let backups: Vec<_> = std::fs::read_dir(root.join("backups")).unwrap().flatten().collect();
         assert_eq!(backups.len(), 1);
         let old = Connection::open(backups[0].path()).unwrap();
         assert_eq!(old.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(), 1);
-        let facts = db.facts().unwrap();
+        let facts = db.facts(None).unwrap();
         assert_eq!((facts.len(), facts[0].origin.as_str(), facts[0].privacy), (1, "manual", Privacy::Uncertain));
         // Vetores antigos não são reaproveitados; serão recalculados com o modelo atual.
         assert_eq!(db.facts_without_vector("m", 10).unwrap().len(), 1);
@@ -506,33 +601,91 @@ mod tests {
         db.set_memory_cursor("c", 0).unwrap();
         assert!(db.pending_extraction().unwrap().is_none() && db.extraction_range("c").unwrap().is_none());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 2);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 3);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn facts_support_editing_text_search_vectors_and_deletion() {
         let path = std::env::temp_dir().join(format!("ayla-facts-{}.db", id()));
         let db = Store::open(&path).unwrap();
-        let conversation = db.create_conversation("x").unwrap();
-        let cat = db.insert_fact("O usuário tem uma gata chamada Mel.", "fato", Privacy::Uncertain, "auto", Some(&conversation.id)).unwrap();
-        let rpg = db.insert_fact("O usuário mestra a campanha Cinzas de Aurora.", "projeto", Privacy::Sensitive, "manual", None).unwrap();
+        let conversation = db.create_conversation("x", None).unwrap();
+        let cat = db.insert_fact("O usuário tem uma gata chamada Mel.", "fato", Privacy::Uncertain, "auto", Some(&conversation.id), None).unwrap();
+        let rpg = db.insert_fact("O usuário mestra a campanha Cinzas de Aurora.", "projeto", Privacy::Sensitive, "manual", None, None).unwrap();
         db.set_vector(&cat.id, "emb", &[1.0, 0.0]).unwrap();
         db.set_vector(&rpg.id, "emb", &[0.0, 1.0]).unwrap();
-        assert_eq!(db.vectors("emb").unwrap().len(), 2);
-        assert_eq!(db.search_text(&memory::fts_query("Como se chama a mesa Aurora?").unwrap(), 5).unwrap(), vec![rpg.id.clone()]);
+        assert_eq!(db.vectors("emb", Scope::visible(None)).unwrap().len(), 2);
+        assert_eq!(db.search_text(&memory::fts_query("Como se chama a mesa Aurora?").unwrap(), 5, Scope::visible(None)).unwrap(), vec![rpg.id.clone()]);
         // Acentos e caixa não impedem a busca textual.
-        assert_eq!(db.search_text("\"cinzas\"", 5).unwrap().len(), 1);
+        assert_eq!(db.search_text("\"cinzas\"", 5, Scope::visible(None)).unwrap().len(), 1);
         db.update_fact(&cat.id, Some("O usuário tem duas gatas."), Some(Privacy::Public)).unwrap();
-        assert_eq!(db.vectors("emb").unwrap().len(), 1, "texto novo invalida o vetor");
+        assert_eq!(db.vectors("emb", Scope::visible(None)).unwrap().len(), 1, "texto novo invalida o vetor");
         assert_eq!(db.facts_by_ids(&[cat.id.clone()]).unwrap()[0].privacy, Privacy::Public);
-        assert!(db.search_text("\"gata\"", 5).unwrap().is_empty());
-        assert_eq!(db.search_text("\"gatas\"", 5).unwrap(), vec![cat.id.clone()]);
+        assert!(db.search_text("\"gata\"", 5, Scope::visible(None)).unwrap().is_empty());
+        assert_eq!(db.search_text("\"gatas\"", 5, Scope::visible(None)).unwrap(), vec![cat.id.clone()]);
         assert_eq!(db.conversation_facts(&conversation.id).unwrap().len(), 1);
         assert!(db.update_fact("inexistente", None, Some(Privacy::Public)).is_err());
         assert!(db.delete_fact(&rpg.id).unwrap() && !db.delete_fact(&rpg.id).unwrap());
-        assert!(db.search_text("\"aurora\"", 5).unwrap().is_empty());
-        assert_eq!(db.vectors("emb").unwrap().len(), 0, "apagar remove vetores em cascata");
+        assert!(db.search_text("\"aurora\"", 5, Scope::visible(None)).unwrap().is_empty());
+        assert_eq!(db.vectors("emb", Scope::visible(None)).unwrap().len(), 0, "apagar remove vetores em cascata");
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn projects_keep_their_own_conversations_and_memories_and_see_general_ones() {
+        let root = std::env::temp_dir().join(format!("ayla-projects-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("ayla.db");
+        {
+            // Banco v2 com uma conversa e uma memória geral: a migração preserva os dois.
+            let db = Store::open(&path).unwrap();
+            let general = db.create_conversation("geral", None).unwrap();
+            db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
+            db.conn.execute_batch("DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            drop(general);
+        }
+        let db = Store::open(&path).unwrap();
+        assert_eq!(db.version().unwrap(), 3);
+        assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(), 1, "backup antes da v3");
+        assert_eq!((db.conversations(None).unwrap().len(), db.facts(None).unwrap().len()), (1, 1));
+
+        let tcc = db.create_project("  TCC  ", "Monografia sobre energia solar").unwrap();
+        let casa = db.create_project("Mudança", "").unwrap();
+        assert_eq!((tcc.name.as_str(), tcc.conversations, tcc.memories), ("TCC", 0, 0));
+        let chat = db.create_conversation("Capítulo 1", Some(&tcc.id)).unwrap();
+        assert_eq!(db.conversation_project(&chat.id).unwrap().as_deref(), Some(tcc.id.as_str()));
+        let solar = db.insert_fact("O TCC usa dados do INMET.", "projeto", Privacy::Uncertain, "auto", Some(&chat.id), Some(&tcc.id)).unwrap();
+        let caixa = db.insert_fact("A mudança é em março.", "projeto", Privacy::Uncertain, "manual", None, Some(&casa.id)).unwrap();
+        let geral = db.facts(None).unwrap()[0].id.clone();
+        for (fact, v) in [(&solar.id, [1.0, 0.0]), (&caixa.id, [0.0, 1.0]), (&geral, [0.5, 0.5])] {
+            db.set_vector(fact, "emb", &v).unwrap();
+        }
+        let ids = |scope| { let mut v: Vec<String> = db.vectors("emb", scope).unwrap().into_iter().map(|(id, _)| id).collect(); v.sort(); v };
+        let sorted = |mut v: Vec<String>| { v.sort(); v };
+        // Conversa geral: só memórias gerais.
+        assert_eq!(ids(Scope::visible(None)), vec![geral.clone()]);
+        // Projeto: as dele e as gerais, nunca as de outro projeto.
+        assert_eq!(ids(Scope::visible(Some(&tcc.id))), sorted(vec![solar.id.clone(), geral.clone()]));
+        // Extração e painel: só o escopo exato.
+        assert_eq!(ids(Scope::exact(Some(&tcc.id))), vec![solar.id.clone()]);
+        assert!(db.search_text("\"março\"", 5, Scope::visible(Some(&tcc.id))).unwrap().is_empty());
+        assert_eq!(db.search_text("\"março\"", 5, Scope::exact(Some(&casa.id))).unwrap(), vec![caixa.id.clone()]);
+        assert_eq!((db.conversations(None).unwrap().len(), db.conversations(Some(&tcc.id)).unwrap().len()), (1, 1));
+        assert_eq!(db.facts(Some(&tcc.id)).unwrap().len(), 1);
+        let listed = db.projects().unwrap();
+        assert_eq!(listed.iter().map(|p| (p.name.as_str(), p.conversations, p.memories)).collect::<Vec<_>>(), vec![("TCC", 1, 1), ("Mudança", 0, 1)]);
+
+        db.update_project(&tcc.id, "TCC 2026", "Foco no capítulo de métodos").unwrap();
+        assert_eq!(db.project(&tcc.id).unwrap().unwrap().description, "Foco no capítulo de métodos");
+        assert!(db.update_project("inexistente", "x", "").is_err());
+        // Apagar o projeto leva conversas, mensagens, memórias e vetores dele; o resto fica.
+        db.add_message(&chat.id, "user", "rascunho", true).unwrap();
+        assert!(db.delete_project(&tcc.id).unwrap());
+        assert!(db.conversations(Some(&tcc.id)).unwrap().is_empty() && db.facts(Some(&tcc.id)).unwrap().is_empty());
+        assert_eq!(db.conn.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(ids(Scope::visible(Some(&casa.id))), sorted(vec![caixa.id.clone(), geral.clone()]));
+        assert_eq!((db.conversations(None).unwrap().len(), db.facts(None).unwrap().len()), (1, 1));
+        assert!(!db.delete_project(&tcc.id).unwrap());
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

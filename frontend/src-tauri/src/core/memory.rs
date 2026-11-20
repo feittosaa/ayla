@@ -50,6 +50,9 @@ pub struct Fact {
     pub conversation_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Projeto dono da memória; `None` é memória geral (pessoal).
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 pub fn encode(vector: &[f32]) -> Vec<u8> {
@@ -245,7 +248,7 @@ pub fn parse_extraction(raw: &str, related: &[Fact]) -> Result<Extraction, Strin
 mod tests {
     use super::*;
     fn fact(id: &str, content: &str) -> Fact {
-        Fact { id: id.into(), content: content.into(), kind: "fato".into(), privacy: Privacy::Uncertain, origin: "auto".into(), conversation_id: None, created_at: 0, updated_at: 0 }
+        Fact { id: id.into(), content: content.into(), kind: "fato".into(), privacy: Privacy::Uncertain, origin: "auto".into(), conversation_id: None, created_at: 0, updated_at: 0, project_id: None }
     }
     #[test]
     fn vectors_round_trip_and_reject_corruption() {

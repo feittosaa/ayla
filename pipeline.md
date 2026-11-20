@@ -203,6 +203,23 @@ Limiares calibrados: busca a partir de 0,42 (a melhor nota de uma pergunta sem r
   - **Implementado (sem commit):** tema neutro com laranja só de destaque e fonte do sistema. Na conversa: barra lateral recolhível com as conversas (no lugar da lista suspensa), cabeçalho com título e indicador Local/Nuvem, respostas sem balão com "Copiar" e "Pensando…", aviso de memória com "Desfazer" e rolagem que acompanha a resposta. A caixa de texto agora é única e cresce com o texto (Enter envia, Shift+Enter quebra linha), com ícones de anexar e de ajustes desta resposta, botões redondos de microfone/parar/enviar e um cronômetro "Ouvindo · 0:06" com a prévia da transcrição. "Nova conversa" só limpa a tela; a conversa nasce na primeira mensagem. A conversa continua aberta ao ir para Configurações, então uma resposta em andamento não é mais cancelada. Configurações: barra de seções, grupos em cartões, perfil em controle segmentado e interruptores que salvam na hora (microfone, notificações, memória). Limites técnicos, nuvem, dados e medições ficam em "Recursos, nuvem e dados".
   - **Validação:** TypeScript estrito, lint, build e 7 testes do cliente. Não houve revisão visual automatizada (o ambiente não tem navegador headless); falta a conferência do usuário no desktop.
 
+### Espaços, projetos, arquivos e nuvem — próxima frente (20/11/2026)
+
+A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) que a pessoa usa direto, com ou sem IA, guardando os dados dos projetos com ela.
+
+**Decisões de 20/11/2026:**
+
+- **Estrutura:** trilho de espaços à esquerda (Ayla, cada projeto, depois os produtos, e Configurações). Cada espaço tem barra própria; a IA fica disponível dentro de cada um. O app continua abrindo direto na conversa geral.
+- **Memória dos projetos:** o projeto usa as próprias memórias e as gerais; o que a Ayla aprende no projeto fica só nele.
+- **Contas na nuvem:** chave de API por plataforma (OpenAI, Anthropic, Google Gemini, Mistral, DeepSeek, xAI, Groq), com botão para a página de chaves e cofre do sistema, mais login de verdade no OpenRouter. Na primeira abertura e em Configurações, a pessoa escolhe entre 100% local e nuvem.
+- **Arquivos inseridos:** cópia guardada nos dados locais da Ayla, ligada à conversa ou ao projeto, incluída no backup; nunca vão para a nuvem sem revisão.
+
+- [x] **Trilho de espaços e projetos** (falta conferir no desktop). Banco v3 com backup automático antes da migração: tabela `projects`, `project_id` opcional em conversas e memórias, apagar o projeto leva as conversas e memórias dele. Busca de memória com escopo: respostas veem o projeto e as gerais; extração e painel usam só o escopo exato. Nas respostas locais, o nome e o "sobre o projeto" entram no contexto; a nuvem continua recebendo só personalidade e pedido. Interface: trilho com Ayla, projetos (iniciais e cor estável), "+" para novo projeto e Configurações; cada projeto tem visão geral (sobre, conversas recentes, apagar com confirmação), memória própria e conversas. Espaços abertos continuam montados, então respostas em andamento não se perdem ao trocar de espaço.
+  - **Aceite:** 39 testes Rust (inclui migração v2→v3 com backup, isolamento entre projetos, escopos e exclusão em cascata), 7 do cliente, TypeScript estrito, lint e build.
+  - **Limites:** um "esqueça…" dito dentro de um projeto não apaga memória geral (a extração só mexe no escopo do projeto). Ainda não há produtos no trilho.
+- [ ] **Arquivos na conversa e nos projetos:** vídeos, GIFs, PDFs, áudios e outros. Aguardam decisão de dependências (por exemplo, ffmpeg como motor gerenciado e extração de PDF) antes de implementar.
+- [ ] **Nuvem com contas:** escolha inicial local/nuvem, plataformas e login. Pesquisa de 20/11/2026: a OpenAI oferece "Sign in with ChatGPT" (prévia) para apps de código aberto e locais usarem o plano Plus/Pro em pedidos elegíveis da Responses API; a Anthropic não permite que apps de terceiros usem login ou credenciais dos planos Free/Pro/Max. Incluir o login com ChatGPT aguarda decisão do usuário.
+
 ### P2 — Primeira integração com a Moneta
 
 - [ ] Identificar repositório, responsável, versão e capacidades realmente disponíveis.

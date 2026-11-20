@@ -23,12 +23,14 @@ export type Snapshot = {
   worker: { active_model: string | null }; metrics: Metric[]; recommended_profile: Profile;
   catalog: CatalogEntry[]; recommended_model: string | null;
   setup: SetupState | null;
+  projects: Project[];
 };
 export type SetupState = { active: boolean; label?: string; received?: number; total?: number; error?: string; cancelled?: boolean };
 export type Privacy = 'sensitive' | 'uncertain' | 'public';
-export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number };
+export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number; project_id: string | null };
+export type Project = { id: string; name: string; description: string; created_at: number; updated_at: number; conversations: number; memories: number };
 export type MemoryList = { facts: Fact[]; enabled: boolean; ready: boolean };
-export type Conversation = { id: string; title: string; cloud_consent: boolean };
+export type Conversation = { id: string; title: string; cloud_consent: boolean; project_id: string | null };
 export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean };
 export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error'; text?: string; received?: number; total?: number; facts?: Fact[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };

@@ -6,7 +6,7 @@ use super::{
     policy::{self, Sensitivity, UsageMode},
     preferences::{PreferenceStore, Preferences},
     runtime::{self, Runtime},
-    store::{self, Store},
+    store::{self, Scope, Store},
 };
 use base64::Engine;
 use serde::Deserialize;
@@ -146,33 +146,39 @@ impl Core {
         }
     }
     /// Busca híbrida: vetores acima do limiar + FTS5, fundidos por rank.
-    fn search(&self, model_id: &str, vector: &[f32], text: &str, minimum: f64, limit: usize) -> Result<Vec<(Fact, Option<f64>)>, String> {
+    fn search(&self, model_id: &str, vector: &[f32], text: &str, minimum: f64, limit: usize, scope: Scope) -> Result<Vec<(Fact, Option<f64>)>, String> {
         let db = self.store.lock().map_err(|_| "Dados ocupados")?;
-        let mut hits: Vec<(String, f64)> = db.vectors(model_id).map_err(|_| "Falha ao consultar memórias")?
+        let mut hits: Vec<(String, f64)> = db.vectors(model_id, scope).map_err(|_| "Falha ao consultar memórias")?
             .into_iter()
             .filter_map(|(id, v)| memory::cosine(vector, &v).filter(|s| *s >= minimum).map(|s| (id, s)))
             .collect();
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
         hits.truncate(20);
-        let words = memory::fts_query(text).map(|q| db.search_text(&q, 20).unwrap_or_default()).unwrap_or_default();
+        let words = memory::fts_query(text).map(|q| db.search_text(&q, 20, scope).unwrap_or_default()).unwrap_or_default();
         let ids = memory::fuse(&hits, &words, limit);
         let facts = db.facts_by_ids(&ids).map_err(|_| "Falha ao consultar memórias")?;
         Ok(facts.into_iter().map(|f| { let score = hits.iter().find(|(i, _)| *i == f.id).map(|(_, s)| *s); (f, score) }).collect())
     }
     /// Memórias relevantes ao pedido, para respostas locais. Falhas não impedem a conversa.
-    async fn recall(&self, prefs: &Preferences, text: &str, cancel: &CancellationToken) -> Vec<Fact> {
+    /// Num projeto, entram as memórias dele e as gerais; nunca as de outro projeto.
+    async fn recall(&self, prefs: &Preferences, text: &str, project: Option<&str>, cancel: &CancellationToken) -> Vec<Fact> {
         let Some(model) = self.memory_model(prefs) else { return Vec::new() };
         let result = async {
             self.backfill(prefs, &model, cancel).await?;
             let vector = self.runtime.embed(&model, prefs, &memory::query_text(text), cancel).await?;
-            self.search(&model.id, &vector, text, memory::RETRIEVAL_MIN, memory::CONTEXT_LIMIT)
+            self.search(&model.id, &vector, text, memory::RETRIEVAL_MIN, memory::CONTEXT_LIMIT, Scope::visible(project))
         }
         .await;
         result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
     }
-    /// Extrai memórias das mensagens novas de uma conversa e as aplica.
+    /// Extrai memórias das mensagens novas de uma conversa e as aplica. Numa conversa
+    /// de projeto, compara e grava só no projeto: o que se aprende ali fica ali.
     async fn remember(&self, prefs: &Preferences, conversation: &str, origin: &str, cancel: &CancellationToken) -> Result<Vec<Fact>, String> {
-        let range = self.store.lock().map_err(|_| "Dados ocupados")?.extraction_range(conversation).map_err(|_| "Falha ao consultar conversa")?;
+        let (range, project) = {
+            let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+            (db.extraction_range(conversation).map_err(|_| "Falha ao consultar conversa")?, db.conversation_project(conversation).map_err(|_| "Conversa não encontrada")?)
+        };
+        let scope = Scope::exact(project.as_deref());
         let Some((after, until)) = range else { return Ok(Vec::new()) };
         let embedder = self.memory_model(prefs).ok_or("Ative a memória para lembrar automaticamente")?;
         let models = self.models()?;
@@ -182,7 +188,7 @@ impl Core {
             self.backfill(prefs, &embedder, cancel).await?;
             let said: String = turns.iter().filter(|t| t.role == "user").map(|t| t.content.as_str()).collect::<Vec<_>>().join("\n").chars().take(2000).collect();
             let probe = self.runtime.embed(&embedder, prefs, &memory::document_text(&said), cancel).await?;
-            let related: Vec<Fact> = self.search(&embedder.id, &probe, &said, memory::RELATED_MIN, 10)?.into_iter().map(|(f, _)| f).collect();
+            let related: Vec<Fact> = self.search(&embedder.id, &probe, &said, memory::RELATED_MIN, 10, scope)?.into_iter().map(|(f, _)| f).collect();
             let raw = self.runtime.complete_json(&chat, prefs, memory::extraction_request(&turns, &related), memory::extraction_schema(), cancel).await?;
             let extraction = memory::parse_extraction(&raw, &related)?;
             let texts: Vec<String> = extraction.remember.iter().map(|f| memory::document_text(&f.content)).collect();
@@ -191,7 +197,7 @@ impl Core {
                 return Err("Tarefa interrompida".into());
             }
             let db = self.store.lock().map_err(|_| "Dados ocupados")?;
-            let existing = db.vectors(&embedder.id).map_err(|_| "Falha ao consultar memórias")?;
+            let existing = db.vectors(&embedder.id, scope).map_err(|_| "Falha ao consultar memórias")?;
             let mut changed = Vec::new();
             for id in &extraction.forget {
                 let _ = db.delete_fact(id);
@@ -206,7 +212,7 @@ impl Core {
                     _ => {
                         let duplicate = existing.iter().any(|(_, v)| memory::cosine(&vector, v).is_some_and(|s| s >= memory::DUPLICATE_MIN));
                         if duplicate { None } else {
-                            db.insert_fact(&new.content, &new.kind, new.privacy, origin, Some(conversation)).ok().map(|f| f.id)
+                            db.insert_fact(&new.content, &new.kind, new.privacy, origin, Some(conversation), project.as_deref()).ok().map(|f| f.id)
                         }
                     }
                 };
@@ -232,12 +238,10 @@ impl Drop for Core {
 pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> {
     let prefs = state.prefs()?;
     let hw = hardware::detect();
-    let metrics = state
-        .store
-        .lock()
-        .map_err(|_| "Dados ocupados")?
-        .metrics()
-        .map_err(|_| "Não foi possível ler métricas")?;
+    let (metrics, projects) = {
+        let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+        (db.metrics().map_err(|_| "Não foi possível ler métricas")?, db.projects().map_err(|_| "Não foi possível ler projetos")?)
+    };
     let artifacts:Vec<_>=runtime::artifacts().into_iter().map(|a|json!({"id":a.id,"label":a.label,"bytes":a.bytes,"installed":runtime::find_binary(&state.root.join("runtimes").join(a.id),a.binary).is_some()})).collect();
     let recommended = if hw.ram_total_bytes < 12 << 30 {
         "light"
@@ -266,7 +270,7 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
     })).collect();
     let recommended_model = models::recommended(budget, prefs.context_tokens).map(|e| e.id);
     Ok(
-        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null)}),
+        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null),"projects":projects}),
     )
 }
 #[tauri::command]
@@ -619,22 +623,54 @@ pub fn unload_models(state: tauri::State<'_, Core>) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-pub fn conversations(state: tauri::State<'_, Core>) -> Result<Value, String> {
+pub fn conversations(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Value, String> {
     Ok(json!(state
         .store
         .lock()
         .map_err(|_| "Dados ocupados")?
-        .conversations()
+        .conversations(project.as_deref())
         .map_err(|_| "Falha ao ler conversas")?))
 }
 #[tauri::command]
-pub fn create_conversation(state: tauri::State<'_, Core>) -> Result<Value, String> {
-    Ok(json!(state
-        .store
-        .lock()
-        .map_err(|_| "Dados ocupados")?
-        .create_conversation("Nova conversa")
-        .map_err(|_| "Falha ao criar conversa")?))
+pub fn create_conversation(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Value, String> {
+    let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+    if let Some(id) = &project {
+        db.project(id).ok().flatten().ok_or("Projeto não encontrado")?;
+    }
+    Ok(json!(db.create_conversation("Nova conversa", project.as_deref()).map_err(|_| "Falha ao criar conversa")?))
+}
+
+#[tauri::command]
+pub fn projects(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    Ok(json!(state.store.lock().map_err(|_| "Dados ocupados")?.projects().map_err(|_| "Falha ao ler projetos")?))
+}
+fn project_fields(name: &str, description: &str) -> Result<(), String> {
+    let name = name.trim().chars().count();
+    if name == 0 || name > 80 {
+        return Err("Dê ao projeto um nome de até 80 caracteres".into());
+    }
+    if description.trim().chars().count() > 2000 {
+        return Err("A descrição do projeto deve ter até 2000 caracteres".into());
+    }
+    Ok(())
+}
+#[tauri::command]
+pub fn create_project(state: tauri::State<'_, Core>, name: String, description: String) -> Result<Value, String> {
+    project_fields(&name, &description)?;
+    Ok(json!(state.store.lock().map_err(|_| "Dados ocupados")?.create_project(&name, &description).map_err(|_| "Não foi possível criar o projeto")?))
+}
+#[tauri::command]
+pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, description: String) -> Result<(), String> {
+    project_fields(&name, &description)?;
+    state.store.lock().map_err(|_| "Dados ocupados")?.update_project(&id, &name, &description).map_err(|_| "Projeto não encontrado".into())
+}
+/// Apaga o projeto com conversas e memórias dele (a interface pede confirmação).
+#[tauri::command]
+pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    match state.store.lock().map_err(|_| "Dados ocupados")?.delete_project(&id) {
+        Ok(true) => Ok(()),
+        _ => Err("Projeto não encontrado".into()),
+    }
 }
 #[tauri::command]
 pub fn conversation_messages(state: tauri::State<'_, Core>, id: String) -> Result<Value, String> {
@@ -672,6 +708,15 @@ pub struct ChatRequest {
     pub request_cloud: bool,
     pub image: Option<String>,
 }
+/// Contexto do projeto no prompt local: nome e "sobre o projeto".
+fn project_block(project: &store::Project) -> String {
+    let mut block = format!("\n\nEsta conversa faz parte do projeto \"{}\".", project.name);
+    if !project.description.trim().is_empty() {
+        block.push_str(&format!(" Sobre o projeto: {}", project.description.trim()));
+    }
+    block
+}
+
 #[tauri::command]
 pub async fn chat(
     app: tauri::AppHandle,
@@ -731,9 +776,13 @@ pub async fn chat(
             let mime=if bytes.starts_with(b"\x89PNG"){"image/png"}else if bytes.starts_with(&[0xff,0xd8]){"image/jpeg"}else{return Err("Use uma imagem PNG ou JPEG".into());};
             content=json!([{"type":"text","text":request.message},{"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}]);
         }
-        // Memórias locais só entram em respostas locais nesta etapa.
+        // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
-        if !use_cloud{let facts=state.recall(&prefs,&request.message,&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}}
+        if !use_cloud{
+            let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten().and_then(|id|state.store.lock().ok()?.project(&id).ok().flatten());
+            if let Some(p)=&project{system.push_str(&project_block(p));}
+            let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
+        }
         context.insert(0,json!({"role":"system","content":system}));
         context.push(json!({"role":"user","content":content}));
         let mut report=|event:Value|{if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
@@ -948,11 +997,11 @@ pub async fn semantic_memory(
         };
         if !search {
             let db = state.store.lock().map_err(|_| "Dados ocupados")?;
-            let fact = db.insert_fact(request.text.trim(), "nota", Privacy::Uncertain, "manual", None).map_err(|_| "Não foi possível salvar memória")?;
+            let fact = db.insert_fact(request.text.trim(), "nota", Privacy::Uncertain, "manual", None, None).map_err(|_| "Não foi possível salvar memória")?;
             db.set_vector(&fact.id, &model_id, &vector).map_err(|_| "Não foi possível salvar memória")?;
             return Ok(json!({"saved":true}));
         }
-        let results: Vec<Value> = state.search(&model_id, &vector, &request.text, 0.0, 5)?
+        let results: Vec<Value> = state.search(&model_id, &vector, &request.text, 0.0, 5, Scope::visible(None))?
             .into_iter()
             .map(|(fact, score)| json!({"content":fact.content,"score":score}))
             .collect();
@@ -964,9 +1013,9 @@ pub async fn semantic_memory(
 }
 
 #[tauri::command]
-pub fn memory_list(state: tauri::State<'_, Core>) -> Result<Value, String> {
+pub fn memory_list(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Value, String> {
     let prefs = state.prefs()?;
-    let facts = state.store.lock().map_err(|_| "Dados ocupados")?.facts().map_err(|_| "Falha ao consultar memórias")?;
+    let facts = state.store.lock().map_err(|_| "Dados ocupados")?.facts(project.as_deref()).map_err(|_| "Falha ao consultar memórias")?;
     Ok(json!({"facts":facts,"enabled":prefs.memory_auto,"ready":state.memory_model(&prefs).is_some()}))
 }
 #[tauri::command]
@@ -975,7 +1024,7 @@ pub fn conversation_memories(state: tauri::State<'_, Core>, id: String) -> Resul
 }
 /// Cria (sem `id`) ou edita uma memória pelo painel. O vetor é recalculado depois, em segundo plano.
 #[tauri::command]
-pub fn memory_save(state: tauri::State<'_, Core>, id: Option<String>, content: String, privacy: Privacy) -> Result<(), String> {
+pub fn memory_save(state: tauri::State<'_, Core>, id: Option<String>, content: String, privacy: Privacy, project: Option<String>) -> Result<(), String> {
     let content = content.trim();
     if content.chars().count() < 3 || content.chars().count() > 1000 {
         return Err("A memória deve ter entre 3 e 1000 caracteres".into());
@@ -983,7 +1032,12 @@ pub fn memory_save(state: tauri::State<'_, Core>, id: Option<String>, content: S
     let db = state.store.lock().map_err(|_| "Dados ocupados")?;
     match id {
         Some(id) => db.update_fact(&id, Some(content), Some(privacy)).map_err(|_| "Memória não encontrada".to_string()),
-        None => db.insert_fact(content, "fato", privacy, "manual", None).map(|_| ()).map_err(|_| "Não foi possível salvar memória".to_string()),
+        None => {
+            if let Some(id) = &project {
+                db.project(id).ok().flatten().ok_or("Projeto não encontrado")?;
+            }
+            db.insert_fact(content, "fato", privacy, "manual", None, project.as_deref()).map(|_| ()).map_err(|_| "Não foi possível salvar memória".to_string())
+        }
     }
 }
 #[tauri::command]
@@ -1266,7 +1320,7 @@ mod tests {
         let token = CancellationToken::new();
         let talk = |lines: &[(&str, &str)]| {
             let db = core.store.lock().unwrap();
-            let c = db.create_conversation("teste").unwrap();
+            let c = db.create_conversation("teste", None).unwrap();
             for (role, text) in lines {
                 db.add_message(&c.id, role, text, true).unwrap();
             }
@@ -1287,23 +1341,23 @@ mod tests {
         assert!(!learned.iter().any(|f| f.content.to_lowercase().contains("grão")), "não guarda pedidos pontuais");
 
         let start = Instant::now();
-        let recalled = core.recall(&prefs, "Qual o nome do meu pet?", &token).await;
+        let recalled = core.recall(&prefs, "Qual o nome do meu pet?", None, &token).await;
         show(&format!("busca pet ({} ms)", start.elapsed().as_millis()), &recalled);
         assert!(recalled.iter().any(|f| f.content.contains("Mel")));
-        let unrelated = core.recall(&prefs, "Quanto é 17 vezes 23?", &token).await;
+        let unrelated = core.recall(&prefs, "Quanto é 17 vezes 23?", None, &token).await;
         show("busca sem relação", &unrelated);
 
         let second = talk(&[("user", "Novidade: me mudei para Recife semana passada."), ("assistant", "Que mudança! Boa adaptação em Recife.")]);
         let updated = core.remember(&prefs, &second, "auto", &token).await.unwrap();
         show("atualização", &updated);
-        let all = core.store.lock().unwrap().facts().unwrap();
+        let all = core.store.lock().unwrap().facts(None).unwrap();
         show("todas", &all);
         assert!(all.iter().any(|f| f.content.contains("Recife")));
         assert!(!all.iter().any(|f| f.content.contains("Fortaleza")), "a cidade antiga deve ser substituída");
 
         let third = talk(&[("user", "Pode esquecer a informação sobre a minha gata."), ("assistant", "Tudo bem, esqueci.")]);
         core.remember(&prefs, &third, "explicit", &token).await.unwrap();
-        let all = core.store.lock().unwrap().facts().unwrap();
+        let all = core.store.lock().unwrap().facts(None).unwrap();
         show("após esquecer", &all);
         assert!(!all.iter().any(|f| f.content.contains("Mel")));
 

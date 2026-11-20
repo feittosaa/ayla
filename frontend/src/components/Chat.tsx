@@ -1,16 +1,25 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, type Capability, type Conversation, type Fact, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
-import { ArrowUpIcon, CloudIcon, ComputerIcon, CopyIcon, MicIcon, PaperclipIcon, PlusIcon, SettingsIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
+import { ArrowUpIcon, CopyIcon, MicIcon, PaperclipIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import './Chat.css';
 
-type Props = { snapshot: Snapshot; refresh: () => Promise<void>; onSettings: () => void };
+type Props = {
+  snapshot: Snapshot; refresh: () => Promise<void>;
+  /** Projeto do espaço; `null` é a conversa geral da Ayla. */
+  project: Project | null;
+  /** Conversa aberta; `null` mostra uma conversa nova, criada na primeira mensagem. */
+  conversation: Conversation | null;
+  /** Conversa criada ou alterada aqui (primeira mensagem, consentimento). */
+  onConversation: (conversation: Conversation) => void;
+  onBusy: (busy: boolean) => void;
+  /** Botão para mostrar a barra do espaço quando ela estiver recolhida. */
+  onShowSidebar?: () => void;
+};
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-export default function Chat({ snapshot, refresh, onSettings }: Props) {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversation, setConversation] = useState<Conversation | null>(null);
+export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(''); const [kind, setKind] = useState<Capability | 'auto'>('auto');
   const [model, setModel] = useState(''); const [image, setImage] = useState<string | null>(null);
@@ -23,11 +32,12 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
   const [listening, setListening] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const [seconds, setSeconds] = useState(0);
   const [options, setOptions] = useState(false);
-  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 760);
   const [copied, setCopied] = useState<number | null>(null);
   const recorder = useRef<Recording | null>(null);
   const thread = useRef<HTMLDivElement | null>(null); const field = useRef<HTMLTextAreaElement | null>(null);
   const follow = useRef(true);
+  /** Conversa criada pelo envio em andamento: já está na tela, não recarregar. */
+  const created = useRef<string | null>(null);
   const mode = snapshot.preferences.usage_mode;
   const cloud = source === 'cloud' || mode === 'cloud_only';
   const needsSetup = mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
@@ -42,7 +52,6 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
   const firstSetup = [suggested, snapshot.preferences.memory_auto ? memoryEntry : undefined, ...(snapshot.preferences.voice !== false ? snapshot.catalog.filter(entry => entry.capabilities.includes('transcription')) : [])]
     .reduce((sum, entry) => sum + (entry && !entry.installed ? entry.download_bytes : 0), 0);
   const canSend = !busy && listening === 'idle' && Boolean(input.trim()) && (!cloud || reviewed);
-  const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Neste computador; nuvem só com sua revisão';
 
   useEffect(() => {
     if (!conversationId) { setLearned([]); return; }
@@ -56,10 +65,18 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
     try { await native('memory_delete', { id: fact.id }); setLearned(prev => prev.filter(f => f.id !== fact.id)); } catch (e) { setError(errorText(e)); }
   }
 
+  useEffect(() => () => { if (active.current) void native('cancel_job', { requestId: active.current }); recorder.current?.stop(); }, []);
+  useEffect(() => { onBusy(busy); }, [busy, onBusy]);
+
+  // Abre a conversa escolhida na barra do espaço (ou limpa a tela para uma nova).
   useEffect(() => {
-    native<Conversation[]>('conversations').then(setConversations).catch(e => setError(errorText(e)));
-    return () => { if (active.current) void native('cancel_job', { requestId: active.current }); recorder.current?.stop(); };
-  }, []);
+    if (created.current === conversationId) { created.current = null; return; }
+    setError(''); setReviewed(false); setRouting(''); follow.current = true;
+    if (!conversationId) { setMessages([]); return; }
+    let current = true;
+    native<Message[]>('conversation_messages', { id: conversationId }).then(items => { if (current) setMessages(items); }).catch(e => { if (current) setError(errorText(e)); });
+    return () => { current = false; };
+  }, [conversationId]);
 
   useEffect(() => { setReviewed(false); }, [snapshot.system_prompt]);
 
@@ -73,24 +90,13 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
     return () => clearInterval(timer);
   }, [listening]);
 
-  async function open(item: Conversation) {
-    if (active.current) return;
-    try { setMessages(await native<Message[]>('conversation_messages', { id: item.id })); setConversation(item); setError(''); setReviewed(false); follow.current = true; }
-    catch (e) { setError(errorText(e)); }
-  }
-  // A conversa só é criada na primeira mensagem; "Nova conversa" apenas limpa a tela.
-  function newConversation() {
-    if (active.current) return;
-    setConversation(null); setMessages([]); setError(''); setReviewed(false); setRouting('');
-    field.current?.focus();
-  }
   async function send(spokenText?: string) {
     const text = (spokenText ?? input).trim();
     if (!text || active.current) return;
     const id = taskId(); active.current = id; setBusy(true); setError(''); follow.current = true;
     let current = conversation;
     if (!current) {
-      try { current = await native<Conversation>('create_conversation'); setConversation(current); setConversations(prev => [current!, ...prev]); }
+      try { current = await native<Conversation>('create_conversation', { project: project?.id ?? null }); created.current = current.id; onConversation(current); }
       catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
     }
     const message = text; if (spokenText === undefined) setInput('');
@@ -138,7 +144,7 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
   }
   async function consent(allowed: boolean) {
     if (!conversation) return;
-    try { await native('conversation_consent', { id: conversation.id, allowed }); setConversation({ ...conversation, cloud_consent: allowed }); setConversations(prev => prev.map(c => c.id === conversation.id ? { ...c, cloud_consent: allowed } : c)); }
+    try { await native('conversation_consent', { id: conversation.id, allowed }); onConversation({ ...conversation, cloud_consent: allowed }); }
     catch (e) { setError(errorText(e)); }
   }
   // Imagem colada (Ctrl+V): vira um anexo local, como uma imagem escolhida.
@@ -158,32 +164,17 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
     catch { setError('Não consegui copiar a resposta.'); }
   }
 
-  return <div className="chat-layout">
-    {sidebar && <aside className="sidebar" aria-label="Conversas">
-      <div className="brand"><span className="orb" aria-hidden="true" /><span className="brand-name">Ayla</span>
-        <button className="icon-button" aria-label="Recolher a lista de conversas" onClick={() => setSidebar(false)}><SidebarIcon /></button></div>
-      <button className="new-chat" disabled={busy} onClick={newConversation}><PlusIcon size={18} />Nova conversa</button>
-      <nav className="conversation-list" aria-label="Conversas recentes">
-        {conversations.length > 0 && <p className="sidebar-label">Recentes</p>}
-        {conversations.map(item => <button key={item.id} className="conversation-item" aria-current={item.id === conversationId ? 'page' : undefined} disabled={busy && item.id !== conversationId} onClick={() => void open(item)}>{item.title}</button>)}
-      </nav>
-      <div className="sidebar-footer">
-        <p className="where">{mode === 'cloud_only' ? <CloudIcon size={18} /> : <ComputerIcon size={18} />}{where}</p>
-        <button className="sidebar-link" onClick={onSettings}><SettingsIcon size={18} />Configurações</button>
-      </div>
-    </aside>}
-
+  return <>
     <main className="chat-main">
       <header className="chat-header">
-        {!sidebar && <button className="icon-button" aria-label="Mostrar a lista de conversas" onClick={() => setSidebar(true)}><SidebarIcon /></button>}
+        {onShowSidebar && <button className="icon-button" aria-label="Mostrar a barra lateral" onClick={onShowSidebar}><SidebarIcon /></button>}
         <h1>{conversation?.title || 'Nova conversa'}</h1>
         <span className="chip"><span className="dot" aria-hidden="true" />{cloud ? 'Nuvem' : 'Local'}</span>
-        {!sidebar && <button className="icon-button" aria-label="Configurações" onClick={onSettings}><SettingsIcon /></button>}
       </header>
 
       <div className="messages" ref={thread} aria-live="polite" onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
         <div className="thread">
-          {!messages.length && !needsSetup && !setup.active && <div className="empty-state"><span className="orb large" aria-hidden="true" /><p>O que vamos fazer hoje?</p></div>}
+          {!messages.length && !needsSetup && !setup.active && <div className="empty-state"><span className="orb large" aria-hidden="true" /><p>{project ? `O que vamos fazer em ${project.name}?` : 'O que vamos fazer hoje?'}</p></div>}
           {!messages.length && (needsSetup || setup.active) && <section className="setup-card" aria-label="Preparar a Ayla">
             <h2>{setup.active ? 'Preparando a Ayla neste computador' : 'Vamos preparar a Ayla neste computador'}</h2>
             {setup.active ? <><p>Baixando os modelos padrão para a Ayla funcionar sem internet. Você pode usar outras telas enquanto isso.</p>
@@ -245,5 +236,5 @@ export default function Chat({ snapshot, refresh, onSettings }: Props) {
         <p className="composer-note">{cloud ? 'Esta resposta usará a nuvem depois da sua revisão.' : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
       </div>
     </main>
-  </div>;
+  </>;
 }
