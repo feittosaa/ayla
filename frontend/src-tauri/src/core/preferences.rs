@@ -30,8 +30,26 @@ pub struct Preferences {
     pub idle_seconds: u64,
     /// Memória longa automática; desligar pausa novas extrações sem apagar nada.
     pub memory_auto: bool,
-    /// Voz opcional: None até a pessoa responder à pergunta inicial.
+    /// Microfone (transcrição local), ligado por padrão desde 20/11/2026 e preparado
+    /// na primeira abertura. `None` vem de arquivos antigos e vale como ligado;
+    /// só `Some(false)` (escolha da pessoa) desliga. A Ayla responde só em texto.
     pub voice: Option<bool>,
+    /// Notificações do sistema; arquivos anteriores recebem o padrão (todas ligadas).
+    pub notifications: Notifications,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notifications {
+    /// Resposta pronta enquanto a janela está fora de foco.
+    pub reply: bool,
+    /// Preparo de modelos concluído ou com erro.
+    pub setup: bool,
+}
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { reply: true, setup: true }
+    }
 }
 
 /// v2: contexto padrão 2048 → 8192 (modelos com raciocínio esgotavam o limite).
@@ -54,7 +72,8 @@ impl Default for Preferences {
             context_tokens: 8192,
             idle_seconds: 120,
             memory_auto: true,
-            voice: None,
+            voice: Some(true),
+            notifications: Notifications::default(),
         }
     }
 }
@@ -69,6 +88,9 @@ impl Preferences {
             Some(Profile::Moderate) => 50,
             None => Self::automatic_percent(super::hardware::detect().ram_total_bytes),
         })
+    }
+    pub fn voice_enabled(&self) -> bool {
+        self.voice != Some(false)
     }
     pub fn system_prompt(&self) -> &str {
         if self.personality.trim().is_empty() {
@@ -232,12 +254,42 @@ mod tests {
         let migrated = store.load().unwrap();
         assert_eq!((migrated.version, migrated.context_tokens), (2, 8192));
         assert_eq!(migrated.personality, "breve");
+        assert_eq!(migrated.notifications, Notifications { reply: true, setup: true });
         fs::write(&store.path, r#"{"version":1,"context_tokens":4096}"#).unwrap();
         assert_eq!(store.load().unwrap().context_tokens, 4096);
         // Carregar não reescreve o arquivo; a migração persiste no próximo salvamento.
         assert!(fs::read_to_string(&store.path).unwrap().contains("4096"));
         fs::write(&store.path, r#"{"version":3}"#).unwrap();
         assert!(store.load().is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn microphone_is_on_by_default_and_only_an_explicit_choice_turns_it_off() {
+        assert!(Preferences::default().voice_enabled());
+        let legacy: Preferences = serde_json::from_str(r#"{"version":2,"voice":null}"#).unwrap();
+        assert!(legacy.voice_enabled(), "arquivos de antes da decisão ficam com o microfone ligado");
+        let declined: Preferences = serde_json::from_str(r#"{"version":2,"voice":false}"#).unwrap();
+        assert!(!declined.voice_enabled(), "quem desligou continua com ele desligado");
+    }
+    #[test]
+    fn notifications_default_on_and_keep_individual_choices() {
+        let dir = std::env::temp_dir().join(format!(
+            "ayla-preferences-notify-{}",
+            super::super::store::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = PreferenceStore::new(&dir);
+        // Arquivo salvo antes das notificações existirem.
+        fs::write(&store.path, r#"{"version":2,"voice":true}"#).unwrap();
+        let mut prefs = store.load().unwrap();
+        assert_eq!(prefs.notifications, Notifications::default());
+        assert!(prefs.notifications.reply && prefs.notifications.setup);
+        prefs.notifications.reply = false;
+        store.save(&prefs).unwrap();
+        let saved = store.load().unwrap().notifications;
+        assert_eq!((saved.reply, saved.setup), (false, true));
+        fs::write(&store.path, r#"{"version":2,"notifications":{"reply":true,"desconhecida":true}}"#).unwrap();
+        assert!(store.load().is_err(), "campos desconhecidos continuam recusados");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

@@ -14,5 +14,10 @@ body {
   background-color: var(--ayla-bg);
   color: var(--ayla-text);
   font-family: var(--ayla-font-main);
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
+}
+
+[hidden] {
+  display: none !important;
 }

@@ -14,6 +14,8 @@ pub enum Capability {
     Reasoning,
     Vision,
     Transcription,
+    /// Voz de saída, removida em 20/11/2026. Mantida só para listar e remover
+    /// modelos baixados antes; nenhum pedido escolhe esta capacidade.
     Speech,
     Embedding,
 }
@@ -37,9 +39,6 @@ pub struct Model {
     /// Memória medida no contexto de referência, com margem; ausente em importações.
     #[serde(default)]
     pub memory_bytes: Option<u64>,
-    /// Voz dentro de modelos multi-voz (Kokoro).
-    #[serde(default)]
-    pub speaker: Option<u32>,
 }
 /// Contexto em que o consumo dos modelos do catálogo foi medido.
 pub const MEASURED_CONTEXT: u32 = 8192;
@@ -70,8 +69,6 @@ pub struct CatalogFile {
     pub bytes: u64,
     pub sha256: &'static str,
     pub projector: bool,
-    /// Pacote .tar.bz2 extraído na pasta do modelo (ex.: Kokoro com vozes e dicionários).
-    pub archive: bool,
 }
 pub struct CatalogEntry {
     pub id: &'static str,
@@ -82,9 +79,8 @@ pub struct CatalogEntry {
     /// (benchmark de 19/11/2026), antes da margem de segurança.
     pub measured_bytes: u64,
     pub files: &'static [CatalogFile],
-    /// Motor necessário: "llama" (pacote preferido), "whisper" ou "speech".
+    /// Motor necessário: "llama" (pacote preferido) ou "whisper".
     pub runtime: &'static str,
-    pub speaker: Option<u32>,
 }
 impl CatalogEntry {
     pub fn download_bytes(&self) -> u64 {
@@ -110,10 +106,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             capabilities: CONVERSATION,
             measured_bytes: 7_464_751_104,
             runtime: "llama",
-            speaker: None,
             files: &[
-                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf", bytes: 5_154_941_280, sha256: "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee", projector: false, archive: false },
-                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B-it-mmproj.gguf", bytes: 991_552_256, sha256: "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578", projector: true, archive: false },
+                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf", bytes: 5_154_941_280, sha256: "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee", projector: false },
+                CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B-it-mmproj.gguf", bytes: 991_552_256, sha256: "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578", projector: true },
             ],
         },
         CatalogEntry {
@@ -123,10 +118,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             capabilities: CONVERSATION,
             measured_bytes: 4_748_759_040,
             runtime: "llama",
-            speaker: None,
             files: &[
-                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/Qwen3.5-4B-Q4_K_M.gguf", bytes: 3_032_091_584, sha256: "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14", projector: false, archive: false },
-                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/mmproj-Qwen3.5-4B-Q8_0.gguf", bytes: 366_894_560, sha256: "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654", projector: true, archive: false },
+                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/Qwen3.5-4B-Q4_K_M.gguf", bytes: 3_032_091_584, sha256: "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14", projector: false },
+                CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/mmproj-Qwen3.5-4B-Q8_0.gguf", bytes: 366_894_560, sha256: "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654", projector: true },
             ],
         },
         CatalogEntry {
@@ -137,9 +131,8 @@ pub fn catalog() -> &'static [CatalogEntry] {
             // RSS medido na CPU com contexto 2048 (benchmark de 19/11/2026).
             measured_bytes: 406_847_488,
             runtime: "llama",
-            speaker: None,
             files: &[
-                CatalogFile { url: "https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/8dd0ca2a66a8f14470acb0e2a71f801afbc5fb73/embeddinggemma-300M-qat-Q4_0.gguf", bytes: 277_852_192, sha256: "50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26", projector: false, archive: false },
+                CatalogFile { url: "https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/8dd0ca2a66a8f14470acb0e2a71f801afbc5fb73/embeddinggemma-300M-qat-Q4_0.gguf", bytes: 277_852_192, sha256: "50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26", projector: false },
             ],
         },
         CatalogEntry {
@@ -150,21 +143,20 @@ pub fn catalog() -> &'static [CatalogEntry] {
             // Pico de RAM do whisper-cli na CPU (benchmark FLEURS de 19/11/2026).
             measured_bytes: 787_480_576,
             runtime: "whisper",
-            speaker: None,
             files: &[
-                CatalogFile { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin", bytes: 487_601_967, sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b", projector: false, archive: false },
+                CatalogFile { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin", bytes: 487_601_967, sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b", projector: false },
             ],
         },
         CatalogEntry {
-            id: "kokoro-dora",
-            name: "Voz da Ayla (Kokoro Dora)",
-            summary: "Voz feminina em português, a mais clara no benchmark.",
-            capabilities: &[Capability::Speech],
-            measured_bytes: 768_606_208,
-            runtime: "speech",
-            speaker: Some(42),
+            id: "whisper-tiny",
+            name: "Prévia da transcrição (Whisper tiny)",
+            summary: "Mostra o texto enquanto você fala; o texto final usa o Whisper small.",
+            capabilities: &[Capability::Transcription],
+            // Pico de RAM do whisper-cli na CPU (benchmark FLEURS de 19/11/2026).
+            measured_bytes: 185_597_952,
+            runtime: "whisper",
             files: &[
-                CatalogFile { url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2", bytes: 349_886_476, sha256: "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4", projector: false, archive: true },
+                CatalogFile { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin", bytes: 77_691_713, sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21", projector: false },
             ],
         },
     ]
@@ -252,26 +244,6 @@ fn hash(path: &Path) -> io::Result<String> {
     }
     Ok(format!("{:x}", sha.finalize()))
 }
-fn copy_assets(source: &Path, target: &Path) -> io::Result<u64> {
-    fs::create_dir_all(target)?;
-    let mut size = 0;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let info = entry.file_type()?;
-        if info.is_symlink() {
-            return Err(io::Error::other(
-                "Modelos não podem incluir atalhos de arquivos",
-            ));
-        }
-        let destination = target.join(entry.file_name());
-        size += if info.is_dir() {
-            copy_assets(&entry.path(), &destination)?
-        } else {
-            fs::copy(entry.path(), destination)?
-        };
-    }
-    Ok(size)
-}
 
 pub fn import(
     source: &Path,
@@ -283,49 +255,32 @@ pub fn import(
     if name.trim().is_empty() {
         return Err(io::Error::other("Dê um nome ao modelo"));
     }
+    if capability == Capability::Speech {
+        return Err(io::Error::other("A Ayla responde em texto; modelos de voz não são mais usados"));
+    }
     let source = source.canonicalize()?;
     let directory = root.join(store::id());
     fs::create_dir_all(&directory)?;
     let result = (|| {
-        let path;
-        let bytes;
-        if capability == Capability::Speech {
-            if !source.is_dir() {
-                return Err(io::Error::other(
-                    "Escolha a pasta do modelo de voz, incluindo tokens e dados auxiliares",
-                ));
-            }
-            bytes = copy_assets(&source, &directory)?;
-            let files: Vec<_> = fs::read_dir(&directory)?
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "onnx"))
-                .collect();
-            if files.len() != 1 || !directory.join("tokens.txt").is_file() {
-                return Err(io::Error::other("Voz: a pasta deve conter um único modelo ONNX e tokens.txt; modelos VITS suportados pelo sherpa-onnx"));
-            }
-            path = files[0].clone();
-        } else {
-            let mut file = fs::File::open(&source)?;
-            let mut magic = [0u8; 4];
-            file.read_exact(&mut magic)?;
-            if capability != Capability::Transcription && magic != *b"GGUF" {
-                return Err(io::Error::other(
-                    "Este tipo exige um arquivo GGUF compatível com llama.cpp",
-                ));
-            }
-            if capability == Capability::Transcription && magic != *b"lmgg" && magic != *b"ggml" {
-                return Err(io::Error::other(
-                    "Transcrição exige um modelo GGML compatível com whisper.cpp",
-                ));
-            }
-            path = directory.join(if capability == Capability::Transcription {
-                "model.bin"
-            } else {
-                "model.gguf"
-            });
-            bytes = fs::copy(&source, &path)?;
+        let mut file = fs::File::open(&source)?;
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic)?;
+        if capability != Capability::Transcription && magic != *b"GGUF" {
+            return Err(io::Error::other(
+                "Este tipo exige um arquivo GGUF compatível com llama.cpp",
+            ));
         }
+        if capability == Capability::Transcription && magic != *b"lmgg" && magic != *b"ggml" {
+            return Err(io::Error::other(
+                "Transcrição exige um modelo GGML compatível com whisper.cpp",
+            ));
+        }
+        let path = directory.join(if capability == Capability::Transcription {
+            "model.bin"
+        } else {
+            "model.gguf"
+        });
+        let bytes = fs::copy(&source, &path)?;
         let mut total = bytes;
         let companion = match companion {
             Some(file) => {
@@ -355,7 +310,7 @@ pub fn import(
             bytes: total,
             sha256: checksum,
             catalog: None,
-            memory_bytes: None, speaker: None,
+            memory_bytes: None,
         })
     })();
     if result.is_err() {
@@ -395,7 +350,7 @@ mod tests {
             bytes,
             sha256: String::new(),
             catalog: None,
-            memory_bytes: None, speaker: None,
+            memory_bytes: None,
         }
     }
     #[test]
@@ -441,21 +396,16 @@ mod tests {
         for entry in catalog() {
             assert!(entry.files.iter().filter(|f| f.projector).count() <= 1);
             for file in entry.files {
-                if file.url.starts_with("https://huggingface.co/") {
-                    let revision = file.url.split("/resolve/").nth(1).unwrap().split('/').next().unwrap();
-                    assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
-                } else {
-                    // Releases do GitHub não têm revisão imutável na URL; o SHA-256 fixa o conteúdo.
-                    assert!(file.url.starts_with("https://github.com/k2-fsa/sherpa-onnx/releases/download/"));
-                }
-                assert_eq!(file.archive, file.url.ends_with(".tar.bz2"));
+                assert!(file.url.starts_with("https://huggingface.co/"));
+                let revision = file.url.split("/resolve/").nth(1).unwrap().split('/').next().unwrap();
+                assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
                 assert!(file.sha256.len() == 64 && file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
                 assert!(file.bytes > 0);
             }
         }
         for entry in catalog() {
-            assert!(matches!(entry.runtime, "llama" | "whisper" | "speech"));
-            assert_eq!(entry.speaker.is_some(), entry.capabilities.contains(&Capability::Speech));
+            assert!(matches!(entry.runtime, "llama" | "whisper"));
+            assert!(!entry.capabilities.contains(&Capability::Speech), "a Ayla não baixa voz de saída");
         }
         assert_eq!(recommended(15 << 30, 8192).unwrap().id, "gemma-4-e4b");
         assert_eq!(recommended(7 << 30, 8192).unwrap().id, "qwen3.5-4b");

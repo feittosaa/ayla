@@ -2,10 +2,10 @@ use super::{
     hardware,
     memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
+    notify,
     policy::{self, Sensitivity, UsageMode},
     preferences::{PreferenceStore, Preferences},
     runtime::{self, Runtime},
-    speech_text,
     store::{self, Store},
 };
 use base64::Engine;
@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -42,6 +42,8 @@ pub struct Core {
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root).map_err(|_| "Não foi possível abrir seus dados")?;
+        // Imagens coladas que sobraram de um encerramento abrupto.
+        let _ = fs::remove_dir_all(root.join("work").join(PASTED));
         let store = Store::open(&root.join("ayla.db"))
             .map_err(|_| "Não foi possível abrir o banco da Ayla")?;
         Ok(Self {
@@ -323,13 +325,10 @@ pub async fn import_model(
     capability: Capability,
 ) -> Result<Option<Model>, String> {
     let projector_app = app.clone();
-    let selected = tauri::async_runtime::spawn_blocking(move || {
-        if capability == Capability::Speech {
-            app.dialog().file().blocking_pick_folder()
-        } else {
-            app.dialog().file().blocking_pick_file()
-        }
-    })
+    if capability == Capability::Speech {
+        return Err("A Ayla responde em texto; modelos de voz não são mais usados".into());
+    }
+    let selected = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_file())
     .await
     .map_err(|_| "Não foi possível abrir seleção de arquivo")?;
     let Some(selected) = selected else {
@@ -445,11 +444,14 @@ impl Core {
         if prefs.memory_auto && missing(Capability::Embedding) {
             plan.extend(first(Capability::Embedding));
         }
-        if prefs.voice == Some(true) {
-            for kind in [Capability::Transcription, Capability::Speech] {
-                if missing(kind) {
-                    plan.extend(first(kind));
-                }
+        if prefs.voice_enabled() {
+            let catalog_id = |id: &str| installed.iter().any(|m| m.catalog.as_deref() == Some(id));
+            let main_transcriber = installed.iter().any(|m| m.supports(Capability::Transcription) && m.catalog.as_deref() != Some(PREVIEW_TRANSCRIBER));
+            if !main_transcriber {
+                plan.extend(models::catalog().iter().find(|e| e.capabilities.contains(&Capability::Transcription) && e.id != PREVIEW_TRANSCRIBER));
+            }
+            if !catalog_id(PREVIEW_TRANSCRIBER) {
+                plan.extend(models::catalog().iter().find(|e| e.id == PREVIEW_TRANSCRIBER));
             }
         }
         Ok(plan)
@@ -457,7 +459,7 @@ impl Core {
     /// Instala as entradas na ordem, com o llama.cpp antes se faltar; progresso acumulado.
     async fn install_entries(&self, entries: &[&'static models::CatalogEntry], token: &CancellationToken, mut progress: impl FnMut(&str, u64, u64)) -> Result<(), String> {
         let runtimes = self.root.join("runtimes");
-        // Motores que faltam para as entradas pedidas (llama.cpp, whisper.cpp, sherpa-onnx).
+        // Motores que faltam para as entradas pedidas (llama.cpp, whisper.cpp).
         let mut needed: Vec<runtime::Artifact> = Vec::new();
         for entry in entries {
             let id = if entry.runtime == "llama" { runtime::preferred_llama() } else { entry.runtime };
@@ -514,7 +516,8 @@ impl Core {
     }
     /// Preparo do perfil principal sem cliques. Chamado ao abrir o app (uma vez por
     /// sessão) e pelo botão "Tentar novamente". Nunca roda no modo somente nuvem.
-    pub async fn prepare_defaults(&self) -> Result<(), String> {
+    /// Ao terminar ou falhar, avisa pelo sistema se a janela estiver fora de foco.
+    pub async fn prepare_defaults(&self, app: &tauri::AppHandle) -> Result<(), String> {
         let prefs = self.prefs()?;
         if prefs.usage_mode == UsageMode::CloudOnly {
             return Ok(());
@@ -546,17 +549,29 @@ impl Core {
             Err(_) if token.is_cancelled() => json!({"active":false,"cancelled":true}),
             Err(error) => json!({"active":false,"error":error}),
         });
+        self.notify_setup(app, &result, &token);
         result
+    }
+    fn notify_setup(&self, app: &tauri::AppHandle, result: &Result<(), String>, token: &CancellationToken) {
+        let event = match result {
+            Ok(()) => notify::Event::SetupDone,
+            Err(_) if token.is_cancelled() => return,
+            Err(_) => notify::Event::SetupFailed,
+        };
+        if let Ok(prefs) = self.prefs() {
+            notify::send(app, &prefs, event);
+        }
     }
 }
 
 #[tauri::command]
-pub async fn setup_start(state: tauri::State<'_, Core>) -> Result<(), String> {
-    state.prepare_defaults().await
+pub async fn setup_start(app: tauri::AppHandle, state: tauri::State<'_, Core>) -> Result<(), String> {
+    state.prepare_defaults(&app).await
 }
 
 #[tauri::command]
 pub async fn install_catalog_model(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Core>,
     id: String,
     request_id: String,
@@ -578,6 +593,7 @@ pub async fn install_catalog_model(
         let _ = events.send(json!({"type":"download","received":received,"total":total}));
     }).await;
     state.finish(&request_id);
+    state.notify_setup(&app, &result, &token);
     result
 }
 #[tauri::command]
@@ -658,6 +674,7 @@ pub struct ChatRequest {
 }
 #[tauri::command]
 pub async fn chat(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Core>,
     request: ChatRequest,
     events: Channel<Value>,
@@ -779,10 +796,48 @@ pub async fn chat(
     if let Ok(mut last) = state.last_activity.lock() {
         *last = Instant::now();
     }
+    discard_pasted(&state.root, request.image.as_deref());
+    // Resposta pronta: avisa se a pessoa saiu da janela (nunca com o conteúdo).
+    if result.is_ok() && !token.is_cancelled() {
+        if let Ok(prefs) = state.prefs() {
+            notify::send(&app, &prefs, notify::Event::Reply);
+        }
+    }
     state.finish(&request.id);
     result
 }
 
+/// Pasta temporária das imagens coladas; cada uma é apagada depois do envio.
+const PASTED: &str = "pasted";
+
+/// Imagem colada na conversa (área de transferência). Fica só neste computador,
+/// num arquivo temporário usado pelo próximo envio, como uma imagem anexada.
+#[tauri::command]
+pub fn paste_image(state: tauri::State<'_, Core>, data: String) -> Result<String, String> {
+    if data.len() > 28 * 1024 * 1024 {
+        return Err("Imagem excede o limite de processamento".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Imagem inválida")?;
+    let path = pasted_path(&state.root, &bytes)?;
+    fs::create_dir_all(path.parent().ok_or("Pasta inválida")?).map_err(|_| "Não foi possível guardar a imagem")?;
+    fs::write(&path, bytes).map_err(|_| "Não foi possível guardar a imagem")?;
+    Ok(path.to_string_lossy().into_owned())
+}
+fn pasted_path(root: &std::path::Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err("Imagem excede o limite de processamento".into());
+    }
+    let extension = if bytes.starts_with(b"\x89PNG") { "png" } else if bytes.starts_with(&[0xff, 0xd8]) { "jpg" } else { return Err("Cole uma imagem PNG ou JPEG".into()) };
+    Ok(root.join("work").join(PASTED).join(format!("{}.{extension}", store::id())))
+}
+/// Apaga a imagem colada depois de usada; anexos escolhidos pela pessoa nunca são tocados.
+fn discard_pasted(root: &std::path::Path, image: Option<&str>) {
+    if let Some(path) = image.map(std::path::Path::new) {
+        if path.parent() == Some(root.join("work").join(PASTED).as_path()) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
 #[tauri::command]
 pub async fn pick_image(app: tauri::AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -974,30 +1029,42 @@ pub async fn memory_tick(app: &tauri::AppHandle) {
     }
 }
 
-/// Fala local de um trecho de resposta (sem nuvem). Chamado frase a frase pela conversa.
+/// Modelo de transcrição só para prévia ao vivo; nunca usado no texto final.
+pub const PREVIEW_TRANSCRIBER: &str = "whisper-tiny";
+impl Core {
+    /// Transcritor final (ou de prévia). Sem o preferido, usa o outro disponível.
+    fn transcriber(&self, prefs: &Preferences, preview: bool) -> Result<Model, String> {
+        let all = self.models()?;
+        let (preferred, other): (Vec<Model>, Vec<Model>) = all.into_iter().partition(|m| (m.catalog.as_deref() == Some(PREVIEW_TRANSCRIBER)) == preview);
+        let budget = self.budget(prefs);
+        models::choose(&preferred, Capability::Transcription, budget, prefs.context_tokens, None)
+            .or_else(|_| models::choose(&other, Capability::Transcription, budget, prefs.context_tokens, None))
+            .map_err(|_| "Ative a voz em Configurações para usar o microfone".into())
+    }
+}
+
+/// Prévia do que está sendo falado (Whisper tiny), chamada durante a gravação.
+/// Se a voz estiver ocupada, devolve vazio em vez de esperar: a próxima prévia virá.
 #[tauri::command]
-pub async fn speak(state: tauri::State<'_, Core>, request_id: String, text: String) -> Result<Value, String> {
-    if text.chars().count() > 5000 {
-        return Err("Trecho longo demais para falar de uma vez".into());
+pub async fn transcribe_preview(state: tauri::State<'_, Core>, request_id: String, audio: String) -> Result<Value, String> {
+    if audio.len() > 16 * 1024 * 1024 {
+        return Err("Áudio muito grande para prévia".into());
     }
-    let spoken = speech_text::prepare(&text);
-    if spoken.is_empty() {
-        return Ok(json!({"audio":null}));
-    }
-    let _voice = tokio::time::timeout(Duration::from_secs(60), state.voice_gate.lock())
-        .await
-        .map_err(|_| "Outra tarefa de voz está em andamento")?;
+    let Ok(_voice) = state.voice_gate.try_lock() else { return Ok(json!({"text":null})) };
     let token = state.job(&request_id)?;
     let work = state.root.join("work").join(store::id());
     let result = async {
         let prefs = state.prefs()?;
-        let model = models::choose(&state.models()?, Capability::Speech, state.budget(&prefs), prefs.context_tokens, None)
-            .map_err(|_| "Ative a voz em Configurações para ouvir as respostas")?;
-        fs::create_dir_all(&work).map_err(|_| "Não foi possível preparar a fala")?;
-        let output = work.join("speech.wav");
-        state.runtime.voice(&model, Path::new(""), &spoken, &output, &token).await?;
-        let bytes = fs::read(&output).map_err(|_| "A voz não produziu áudio")?;
-        Ok(json!({"audio":base64::engine::general_purpose::STANDARD.encode(bytes)}))
+        let model = state.transcriber(&prefs, true)?;
+        fs::create_dir_all(&work).map_err(|_| "Não foi possível preparar a prévia")?;
+        let (raw, input) = (work.join("recording.wav"), work.join("input.wav"));
+        fs::write(&raw, base64::engine::general_purpose::STANDARD.decode(audio).map_err(|_| "Áudio inválido")?).map_err(|_| "Não foi possível preparar a prévia")?;
+        let normalized = input.clone();
+        tauri::async_runtime::spawn_blocking(move || normalize_wav(&raw, &normalized)).await.map_err(|_| "Falha ao preparar áudio")??;
+        let base = work.join("preview");
+        state.runtime.transcribe(&model, &input, &base, &token).await?;
+        let text = fs::read_to_string(base.with_extension("txt")).unwrap_or_default();
+        Ok(json!({"text":text.trim()}))
     }
     .await;
     let _ = fs::remove_dir_all(work);
@@ -1065,61 +1132,56 @@ pub(super) fn normalize_wav(
         .map_err(|_| "Falha ao concluir áudio".to_string())
 }
 
+/// Transcrição local de uma gravação do microfone ou de um arquivo WAV escolhido.
+/// Áudio nunca vai para a nuvem: o conteúdo falado ainda não foi verificado.
 #[tauri::command]
 pub async fn voice_task(
     app: tauri::AppHandle,
     state: tauri::State<'_, Core>,
     request: CapabilityRequest,
-    transcribe: bool,
     audio: Option<String>,
-    voice: Option<String>,
 ) -> Result<Value, String> {
     let _voice = tokio::time::timeout(Duration::from_secs(60), state.voice_gate.lock())
         .await
-        .map_err(|_| "Outra tarefa de voz está em andamento")?;
+        .map_err(|_| "Outra transcrição está em andamento")?;
     let token = state.job(&request.id)?;
     let work = state.root.join("work").join(store::id());
-    let result=async{
-        fs::create_dir_all(&work).map_err(|_|"Não foi possível preparar tarefa")?;
-        let prefs=state.prefs()?;let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
-        if transcribe && use_cloud{return Err("Áudio não verificado permanece local. Use transcrição local para proteger seu conteúdo.".into());}
-        if !transcribe && (request.text.is_empty()||request.text.len()>20000){return Err("Informe um texto de até vinte mil caracteres".into());}
-        let output=work.join("speech.wav");
-        if use_cloud{
-            let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,true,request.request_cloud,&request.text);if !gate.allowed{return Err(gate.reason);}
-            let model=request.cloud_model.as_deref().filter(|s|!s.is_empty()).unwrap_or(&prefs.cloud_model);
-            let voice=voice.filter(|s|!s.is_empty()).ok_or("Informe a voz disponibilizada pelo seu provedor")?;
-            let client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(90)).build().map_err(|_|"Falha no cliente cloud")?;
-            let response=tokio::select!{_=token.cancelled()=>return Err("Tarefa interrompida".into()),r=client.post(format!("{}/audio/speech",prefs.cloud_endpoint.trim_end_matches('/'))).bearer_auth(state.key()?).json(&json!({"model":model,"input":request.text,"voice":voice,"response_format":"wav"})).send()=>r.map_err(|_|"Falha no provedor de voz")?};
-            let response=response.error_for_status().map_err(|_|"Provedor recusou a síntese de voz")?;let mut bytes=Vec::new();let mut stream=response.bytes_stream();
-            use futures_util::StreamExt;while let Some(chunk)=tokio::select!{_=token.cancelled()=>return Err("Tarefa interrompida".into()),c=stream.next()=>c}{bytes.extend(chunk.map_err(|_|"Áudio interrompido")?);if bytes.len()>64*1024*1024{return Err("Áudio excede limite de processamento".into());}}
-            return Ok(json!({"audio":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+    let result = async {
+        fs::create_dir_all(&work).map_err(|_| "Não foi possível preparar tarefa")?;
+        let prefs = state.prefs()?;
+        if prefs.usage_mode == UsageMode::CloudOnly || request.request_cloud {
+            return Err("Áudio não verificado permanece local. Use transcrição local para proteger seu conteúdo.".into());
         }
-        let kind=if transcribe{Capability::Transcription}else{Capability::Speech};let model=models::choose(&state.models()?,kind,state.budget(&prefs),prefs.context_tokens,None)?;
-        let input=work.join("input.wav");
-        if transcribe{
-            let original=if let Some(encoded)=audio{
-                if encoded.len()>90*1024*1024{return Err("Áudio muito grande".into());}
-                let path=work.join("recording.wav");fs::write(&path,base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_|"Áudio inválido")?).map_err(|_|"Não foi possível preparar gravação")?;path
-            }else{
-                let selected=tauri::async_runtime::spawn_blocking(move||app.dialog().file().add_filter("Áudio WAV",&["wav"]).blocking_pick_file()).await.map_err(|_|"Não foi possível escolher áudio")?;
-                selected.ok_or("Seleção de áudio cancelada")?.into_path().map_err(|_|"Arquivo inválido")?
-            };
-            let normalized=input.clone();tauri::async_runtime::spawn_blocking(move||normalize_wav(&original,&normalized)).await.map_err(|_|"Falha ao preparar áudio")??;
-            let base=work.join("transcript");state.runtime.voice(&model,&input,"",&base,&token).await?;
-            let text=fs::read_to_string(base.with_extension("txt")).map_err(|_|"A transcrição não produziu texto")?;Ok(json!({"text":text}))
-        }else{
-            let spoken=speech_text::prepare(&request.text);
-            state.runtime.voice(&model,&input,&spoken,&output,&token).await?;
-            if fs::metadata(&output).map_err(|_|"A voz não produziu áudio")?.len()>64*1024*1024{return Err("Áudio excede limite de processamento".into());}
-            let bytes=fs::read(output).map_err(|_|"Não foi possível ler o áudio")?;Ok(json!({"audio":base64::engine::general_purpose::STANDARD.encode(bytes)}))
-        }
-    }.await;
+        let model = state.transcriber(&prefs, false)?;
+        let original = if let Some(encoded) = audio {
+            if encoded.len() > 90 * 1024 * 1024 {
+                return Err("Áudio muito grande".into());
+            }
+            let path = work.join("recording.wav");
+            fs::write(&path, base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| "Áudio inválido")?)
+                .map_err(|_| "Não foi possível preparar gravação")?;
+            path
+        } else {
+            let selected = tauri::async_runtime::spawn_blocking(move || app.dialog().file().add_filter("Áudio WAV", &["wav"]).blocking_pick_file())
+                .await
+                .map_err(|_| "Não foi possível escolher áudio")?;
+            selected.ok_or("Seleção de áudio cancelada")?.into_path().map_err(|_| "Arquivo inválido")?
+        };
+        let input = work.join("input.wav");
+        let normalized = input.clone();
+        tauri::async_runtime::spawn_blocking(move || normalize_wav(&original, &normalized))
+            .await
+            .map_err(|_| "Falha ao preparar áudio")??;
+        let base = work.join("transcript");
+        state.runtime.transcribe(&model, &input, &base, &token).await?;
+        let text = fs::read_to_string(base.with_extension("txt")).map_err(|_| "A transcrição não produziu texto")?;
+        Ok(json!({"text":text}))
+    }
+    .await;
     let _ = fs::remove_dir_all(work);
     state.finish(&request.id);
     result
 }
-
 
 #[tauri::command]
 pub async fn import_legacy(
@@ -1160,6 +1222,24 @@ pub async fn import_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pasted_images_are_validated_and_only_temporary_copies_are_discarded() {
+        let root = std::env::temp_dir().join(format!("ayla-paste-{}", store::id()));
+        assert!(pasted_path(&root, b"GIF89a").is_err());
+        assert!(pasted_path(&root, &vec![0u8; 21 * 1024 * 1024]).is_err());
+        let png = pasted_path(&root, b"\x89PNG\r\n").unwrap();
+        assert!(png.to_string_lossy().ends_with(".png") && png.starts_with(root.join("work").join(PASTED)));
+        assert!(pasted_path(&root, &[0xff, 0xd8, 0xff]).unwrap().to_string_lossy().ends_with(".jpg"));
+        fs::create_dir_all(png.parent().unwrap()).unwrap();
+        fs::write(&png, b"x").unwrap();
+        let chosen = root.join("foto.png");
+        fs::write(&chosen, b"x").unwrap();
+        discard_pasted(&root, chosen.to_str());
+        assert!(chosen.exists(), "anexo escolhido pela pessoa fica intacto");
+        discard_pasted(&root, png.to_str());
+        assert!(!png.exists(), "cópia colada some depois do envio");
+        fs::remove_dir_all(root).unwrap();
+    }
     use std::path::Path;
 
     /// Modelos reais já baixados em /var/tmp/ayla-benchmark; dados em pasta temporária.
@@ -1174,8 +1254,8 @@ mod tests {
         }
         let core = Core::open(root.clone()).unwrap();
         let entry = |id: &str| models::catalog().iter().find(|e| e.id == id).unwrap();
-        let chat = Model { id: "gemma".into(), name: "Gemma".into(), capability: Capability::Text, capabilities: entry("gemma-4-e4b").capabilities.to_vec(), path: bench.join("gemma-4-E4B_q4_0-it.gguf"), companion: Some(bench.join("gemma-4-E4B-it-mmproj.gguf")), bytes: 1, sha256: String::new(), catalog: Some("gemma-4-e4b".into()), memory_bytes: Some(entry("gemma-4-e4b").memory_bytes()), speaker: None };
-        let embed = Model { id: "emb".into(), name: "Emb".into(), capability: Capability::Embedding, capabilities: vec![], path: bench.join("embeddinggemma-300M-qat-Q4_0.gguf"), companion: None, bytes: 1, sha256: String::new(), catalog: Some("embeddinggemma-300m".into()), memory_bytes: Some(entry("embeddinggemma-300m").memory_bytes()), speaker: None };
+        let chat = Model { id: "gemma".into(), name: "Gemma".into(), capability: Capability::Text, capabilities: entry("gemma-4-e4b").capabilities.to_vec(), path: bench.join("gemma-4-E4B_q4_0-it.gguf"), companion: Some(bench.join("gemma-4-E4B-it-mmproj.gguf")), bytes: 1, sha256: String::new(), catalog: Some("gemma-4-e4b".into()), memory_bytes: Some(entry("gemma-4-e4b").memory_bytes()) };
+        let embed = Model { id: "emb".into(), name: "Emb".into(), capability: Capability::Embedding, capabilities: vec![], path: bench.join("embeddinggemma-300M-qat-Q4_0.gguf"), companion: None, bytes: 1, sha256: String::new(), catalog: Some("embeddinggemma-300m".into()), memory_bytes: Some(entry("embeddinggemma-300m").memory_bytes()) };
         {
             let db = core.store.lock().unwrap();
             for m in [&chat, &embed] {

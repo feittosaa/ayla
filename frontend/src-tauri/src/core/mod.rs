@@ -5,7 +5,7 @@ pub mod policy;
 pub mod preferences;
 
 pub mod models;
+pub mod notify;
 pub mod runtime;
 pub mod services;
-pub mod speech_text;
 pub mod store;
