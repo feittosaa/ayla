@@ -21,8 +21,16 @@ pub struct Preferences {
     pub profile: Option<Profile>,
     pub resource_percent: Option<u8>,
     pub usage_mode: UsageMode,
+    /// Plataforma de nuvem (id do catálogo; "custom" = endereço compatível próprio; vazio = nenhuma).
+    pub cloud_provider: String,
+    /// Endereço do provedor compatível próprio ("custom").
     pub cloud_endpoint: String,
     pub cloud_model: String,
+    /// A pessoa já escolheu entre 100% local e também usar a nuvem.
+    pub cloud_asked: bool,
+    /// Plataforma e modelo para criar imagens (só quando a pessoa pede).
+    pub image_provider: String,
+    pub image_model: String,
     pub personality: String,
     pub history_messages: usize,
     pub history_chars: usize,
@@ -64,8 +72,12 @@ impl Default for Preferences {
             profile: None,
             resource_percent: None,
             usage_mode: UsageMode::LocalOnly,
+            cloud_provider: String::new(),
             cloud_endpoint: String::new(),
             cloud_model: String::new(),
+            cloud_asked: false,
+            image_provider: String::new(),
+            image_model: String::new(),
             personality: String::new(),
             history_messages: 10,
             history_chars: 12000,
@@ -88,6 +100,16 @@ impl Preferences {
             Some(Profile::Moderate) => 50,
             None => Self::automatic_percent(super::hardware::detect().ram_total_bytes),
         })
+    }
+    /// Plataforma efetiva: a escolhida, ou o endereço próprio de versões anteriores.
+    pub fn cloud_platform(&self) -> Option<&str> {
+        if !self.cloud_provider.is_empty() {
+            Some(self.cloud_provider.as_str())
+        } else if !self.cloud_endpoint.is_empty() {
+            Some("custom")
+        } else {
+            None
+        }
     }
     pub fn voice_enabled(&self) -> bool {
         self.voice != Some(false)
@@ -122,6 +144,15 @@ impl Preferences {
             || self.idle_seconds > 3600
         {
             return Err(io::Error::other("Configuração fora dos limites suportados"));
+        }
+        if !self.cloud_provider.is_empty() && self.cloud_provider != "custom" && super::cloud::provider(&self.cloud_provider).is_none() {
+            return Err(io::Error::other("Plataforma de nuvem desconhecida"));
+        }
+        if !self.image_provider.is_empty() && super::cloud::provider(&self.image_provider).is_none_or(|p| p.images.is_none()) {
+            return Err(io::Error::other("Esta plataforma não cria imagens"));
+        }
+        if self.cloud_model.chars().count() > 200 || self.image_model.chars().count() > 200 {
+            return Err(io::Error::other("Nome de modelo longo demais"));
         }
         if !self.cloud_endpoint.is_empty() {
             let url = reqwest::Url::parse(&self.cloud_endpoint).map_err(io::Error::other)?;
@@ -270,6 +301,18 @@ mod tests {
         assert!(legacy.voice_enabled(), "arquivos de antes da decisão ficam com o microfone ligado");
         let declined: Preferences = serde_json::from_str(r#"{"version":2,"voice":false}"#).unwrap();
         assert!(!declined.voice_enabled(), "quem desligou continua com ele desligado");
+    }
+    #[test]
+    fn cloud_platform_is_validated_and_old_endpoints_still_work() {
+        let mut prefs = Preferences::default();
+        assert_eq!((prefs.cloud_platform(), prefs.cloud_asked), (None, false));
+        prefs.cloud_endpoint = "https://exemplo.com/v1".into();
+        assert_eq!(prefs.cloud_platform(), Some("custom"));
+        prefs.cloud_provider = "anthropic".into();
+        assert!(prefs.validate().is_ok());
+        assert_eq!(prefs.cloud_platform(), Some("anthropic"));
+        prefs.cloud_provider = "inventada".into();
+        assert!(prefs.validate().is_err());
     }
     #[test]
     fn notifications_default_on_and_keep_individual_choices() {

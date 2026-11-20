@@ -1,3 +1,4 @@
+use super::files::Kind;
 use super::memory::{self, Fact, Privacy, Turn};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -75,7 +76,27 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub complete: bool,
+    /// Arquivos enviados com esta mensagem.
+    pub attachments: Vec<FileInfo>,
 }
+/// Arquivo guardado pela Ayla (cópia em `files/<id>/`).
+#[derive(Clone, Debug, Serialize)]
+pub struct FileInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub bytes: i64,
+    pub created_at: i64,
+    pub conversation_id: Option<String>,
+    pub project_id: Option<String>,
+    pub message_id: Option<i64>,
+    /// Caminho relativo à pasta de dados.
+    #[serde(skip)]
+    pub path: String,
+    #[serde(skip)]
+    pub extracted: Option<String>,
+}
+const FILE_COLUMNS: &str = "id,name,kind,bytes,created_at,conversation_id,project_id,message_id,path,extracted";
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -92,7 +113,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -106,12 +127,12 @@ impl Store {
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         }
-        if version == 1 || version == 2 {
+        if (1..4).contains(&version) {
             // Backup consistente antes de alterar um banco com dados do usuário.
             let backups = path.parent().unwrap_or(Path::new(".")).join("backups");
             std::fs::create_dir_all(&backups)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Self { conn }.backup(&backups.join(format!("ayla-antes-v3-{}.db", id())))?;
+            Self { conn }.backup(&backups.join(format!("ayla-antes-v4-{}.db", id())))?;
             conn = Connection::open(path)?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -122,7 +143,26 @@ impl Store {
         if version <= 2 {
             Self::migrate_v3(&mut conn)?;
         }
+        if version <= 3 {
+            Self::migrate_v4(&mut conn)?;
+        }
         Ok(Self { conn })
+    }
+    /// v4: arquivos inseridos (cópias guardadas pela Ayla), ligados à conversa, ao
+    /// projeto e à mensagem em que foram enviados; texto extraído fica em cache.
+    /// `kept` marca o que já foi enviado ou adicionado em Arquivos; o resto é um
+    /// anexo ainda na caixa de mensagem, descartado se nunca for enviado.
+    fn migrate_v4(conn: &mut Connection) -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE files(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, bytes INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+                message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL, path TEXT NOT NULL, extracted TEXT, sha256 TEXT NOT NULL,
+                kept INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX files_conversation ON files(conversation_id);
+            CREATE INDEX files_project ON files(project_id);
+            CREATE INDEX files_message ON files(message_id);
+            PRAGMA user_version=4;")?;
+        tx.commit()
     }
     /// v3: projetos. Conversas e memórias ganham um projeto opcional; sem projeto,
     /// continuam gerais. Apagar um projeto apaga suas conversas e memórias.
@@ -186,6 +226,29 @@ impl Store {
             })?
             .collect()
     }
+    /// Título escolhido pela pessoa (1 a 120 caracteres).
+    pub fn rename_conversation(&self, id: &str, title: &str) -> rusqlite::Result<bool> {
+        let title: String = title.trim().chars().take(120).collect();
+        Ok(self.conn.execute("UPDATE conversations SET title=?2 WHERE id=?1", params![id, title])? == 1)
+    }
+    /// Apaga a conversa, as mensagens e os arquivos dela; devolve os caminhos das cópias
+    /// para apagar do disco. Memórias aprendidas nela ficam (sem o vínculo com a conversa).
+    pub fn delete_conversation(&self, id: &str) -> rusqlite::Result<Option<Vec<String>>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let paths: Vec<String> = tx.prepare("SELECT path FROM files WHERE conversation_id=?1")?.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        tx.execute("UPDATE facts SET conversation_id=NULL WHERE conversation_id=?1", [id])?;
+        let deleted = tx.execute("DELETE FROM conversations WHERE id=?1", [id])? == 1;
+        tx.commit()?;
+        Ok(deleted.then_some(paths))
+    }
+    pub fn conversation_title(&self, conversation: &str) -> rusqlite::Result<String> {
+        self.conn.query_row("SELECT title FROM conversations WHERE id=?1", [conversation], |r| r.get(0))
+    }
+    /// Renomeia só se o título ainda for `from` (não sobrescreve outra mudança).
+    pub fn retitle(&self, conversation: &str, from: &str, to: &str) -> rusqlite::Result<bool> {
+        let to: String = to.chars().take(120).collect();
+        Ok(self.conn.execute("UPDATE conversations SET title=?3 WHERE id=?1 AND title=?2", params![conversation, from, to])? == 1)
+    }
     pub fn conversation_project(&self, conversation: &str) -> rusqlite::Result<Option<String>> {
         self.conn.query_row("SELECT project_id FROM conversations WHERE id=?1", [conversation], |r| r.get(0))
     }
@@ -243,8 +306,12 @@ impl Store {
     }
     pub fn messages(&self, id: &str) -> rusqlite::Result<Vec<Message>> {
         let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
-            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)? }))?.collect::<rusqlite::Result<_>>()?;
+            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
         rows.reverse();
+        let attached = self.conversation_files(id)?;
+        for message in &mut rows {
+            message.attachments = attached.iter().filter(|f| f.message_id == Some(message.id)).cloned().collect();
+        }
         Ok(rows)
     }
     pub fn context(
@@ -273,20 +340,80 @@ impl Store {
             .map(|(role, content)| serde_json::json!({"role":role,"content":content}))
             .collect())
     }
+    /// Grava a pergunta e a resposta; os anexos passam a pertencer à pergunta e os
+    /// arquivos criados (ex.: imagens geradas), à resposta.
     pub fn save_turn(
         &self,
         id: &str,
         user: &str,
         assistant: &str,
         complete: bool,
+        attachments: &[String],
+        created: &[String],
     ) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO messages(conversation_id,role,content,complete) VALUES(?1,'user',?2,1)",
             params![id, user],
         )?;
+        let message = tx.last_insert_rowid();
+        for file in attachments {
+            tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, message])?;
+        }
         tx.execute("INSERT INTO messages(conversation_id,role,content,complete) VALUES(?1,'assistant',?2,?3)",params![id,assistant,complete])?;
+        let reply = tx.last_insert_rowid();
+        for file in created {
+            tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, reply])?;
+        }
         tx.commit()
+    }
+    fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileInfo> {
+        let kind: String = r.get(2)?;
+        Ok(FileInfo {
+            id: r.get(0)?, name: r.get(1)?, kind: Kind::parse(&kind).unwrap_or(Kind::Text), bytes: r.get(3)?, created_at: r.get(4)?,
+            conversation_id: r.get(5)?, project_id: r.get(6)?, message_id: r.get(7)?, path: r.get(8)?, extracted: r.get(9)?,
+        })
+    }
+    /// `kept`: adicionado direto em Arquivos (fica); senão é anexo pendente da caixa de mensagem.
+    pub fn insert_file(&self, file: &FileInfo, sha256: &str, kept: bool) -> rusqlite::Result<()> {
+        self.conn.execute(
+            &format!("INSERT INTO files({FILE_COLUMNS},sha256,kept) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
+            params![file.id, file.name, file.kind.as_str(), file.bytes, file.created_at, file.conversation_id, file.project_id, file.message_id, file.path, file.extracted, sha256, kept],
+        )?;
+        Ok(())
+    }
+    pub fn file(&self, id: &str) -> rusqlite::Result<Option<FileInfo>> {
+        let mut rows = self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE id=?1"))?.query_map([id], Self::file_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.pop())
+    }
+    /// Arquivos já enviados numa conversa, do mais recente ao mais antigo.
+    pub fn conversation_files(&self, conversation: &str) -> rusqlite::Result<Vec<FileInfo>> {
+        self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE conversation_id=?1 AND message_id IS NOT NULL ORDER BY message_id DESC, rowid"))?.query_map([conversation], Self::file_row)?.collect()
+    }
+    /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.
+    pub fn project_files(&self, project: Option<&str>) -> rusqlite::Result<Vec<FileInfo>> {
+        self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE project_id IS ?1 AND kept=1 ORDER BY created_at DESC, rowid DESC"))?.query_map([project], Self::file_row)?.collect()
+    }
+    pub fn set_extracted(&self, id: &str, text: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE files SET extracted=?2 WHERE id=?1", params![id, text])?;
+        Ok(())
+    }
+    /// Remove o registro e devolve o caminho relativo para apagar a cópia.
+    pub fn delete_file(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        let path: Option<String> = self.conn.query_row("SELECT path FROM files WHERE id=?1", [id], |r| r.get(0)).ok();
+        self.conn.execute("DELETE FROM files WHERE id=?1", [id])?;
+        Ok(path)
+    }
+    pub fn project_file_paths(&self, project: &str) -> rusqlite::Result<Vec<String>> {
+        self.conn.prepare("SELECT path FROM files WHERE project_id=?1")?.query_map([project], |r| r.get(0))?.collect()
+    }
+    /// Caminhos de todos os arquivos registrados (para limpar cópias órfãs).
+    pub fn file_paths(&self) -> rusqlite::Result<Vec<String>> {
+        self.conn.prepare("SELECT path FROM files")?.query_map([], |r| r.get(0))?.collect()
+    }
+    /// Anexos escolhidos mas nunca enviados, mais antigos que `before`.
+    pub fn forget_unsent_files(&self, before: i64) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM files WHERE kept=0 AND created_at<?1", [before])
     }
     #[cfg(test)]
     pub fn add_message(
@@ -562,7 +689,7 @@ mod tests {
         assert!(db.context(&a.id, 10, 1).unwrap().is_empty());
         assert!(!db.consent(&a.id).unwrap());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 3);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 4);
         std::fs::remove_file(path).unwrap();
     }
     #[test]
@@ -583,7 +710,7 @@ mod tests {
                 PRAGMA user_version=1;").unwrap();
         }
         let db = Store::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 3);
+        assert_eq!(db.version().unwrap(), 4);
         let backups: Vec<_> = std::fs::read_dir(root.join("backups")).unwrap().flatten().collect();
         assert_eq!(backups.len(), 1);
         let old = Connection::open(backups[0].path()).unwrap();
@@ -601,7 +728,7 @@ mod tests {
         db.set_memory_cursor("c", 0).unwrap();
         assert!(db.pending_extraction().unwrap().is_none() && db.extraction_range("c").unwrap().is_none());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 3);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 4);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -640,12 +767,12 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 3);
-        assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(), 1, "backup antes da v3");
+        assert_eq!(db.version().unwrap(), 4);
+        assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(), 1, "backup antes de migrar");
         assert_eq!((db.conversations(None).unwrap().len(), db.facts(None).unwrap().len()), (1, 1));
 
         let tcc = db.create_project("  TCC  ", "Monografia sobre energia solar").unwrap();
@@ -687,5 +814,28 @@ mod tests {
         assert!(!db.delete_project(&tcc.id).unwrap());
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn conversations_can_be_renamed_and_deleted_keeping_memories() {
+        let path = std::env::temp_dir().join(format!("ayla-delete-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let (a, b) = (db.create_conversation("A", None).unwrap(), db.create_conversation("B", None).unwrap());
+        assert!(db.rename_conversation(&a.id, "  Viagem de férias  ").unwrap());
+        assert_eq!(db.conversation_title(&a.id).unwrap(), "Viagem de férias");
+        assert!(!db.rename_conversation("inexistente", "x").unwrap());
+        let file = FileInfo { id: "f1".into(), name: "nota.md".into(), kind: Kind::Text, bytes: 1, created_at: 0, conversation_id: None, project_id: None, message_id: None, path: "files/f1/nota.md".into(), extracted: None };
+        db.insert_file(&file, "sha", false).unwrap();
+        db.save_turn(&a.id, "oi", "olá", true, &[file.id.clone()], &[]).unwrap();
+        db.add_message(&b.id, "user", "fica", true).unwrap();
+        let fact = db.insert_fact("O usuário vai viajar em julho.", "fato", Privacy::Uncertain, "auto", Some(&a.id), None).unwrap();
+        assert_eq!(db.delete_conversation(&a.id).unwrap(), Some(vec!["files/f1/nota.md".to_string()]));
+        assert!(db.messages(&a.id).unwrap().is_empty() && db.file("f1").unwrap().is_none());
+        assert_eq!(db.conversations(None).unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), vec![b.id.clone()]);
+        assert_eq!(db.messages(&b.id).unwrap().len(), 1, "outras conversas ficam");
+        let kept = db.facts_by_ids(&[fact.id.clone()]).unwrap();
+        assert_eq!((kept.len(), kept[0].conversation_id.clone()), (1, None), "a memória fica, sem o vínculo");
+        assert_eq!(db.delete_conversation(&a.id).unwrap(), None);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
     }
 }

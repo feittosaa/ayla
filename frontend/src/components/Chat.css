@@ -10,6 +10,49 @@
 .app-shell .new-chat { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-radius: 12px; background: var(--ayla-control); font-weight: 500; }
 .conversation-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .sidebar-label { margin: 8px 10px 6px; font-size: 12px; font-weight: 500; color: var(--ayla-text-faint); }
+.sidebar-label-row { display: flex; align-items: center; justify-content: space-between; padding-right: 2px; }
+.sidebar-label-row .sidebar-label { margin-bottom: 4px; }
+.app-shell .icon-button.small { width: 32px; height: 32px; min-height: 32px; border-radius: 8px; }
+.app-shell .conversation-item.project-item { display: flex; align-items: center; gap: 10px; }
+.project-item span { overflow: hidden; text-overflow: ellipsis; }
+.project-item .avatar { font-size: 10px; }
+.app-shell .conversation-item.muted { color: var(--ayla-text-faint); }
+.app-shell .back-to-ayla { align-self: flex-start; margin-bottom: -6px; }
+.conversation-row { position: relative; display: flex; align-items: center; flex-shrink: 0; border-radius: 10px; }
+.conversation-row .conversation-item { flex: 1; min-width: 0; }
+.row-tools { position: absolute; right: 4px; display: flex; gap: 2px; padding-left: 12px; opacity: 0; background: linear-gradient(90deg, transparent, var(--ayla-sidebar) 30%); pointer-events: none; }
+.conversation-row:hover .row-tools, .conversation-row:focus-within .row-tools { opacity: 1; pointer-events: auto; }
+.conversation-row:has(.conversation-item[aria-current=page]) .row-tools { background: linear-gradient(90deg, transparent, var(--ayla-selected) 30%); }
+.app-shell .icon-button.tiny { width: 30px; height: 30px; min-height: 30px; border-radius: 8px; }
+.conversation-edit input, .title-edit input { width: 100%; min-height: 38px; padding: 6px 10px; font-size: 14px; }
+.conversation-confirm { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--ayla-border); border-radius: 10px; background: var(--ayla-panel); font-size: 13px; flex-shrink: 0; }
+.conversation-confirm span { overflow-wrap: anywhere; }
+.conversation-confirm small { color: var(--ayla-text-faint); line-height: 1.4; }
+.sidebar-error { margin: 6px 10px; font-size: 12px; color: var(--ayla-error); }
+.title-edit { flex: 1; min-width: 0; }
+
+/* Markdown nas respostas */
+.markdown { color: #e4e4e7; overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p, .markdown ul, .markdown ol, .markdown pre, .markdown blockquote, .markdown table { margin: 0 0 12px; }
+.markdown ul, .markdown ol { padding-left: 22px; }
+.markdown li { margin: 3px 0; }
+.markdown li > ul, .markdown li > ol { margin: 4px 0 0; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: 18px 0 8px; line-height: 1.35; font-weight: 650; }
+.markdown h1 { font-size: 20px; } .markdown h2 { font-size: 18px; } .markdown h3 { font-size: 16px; } .markdown h4 { font-size: 15px; }
+.markdown strong { font-weight: 650; color: var(--ayla-text); }
+.markdown a { color: var(--ayla-accent-soft); text-decoration: underline; cursor: pointer; }
+.markdown code { font-family: var(--ayla-font-mono); font-size: 0.88em; padding: 1px 5px; border-radius: 5px; background: var(--ayla-hover); }
+.markdown pre { overflow-x: auto; padding: 12px 14px; border: 1px solid var(--ayla-border-soft); border-radius: 12px; background: #0c0d0f; line-height: 1.5; }
+.markdown pre code { padding: 0; background: none; font-size: 13px; }
+.markdown blockquote { padding: 2px 0 2px 14px; border-left: 3px solid var(--ayla-border); color: var(--ayla-text-soft); }
+.markdown hr { margin: 16px 0; border: 0; border-top: 1px solid var(--ayla-border); }
+.markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 14px; }
+.markdown th, .markdown td { padding: 6px 10px; border: 1px solid var(--ayla-border); text-align: left; }
+.markdown th { background: var(--ayla-control); font-weight: 600; }
+.markdown input[type=checkbox] { margin-right: 6px; }
+.md-image-alt { color: var(--ayla-text-faint); font-style: italic; }
 .app-shell .conversation-item { min-height: 40px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: #b9bcc2; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
 .app-shell .conversation-item:hover:not(:disabled) { background: var(--ayla-hover); border: 0; }
 .app-shell .conversation-item[aria-current=page] { background: var(--ayla-selected); color: var(--ayla-text); }
@@ -21,7 +64,18 @@
 .app-shell .sidebar-link:hover:not(:disabled) { background: var(--ayla-hover); border: 0; }
 
 /* Conversa */
-.chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-slot { flex: 1; min-width: 0; display: flex; }
+.chat-main { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.drop-overlay { position: absolute; inset: 12px; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border: 2px dashed var(--ayla-accent); border-radius: 20px; background: #111214e6; color: var(--ayla-text); font-size: 15px; pointer-events: none; }
+.composer-files { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 2px; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; padding: 4px 6px 4px 10px; border: 1px solid var(--ayla-border); border-radius: 10px; background: var(--ayla-bg); font-size: 13px; }
+.file-chip svg { flex: none; color: var(--ayla-text-soft); }
+.file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.file-meta { color: var(--ayla-text-faint); font-size: 12px; white-space: nowrap; }
+.app-shell .chip-remove { width: 28px; height: 28px; min-height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: transparent; color: var(--ayla-text-soft); }
+.app-shell .chip-remove:hover:not(:disabled) { background: var(--ayla-hover); border: 0; color: var(--ayla-text); }
+.message-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.message.user .file-chip { background: var(--ayla-control); padding-right: 10px; }
 .chat-header { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 0 16px 0 24px; border-bottom: 1px solid #1f2125; }
 .chat-header h1 { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--ayla-control); color: var(--ayla-text-soft); font-size: 12px; font-weight: 500; }
@@ -35,7 +89,6 @@
 .message.user { align-self: flex-end; max-width: 80%; padding: 11px 16px; border-radius: 18px 18px 6px 18px; background: var(--ayla-hover); white-space: pre-wrap; line-height: 1.6; }
 .message.assistant { display: flex; gap: 14px; align-items: flex-start; }
 .assistant-body { min-width: 0; flex: 1; }
-.assistant-text { white-space: pre-wrap; color: #e4e4e7; }
 .thinking { margin: 0; color: var(--ayla-text-faint); }
 .incomplete { display: block; margin-top: 6px; font-size: 12px; color: var(--ayla-text-faint); }
 .message-actions { display: flex; gap: 4px; margin: 4px 0 0 -10px; }
@@ -80,3 +133,12 @@
   .chat-header { padding-left: 10px; }
   .message.user { max-width: 92%; }
 }
+
+/* Imagens na conversa */
+.chat-image { margin: 10px 0 4px; max-width: min(100%, 520px); border: 1px solid var(--ayla-border-soft); border-radius: 14px; overflow: hidden; background: var(--ayla-panel); }
+.chat-image img { display: block; width: 100%; height: auto; max-height: 520px; object-fit: contain; background: #0c0d0f; }
+.chat-image figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px 4px 12px; font-size: 12px; color: var(--ayla-text-faint); }
+.chat-image figcaption span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-image-loading { display: block; padding: 40px 16px; text-align: center; color: var(--ayla-text-faint); font-size: 13px; }
+.message.user .chat-image { max-width: 240px; margin: 0; }
+.message.user .message-files { align-items: flex-end; }

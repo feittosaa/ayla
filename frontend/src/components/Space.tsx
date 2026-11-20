@@ -1,15 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import Chat from './Chat';
 import MemoryPanel from './MemoryPanel';
-import { native, errorText, type Conversation, type Project, type Snapshot } from '../services/Desktop';
-import { ChevronRightIcon, CloudIcon, ComputerIcon, PlusIcon, SidebarIcon } from './Icons';
+import { native, errorText, fileLabels, formatBytes, type Conversation, type FileInfo, type Project, type Snapshot } from '../services/Desktop';
+import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
 
-type View = 'chat' | 'overview' | 'memory';
+type View = 'chat' | 'overview' | 'memory' | 'files';
 type Props = {
   snapshot: Snapshot; refresh: () => Promise<void>;
   /** `null` é o espaço geral da Ayla; senão, um projeto. */
   project: Project | null;
+  /** Espaço visível no momento. */
+  active: boolean;
   onDeleted?: () => void;
+  onOpenSettings?: (section: string) => void;
+  /** Na barra da Ayla: lista de projetos, abrir e criar. */
+  projects?: Project[];
+  onOpenProject?: (id: string) => void;
+  onNewProject?: () => void;
+  /** No projeto: voltar para a conversa geral da Ayla. */
+  onBack?: () => void;
 };
 
 /** Iniciais e cor estável de um projeto, usadas no trilho e no cabeçalho. */
@@ -21,21 +31,50 @@ export function ProjectAvatar({ project, size = 36 }: { project: Project; size?:
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, onDeleted }: Props) {
+export default function Space({ snapshot, refresh, project, active, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [view, setView] = useState<View>(project ? 'overview' : 'chat');
   const [sidebar, setSidebar] = useState(() => window.innerWidth >= 760);
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const [editing, setEditing] = useState<string | null>(null); const [draftTitle, setDraftTitle] = useState(''); const [confirming, setConfirming] = useState<string | null>(null);
   const projectId = project?.id ?? null;
   const mode = snapshot.preferences.usage_mode;
   const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Neste computador; nuvem só com sua revisão';
 
   useEffect(() => { native<Conversation[]>('conversations', { project: projectId }).then(setConversations).catch(e => setError(errorText(e))); }, [projectId]);
+  // Título resumido pela Ayla depois da primeira resposta.
+  useEffect(() => {
+    const stop = listen<{ id: string; title: string }>('conversation-updated', event => {
+      const { id, title } = event.payload;
+      setConversations(prev => prev.map(c => c.id === id ? { ...c, title } : c));
+      setConversation(current => current && current.id === id ? { ...current, title } : current);
+    });
+    return () => { void stop.then(unlisten => unlisten()); };
+  }, []);
   const onConversation = useCallback((item: Conversation) => {
     setConversation(item);
     setConversations(prev => prev.some(c => c.id === item.id) ? prev.map(c => c.id === item.id ? item : c) : [item, ...prev]);
   }, []);
+  /** Atualiza uma conversa na lista (e a aberta) sem trocar de conversa. */
+  const patch = useCallback((item: Conversation) => {
+    setConversations(prev => prev.map(c => c.id === item.id ? item : c));
+    setConversation(current => current && current.id === item.id ? item : current);
+  }, []);
+  async function rename(item: Conversation) {
+    const title = draftTitle.trim(); setEditing(null);
+    if (!title || title === item.title) return;
+    try { await native('rename_conversation', { id: item.id, title }); patch({ ...item, title }); } catch (e) { setError(errorText(e)); }
+  }
+  async function remove(item: Conversation) {
+    setConfirming(null);
+    try {
+      await native('delete_conversation', { id: item.id });
+      setConversations(prev => prev.filter(c => c.id !== item.id));
+      setConversation(current => current?.id === item.id ? null : current);
+      await refresh();
+    } catch (e) { setError(errorText(e)); }
+  }
   function openConversation(item: Conversation | null) {
     if (busy && item?.id !== conversation?.id) return;
     setConversation(item); setView('chat');
@@ -44,6 +83,7 @@ export default function Space({ snapshot, refresh, project, onDeleted }: Props) 
 
   return <div className="chat-layout">
     {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
+      {project && onBack && <button className="ghost-button back-to-ayla" onClick={onBack}><ChevronLeftIcon size={16} />Ayla</button>}
       <div className="brand">
         {project ? <ProjectAvatar project={project} size={28} /> : <span className="orb" aria-hidden="true" />}
         <span className="brand-name" title={project?.name}>{project ? project.name : 'Ayla'}</span>
@@ -52,24 +92,48 @@ export default function Space({ snapshot, refresh, project, onDeleted }: Props) 
       {project && <nav className="space-nav" aria-label="Seções do projeto">
         <button className="conversation-item" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Visão geral</button>
         <button className="conversation-item" aria-current={view === 'memory' ? 'page' : undefined} onClick={() => setView('memory')}>Memória</button>
+        <button className="conversation-item" aria-current={view === 'files' ? 'page' : undefined} onClick={() => setView('files')}>Arquivos</button>
       </nav>}
       <button className="new-chat" disabled={busy} onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
-      <nav className="conversation-list" aria-label="Conversas">
+      <nav className="conversation-list" aria-label="Conversas e projetos">
+        {!project && <>
+          <div className="sidebar-label-row"><p className="sidebar-label">Projetos</p><button className="icon-button small" aria-label="Novo projeto" title="Novo projeto" onClick={onNewProject}><PlusIcon size={16} /></button></div>
+          {!projects.length && <button className="conversation-item muted" onClick={onNewProject}>Criar um projeto…</button>}
+          {projects.map(item => <button key={item.id} className="conversation-item project-item" onClick={() => onOpenProject?.(item.id)}><ProjectAvatar project={item} size={22} /><span>{item.name}</span></button>)}
+        </>}
         {conversations.length > 0 && <p className="sidebar-label">Conversas</p>}
-        {conversations.map(item => <button key={item.id} className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} disabled={busy && item.id !== conversation?.id} onClick={() => openConversation(item)}>{item.title}</button>)}
+        {conversations.map(item => editing === item.id
+          ? <form key={item.id} className="conversation-edit" onSubmit={e => { e.preventDefault(); void rename(item); }}>
+              <input autoFocus aria-label="Título da conversa" value={draftTitle} maxLength={120} onChange={e => setDraftTitle(e.target.value)} onBlur={() => void rename(item)} onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setEditing(null); } }} />
+            </form>
+          : confirming === item.id
+          ? <div key={item.id} className="conversation-confirm" role="group" aria-label="Confirmar exclusão">
+              <span>Apagar “{item.title}”?</span>
+              <small>Mensagens e arquivos dela somem. O que a Ayla aprendeu fica em Memória.</small>
+              <div className="row-actions"><button className="danger-action" onClick={() => void remove(item)}>Apagar</button><button className="ghost-button" onClick={() => setConfirming(null)}>Cancelar</button></div>
+            </div>
+          : <div key={item.id} className="conversation-row">
+              <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} disabled={busy && item.id !== conversation?.id} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={item.title}>{item.title}</button>
+              <span className="row-tools">
+                <button className="icon-button tiny" aria-label={`Renomear “${item.title}”`} title="Renomear" onClick={() => { setConfirming(null); setEditing(item.id); setDraftTitle(item.title); }}><PencilIcon size={15} /></button>
+                <button className="icon-button tiny" aria-label={`Apagar “${item.title}”`} title="Apagar" disabled={busy && item.id === conversation?.id} onClick={() => { setEditing(null); setConfirming(item.id); }}><TrashIcon size={15} /></button>
+              </span>
+            </div>)}
+        {error && view === 'chat' && <p className="sidebar-error" role="alert">{error}</p>}
       </nav>
       {!project && <div className="sidebar-footer"><p className="where">{mode === 'cloud_only' ? <CloudIcon size={18} /> : <ComputerIcon size={18} />}{where}</p></div>}
     </aside>}
 
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
-    <main className="chat-main" hidden={view !== 'chat'}>
-      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={conversation} onConversation={onConversation} onBusy={setBusy} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} />
-    </main>
+    <div className="chat-slot" hidden={view !== 'chat'}>
+      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={conversation} onConversation={onConversation} onBusy={setBusy} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat'} onOpenSettings={onOpenSettings} />
+    </div>
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
     {project && view === 'memory' && <main className="settings-main"><div className="settings-content">
       {!sidebar && <button className="ghost-button back-button-inline" onClick={() => setSidebar(true)}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
       <MemoryPanel snapshot={snapshot} refresh={refresh} project={project} />
     </div></main>}
+    {project && view === 'files' && <ProjectFiles project={project} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} />}
   </div>;
 }
 
@@ -133,5 +197,43 @@ function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, o
         </div>}
       </div>
     </section>
+  </div></main>;
+}
+
+/** Arquivos guardados no projeto: enviados nas conversas ou adicionados aqui. */
+function ProjectFiles({ project, onShowSidebar }: { project: Project; onShowSidebar?: () => void }) {
+  const [items, setItems] = useState<FileInfo[] | null>(null); const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false); const [confirm, setConfirm] = useState<string | null>(null);
+  const load = useCallback(() => native<FileInfo[]>('project_files', { project: project.id }).then(setItems).catch(e => setError(errorText(e))), [project.id]);
+  useEffect(() => { void load(); }, [load]);
+  async function add() {
+    setError('');
+    try {
+      const paths = await native<string[]>('pick_files');
+      setBusy(true);
+      for (const path of paths) await native('add_file', { path, project: project.id, keep: true });
+    } catch (e) { setError(errorText(e)); } finally { setBusy(false); await load(); }
+  }
+  async function remove(id: string) {
+    setConfirm(null); setError('');
+    try { await native('remove_file', { id }); } catch (e) { setError(errorText(e)); } finally { await load(); }
+  }
+  return <main className="settings-main"><div className="settings-content">
+    {onShowSidebar && <button className="ghost-button back-button-inline" onClick={onShowSidebar}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
+    <header className="project-header">
+      <div className="row-text"><h1>Arquivos</h1><p className="row-hint">Cópias guardadas pela Ayla neste computador. Entram no backup e nunca vão para a nuvem.</p></div>
+      <button className="primary-action with-icon" disabled={busy} onClick={() => void add()}><PlusIcon size={18} />{busy ? 'Guardando…' : 'Adicionar arquivos'}</button>
+    </header>
+    {error && <p role="alert" className="app-error">{error}</p>}
+    <div className="group-card">
+      {items && !items.length && <div className="group-row"><span className="row-hint">Nenhum arquivo ainda. Anexe nas conversas do projeto ou adicione aqui: imagens, GIFs, PDFs, textos, áudios e vídeos.</span></div>}
+      {items?.map(file => <div key={file.id} className="group-row">
+        <FileIcon size={20} />
+        <span className="row-text"><span className="row-title file-title">{file.name}</span><span className="row-hint">{fileLabels[file.kind]} · {formatBytes(file.bytes)} · {new Date(file.created_at * 1000).toLocaleDateString('pt-BR')}{file.message_id ? ' · enviado numa conversa' : ''}</span></span>
+        {confirm === file.id
+          ? <span className="row-actions"><button className="danger-action" onClick={() => void remove(file.id)}>Apagar</button><button className="ghost-button" onClick={() => setConfirm(null)}>Cancelar</button></span>
+          : <button onClick={() => setConfirm(file.id)}>Apagar…</button>}
+      </div>)}
+    </div>
   </div></main>;
 }
