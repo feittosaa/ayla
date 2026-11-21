@@ -1,0 +1,54 @@
+/* Camada de compatibilidade visual da Moneta dentro da Ayla.
+ *
+ * A Ayla serve este arquivo depois das variáveis dela (--ayla-*) em /__ayla/tema.css e o inclui
+ * em toda página da Moneta aberta pela Ayla. Fundos, superfícies, bordas, texto e fontes seguem a
+ * Ayla; o destaque e os gráficos continuam os da Moneta. O tema claro da Moneta também passa a
+ * usar o fundo escuro da Ayla, com as cores de texto ajustadas para manter o contraste.
+ */
+:root, :root[data-theme=light] {
+  color-scheme: dark;
+  --canvas: var(--ayla-bg);
+  --sidebar: var(--ayla-sidebar);
+  --panel: var(--ayla-panel);
+  --popover: var(--ayla-panel);
+  --th: var(--ayla-control);
+  --field: var(--ayla-control);
+  --field-line: var(--ayla-border);
+  --line: var(--ayla-border);
+  --chart-grid: var(--ayla-border);
+  --text: var(--ayla-text);
+  --muted: var(--ayla-text-soft);
+  --disabled: var(--ayla-hover);
+  --disabled-text: var(--ayla-disabled);
+  --nav-active: var(--ayla-hover);
+  --hover: #ffffff08;
+  --hover-soft: #ffffff05;
+  --grid: #ffffff0b;
+  --backdrop: #000a;
+  --shadow: #000a;
+  --dot-ring: #ffffff55;
+  --grain: none;
+  --serif: var(--ayla-font-main);
+  font-family: var(--ayla-font-main);
+}
+
+/* No tema claro da Moneta, as tintas escuras perderiam contraste sobre o fundo da Ayla. */
+:root[data-theme=light] {
+  --accent-ink: #ff4814;
+  --accent-soft: #ff9478;
+  --positive: #69CA92;
+  --toast: #38251b;
+  --toast-line: #824326;
+  --track: #392e28;
+  --expense-ink: #f2a900;
+  --invoice-ink: #f3d36b;
+  --hero-line: #71341d;
+  --hero-bg: linear-gradient(107deg, #301b13 20%, #572414 64%, #94380f);
+  --hero-eyebrow: #ffe5d5;
+  --hero-note: #ead2c4;
+  --hero-frame: #ffe5d530;
+}
+:root[data-theme=light] :is(.brand, .locked-card) img { filter: none; }
+
+body { background: var(--canvas); }
+:is(body, button, input, select, textarea) { font-family: var(--ayla-font-main); }

@@ -20,6 +20,7 @@
 - Ayla é offline-first; IA é opcional. Serviços determinísticos devem funcionar sem modelos.
 - UI, automações e IA devem usar os mesmos serviços quando aplicável.
 - Moneta e outros projetos separados entram por contratos explícitos; não presumir API, estado ou propriedade dos dados.
+- Órgãos abertos dentro da Ayla seguem os fundos, superfícies, texto e fontes da Ayla, por coerência de design. A camada de compatibilidade de cada órgão mapeia as variáveis dele para as da Ayla (`organs/<órgão>/tema.css`); o destaque e os gráficos podem continuar os do órgão.
 - Não adicionar infraestrutura ou abstrações sem necessidade da entrega em andamento.
 - Desempenho é requisito de arquitetura. Rust é uma das linguagens principais; núcleo em Rust e Python apenas em adaptadores auxiliares necessários, com medições de latência, CPU, RAM e uso de GPU quando aplicável.
 - Experiência principal: abrir diretamente na conversa, sem aba Início nem criação manual obrigatória de conversa. Perfil Ayla automático é o padrão. Preferência de uso e personalidade ficam visíveis em Configurações; modelos, componentes e limites técnicos ficam em Opções avançadas. Não exigir conhecimento técnico no fluxo principal.

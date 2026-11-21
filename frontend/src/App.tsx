@@ -5,6 +5,7 @@ import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
+import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
 import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
@@ -17,11 +18,11 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
 ];
 const sections = [
   { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'nuvem', label: 'Nuvem' },
-  { id: 'memoria', label: 'Memória' }, { id: 'avancado', label: 'Opções avançadas' },
+  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
-/** Espaço aberto: a conversa geral ("ayla"), um projeto (pelo id) ou as configurações. */
-type SpaceId = 'ayla' | 'settings' | string;
+/** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
+type SpaceId = 'ayla' | 'settings' | 'moneta';
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -34,6 +35,9 @@ export default function App() {
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const [desktopError, setDesktopError] = useState('');
+  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
+  const organInstalled = Boolean(organ.status?.installed);
+  useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
   const view = useDesktopView(onQuick, setDesktopError);
   const panelReady = Boolean((snapshot && draft) || error);
@@ -65,6 +69,7 @@ export default function App() {
   }, [preparing, refresh]);
   function openSpace(id: SpaceId) {
     setSpace(id); setNotice(''); setError('');
+    if (id === 'moneta') setOrganVisited(true);
   }
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
@@ -115,8 +120,14 @@ export default function App() {
     {desktopError && <div className="desktop-error" role="alert">{desktopError} <button onClick={()=>setDesktopError('')}>Fechar</button></div>}
     <nav className="rail" aria-label="Espaços">
       <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
-      {/* Órgãos (Moneta e outros produtos) entram aqui quando forem integrados. */}
-      <div className="rail-projects" />
+      {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
+      <div className="rail-projects">
+        {organ.status && <>
+          <span className="rail-divider" aria-hidden="true" />
+          <button className={organ.status.installed ? 'rail-item' : 'rail-item organ-missing'} aria-label={organ.status.installed ? organ.status.name : `${organ.status.name} (não instalada)`} title={organ.status.installed ? organ.status.name : `${organ.status.name} · não instalada`} aria-current={space === 'moneta' ? 'page' : undefined}
+            onClick={() => organ.status?.installed ? openSpace('moneta') : setAskOrgan(true)}><OrganIcon status={organ.status} /></button>
+        </>}
+      </div>
       <button className="rail-item" aria-label="Configurações" title="Configurações" aria-current={space === 'settings' ? 'page' : undefined} onClick={() => go('settings')}><SettingsIcon /></button>
     </nav>
 
@@ -132,6 +143,10 @@ export default function App() {
         return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
+
+      {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
+        <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
+      </div>}
 
     {space === 'settings' && <div className="settings-layout">
       <aside className="sidebar settings-sidebar" aria-label="Seções das configurações">
@@ -199,6 +214,8 @@ export default function App() {
 
             <MemoryPanel snapshot={snapshot} refresh={refresh} />
 
+            <OrganSettings status={organ.status} refresh={organ.refresh} />
+
             <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
               <div className="group-card">
                 <button className="group-row link-row" onClick={() => go('models')}><span className="row-text"><span className="row-title">Modelos e componentes</span><span className="row-hint">Baixar, importar e remover modelos e motores</span></span><ChevronRightIcon size={18} /></button>
@@ -247,12 +264,23 @@ export default function App() {
                 </div>
               </details>
             </section>
+
+            <section id="sessao" className="settings-group" aria-labelledby="session-title"><h2 id="session-title">Encerrar ou reiniciar</h2>
+              <div className="group-card">
+                <div className="group-row"><span className="row-text"><span className="row-title">Reiniciar a Ayla</span><span className="row-hint">Fecha e abre de novo, com conversas e configurações guardadas.{organ.status?.container ? ' A Moneta reinicia junto.' : ''}</span></span>
+                  <button onClick={() => desktopAction('restart')}>Reiniciar</button></div>
+                <div className="group-row"><span className="row-text"><span className="row-title">Encerrar a Ayla</span><span className="row-hint">Fecha a Ayla, inclusive em segundo plano.{organ.status?.container ? ' A Moneta aberta por ela também é encerrada.' : ''}</span></span>
+                  <button onClick={() => desktopAction('quit')}>Encerrar</button></div>
+              </div>
+            </section>
           </>}
           {notice && <p role="status" className="notice">{notice}</p>}
         </div>
       </main>
     </div>}
     </div>
+
+    {askOrgan && organ.status && <OrganInstallDialog status={organ.status} refresh={organ.refresh} onClose={() => setAskOrgan(false)} onInstalled={() => { setAskOrgan(false); openSpace('moneta'); }} />}
 
     {creating && <div className="dialog-backdrop" onClick={closeNewProject}>
       <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title" onSubmit={e => void createProject(e)} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') closeNewProject(); }}>
