@@ -182,6 +182,7 @@ pub fn extraction_request(turns: &[Turn], related: &[Fact]) -> Vec<Value> {
     let instructions = "Você mantém a memória de longo prazo de uma assistente pessoal. Leia a conversa e devolva somente JSON.\n\
 Regras:\n\
 - Guarde apenas informações duradouras sobre o usuário ditas por ele: preferências, fatos pessoais, pessoas próximas, rotinas, objetivos e projetos. Ignore pedidos pontuais, perguntas, assuntos gerais e o que a Ayla disse.\n\
+- Não guarde nada temporário ou que muda com o tempo: saldos, valores de faturas, gastos do mês, preços, cotações, compromissos de hoje ou estados do momento. Também não guarde dados vindos dos órgãos da Ayla (finanças da Moneta, trechos de arquivos): eles continuam disponíveis na fonte.\n\
 - Se o usuário pedir para lembrar algo, guarde. Se pedir para esquecer, indique em \"esquecer\" o número da memória existente correspondente.\n\
 - Escreva cada memória como frase curta em terceira pessoa, começando por \"O usuário\".\n\
 - Se uma informação nova atualiza ou contradiz uma memória existente, use \"substitui\" com o número dela. Não repita memórias existentes sem mudança.\n\
@@ -223,6 +224,21 @@ pub struct Extraction {
 }
 /// Interpreta a saída do modelo; índices fora da lista de relacionadas são ignorados.
 /// A privacidade nunca é marcada como pública por classificação automática.
+/// Memória automática que só vale por um tempo (valores em dinheiro, "hoje", "em aberto"…).
+/// Fica de fora mesmo se o modelo de extração a propuser; pedidos explícitos não passam por aqui.
+pub fn temporary(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let money = ["r$", "us$", "€", "£", " usd", " brl", " reais", " real "].iter().any(|m| lower.contains(m))
+        || lower.as_bytes().windows(4).any(|w| w[0].is_ascii_digit() && w[1] == b',' && w[2].is_ascii_digit() && w[3].is_ascii_digit());
+    let moment = [
+        "hoje", "amanhã", "amanha", "ontem", "neste momento", "no momento", "este mês", "esse mês", "neste mês",
+        "esta semana", "nesta semana", "em aberto", "saldo atual", "atualmente com",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    money || moment
+}
+
 pub fn parse_extraction(raw: &str, related: &[Fact]) -> Result<Extraction, String> {
     let value: Value = serde_json::from_str(raw.trim()).map_err(|_| "Extração inválida")?;
     let index = |v: &Value| v.as_u64().and_then(|i| related.get(i as usize)).map(|f| f.id.clone());
@@ -249,6 +265,15 @@ mod tests {
     use super::*;
     fn fact(id: &str, content: &str) -> Fact {
         Fact { id: id.into(), content: content.into(), kind: "fato".into(), privacy: Privacy::Uncertain, origin: "auto".into(), conversation_id: None, created_at: 0, updated_at: 0, project_id: None }
+    }
+    #[test]
+    fn memorias_temporarias_ficam_de_fora() {
+        assert!(temporary("O usuário tem uma fatura de cartão de crédito em aberto no valor de R$ 2.730,75."));
+        assert!(temporary("O usuário gastou 350,00 no mercado."));
+        assert!(temporary("O usuário tem reunião hoje às 15h."));
+        assert!(!temporary("O usuário prefere respostas curtas."));
+        assert!(!temporary("O usuário usa o cartão Nubank para compras online."));
+        assert!(!temporary("O usuário mora em Recife desde 2019."));
     }
     #[test]
     fn vectors_round_trip_and_reject_corruption() {
