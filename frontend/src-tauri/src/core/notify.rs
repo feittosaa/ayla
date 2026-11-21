@@ -2,7 +2,6 @@
 //! nunca incluem o conteúdo de conversas: a área de notificações fica visível
 //! para quem estiver diante da tela e pode guardar um histórico.
 use super::preferences::Preferences;
-use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +35,17 @@ pub fn should_notify(event: Event, prefs: &Preferences, focused: bool) -> bool {
     !focused && event.enabled(prefs)
 }
 
+/// Botão "Testar notificação" em Configurações: avisa na hora, com ou sem foco.
+#[tauri::command]
+pub fn notify_test(app: tauri::AppHandle) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title("Ayla")
+        .body("As notificações estão funcionando.")
+        .show()
+        .map_err(|_| "O sistema recusou a notificação".to_string())
+}
+
 /// Lembrete na hora marcada: o texto é do próprio lembrete; avisa mesmo com a Ayla em foco.
 pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: bool) {
     if !prefs.notifications.reminders {
@@ -46,10 +56,7 @@ pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: b
 }
 
 pub fn send(app: &tauri::AppHandle, prefs: &Preferences, event: Event) {
-    let focused = app
-        .webview_windows()
-        .values()
-        .any(|window| window.is_focused().unwrap_or(false));
+    let focused = crate::desktop::ayla_focused(app);
     if !should_notify(event, prefs, focused) {
         return;
     }

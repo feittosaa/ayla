@@ -6,8 +6,10 @@ import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
 import Reminders from './components/Reminders';
+import Athena from './components/Athena';
+import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
-import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
+import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
@@ -18,12 +20,12 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'nuvem', label: 'Nuvem' },
+  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
-type SpaceId = 'ayla' | 'settings' | 'moneta';
+type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena';
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -36,7 +38,7 @@ export default function App() {
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const [desktopError, setDesktopError] = useState('');
-  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
+  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
   const organInstalled = Boolean(organ.status?.installed);
   useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
@@ -71,6 +73,7 @@ export default function App() {
   function openSpace(id: SpaceId) {
     setSpace(id); setNotice(''); setError('');
     if (id === 'moneta') setOrganVisited(true);
+    if (id === 'athena') setAthenaVisited(true);
   }
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
@@ -121,6 +124,8 @@ export default function App() {
     {desktopError && <div className="desktop-error" role="alert">{desktopError} <button onClick={()=>setDesktopError('')}>Fechar</button></div>}
     <nav className="rail" aria-label="Espaços">
       <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
+      {/* Athena: parte da própria Ayla (notas). */}
+      <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BookIcon size={22} /></button>
       {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
       <div className="rail-projects">
         {organ.status && <>
@@ -145,6 +150,9 @@ export default function App() {
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
+      {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
+        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} />
+      </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
       </div>}
@@ -212,10 +220,13 @@ export default function App() {
                   <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.setup} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, setup: e.target.checked } })} />
                 </label>
               </div>
+              <div className="row-actions"><button className="ghost-button" onClick={() => { void native('notify_test').then(() => setNotice('Notificação enviada. Se não apareceu, confira as notificações do sistema.')).catch(e => setError(errorText(e))); }}>Testar notificação</button></div>
               <p className="group-note">As notificações nunca mostram o conteúdo das conversas; os lembretes mostram só o texto do próprio lembrete.</p>
             </section>
 
             <Reminders />
+
+            <AthenaSettings prefs={prefs} saving={saving} save={quickSave} />
 
             <CloudSettings snapshot={snapshot} saving={saving} save={quickSave} />
 

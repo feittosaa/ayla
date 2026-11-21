@@ -89,6 +89,18 @@ fn hypr_batch(commands: &str) -> bool {
         .is_ok_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).lines().all(|line| line.trim().trim_end_matches("ok").is_empty()))
 }
 fn is_hypr() -> bool { std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() }
+
+/// A pessoa está olhando para a Ayla? No Hyprland, pergunta ao compositor qual janela está ativa
+/// (o GTK no Wayland pode continuar "em foco" com a janela escondida). Fora dele, só conta uma
+/// janela visível e com foco.
+pub fn ayla_focused(app: &AppHandle) -> bool {
+    if is_hypr() {
+        if let Some(active) = hypr_json("activewindow") {
+            return active["pid"].as_u64() == Some(std::process::id() as u64);
+        }
+    }
+    app.webview_windows().values().any(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false))
+}
 const NORMAL_SELECTOR: &str = r"initialclass:^(ayla|app|dev\.feit\.ayla)$,initialtitle:^(Ayla)$";
 
 fn panel_title() -> String {

@@ -243,6 +243,9 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     if (listening === 'recording') { recorder.current?.stop(); return; }
     if (listening !== 'idle' || busy) return;
     setError('');
+    // O que já estava escrito continua; a fala entra depois dele.
+    const before = input.trim();
+    const join = (text: string) => before ? `${before} ${text}` : text;
     try {
       setListening('recording');
       const session = await recordWav(); recorder.current = session;
@@ -253,7 +256,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (!partial) return;
         previewing = true;
         void native<{ text: string | null }>('transcribe_preview', { requestId: taskId(), audio: partial })
-          .then(result => { if (result.text && recorder.current === session) setInput(result.text); })
+          .then(result => { if (result.text && recorder.current === session) setInput(join(result.text)); })
           .catch(() => {})
           .finally(() => { previewing = false; });
       }, 1500);
@@ -263,9 +266,10 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       const result = await native<{ text?: string }>('voice_task', { request: { id, text: '', sensitivity: 'sensitive', reviewed: false, request_cloud: false, cloud_model: null }, audio });
       setListening('idle');
       const heard = (result.text || '').trim();
-      setInput('');
-      if (heard) await send(heard); else setError('Não entendi o áudio. Tente falar de novo.');
-    } catch (e) { recorder.current = null; setListening('idle'); setInput(''); setError(errorText(e)); }
+      // A fala fica na caixa de texto para revisar e enviar quando quiser (nunca é enviada sozinha).
+      setInput(heard ? join(heard) : before);
+      if (heard) field.current?.focus(); else setError('Não entendi o áudio. Tente falar de novo.');
+    } catch (e) { recorder.current = null; setListening('idle'); setInput(before); setError(errorText(e)); }
   }
   async function consent(allowed: boolean) {
     if (!conversation) return;

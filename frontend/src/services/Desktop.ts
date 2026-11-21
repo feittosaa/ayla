@@ -10,6 +10,7 @@ export type Preferences = {
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
+  athena_folder: string; athena_vaults: string[]; athena_git: boolean;
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
