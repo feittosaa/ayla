@@ -860,6 +860,12 @@ pub async fn chat(
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
         let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}",prefs.personality,request.message));
         let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
+        // Finanças: a Ayla consulta o resumo da Moneta. Esses dados ficam neste computador em
+        // qualquer modo, então a resposta é local (com modelo, ou direta, sem modelo).
+        let finance={use tauri::Manager;let organ=app.state::<super::organs::Organ>();
+            if organ.installed()&&super::organs::finance_question(&request.message){Some(organ.finance().await)}else{None}};
+        let use_cloud=use_cloud&&finance.is_none();
+        if let Some(data)=&finance{let _=events.send(json!({"type":"routing","text":match data{Ok(_)=>"Moneta consultada · resposta neste computador".to_string(),Err(e)=>format!("Moneta indisponível: {e}")}}));}
         // Anexos ficam neste computador: lidos, transcritos ou convertidos em quadros localmente.
         if use_cloud && !request.attachments.is_empty(){return Err("Arquivos anexados ficam neste computador. Responda localmente para usá-los.".into());}
         let attached=state.attachments(&request)?;
@@ -903,6 +909,11 @@ pub async fn chat(
             let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten().and_then(|id|state.store.lock().ok()?.project(&id).ok().flatten());
             if let Some(p)=&project{system.push_str(&project_block(p));}
             let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
+            match &finance{
+                Some(Ok(resumo))=>system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo))),
+                Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
+                None=>{}
+            }
         }
         context.insert(0,json!({"role":"system","content":system}));
         context.push(json!({"role":"user","content":content}));
@@ -918,6 +929,13 @@ pub async fn chat(
             let outgoing=cloud::chat_request(api,&base,&secret,&prefs.cloud_model,prefs.system_prompt(),&request.message)?;
             cloud::stream(outgoing,api,&token,&mut report).await?;
         }else{
+            // Sem modelo local, a pergunta sobre finanças recebe os números da Moneta diretamente.
+            if selection.is_err(){if let Some(data)=&finance{
+                metric_model="moneta".into();
+                let text=match data{Ok(resumo)=>format!("Não há modelo local para conversar agora, então aqui estão os números da Moneta:\n\n{}",super::organs::finance_text(resumo)),Err(error)=>format!("Não consegui consultar a Moneta: {error}")};
+                report(json!({"type":"token","text":text}));
+                return Ok(());
+            }}
             let model=match selection{Ok(model)=>model,Err(error)=>{if prefs.usage_mode!=UsageMode::LocalOnly{let _=events.send(json!({"type":"suggestion","text":"Não há modelo local compatível disponível. Você pode revisar o texto e solicitar cloud, mantendo dados sensíveis locais."}));}return Err(error);}};
             metric_model = model.id.clone();
             let _=events.send(json!({"type":"routing","text":if recalled>0{format!("{} · {:?} · {} memórias consideradas",model.name,kind,recalled)}else{format!("{} · {:?}",model.name,kind)}}));

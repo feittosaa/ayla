@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import Chat from './Chat';
 import MemoryPanel from './MemoryPanel';
+import AppVersion from './AppVersion';
 import { native, errorText, fileLabels, formatBytes, type Conversation, type FileInfo, type Project, type Snapshot } from '../services/Desktop';
 import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
 
@@ -125,7 +126,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
             </div>)}
         {error && view === 'chat' && <p className="sidebar-error" role="alert">{error}</p>}
       </nav>
-      {!project && <div className="sidebar-footer"><p className="where">{mode === 'cloud_only' ? <CloudIcon size={18} /> : <ComputerIcon size={18} />}{where}</p></div>}
+      {!project && <div className="sidebar-footer"><p className="where">{mode === 'cloud_only' ? <CloudIcon size={18} /> : <ComputerIcon size={18} />}{where}</p><AppVersion /></div>}
     </aside>}
 
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
