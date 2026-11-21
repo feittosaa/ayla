@@ -1,0 +1,20 @@
+# Camada de compatibilidade da Ayla para a Moneta.
+#
+# A Ayla não copia o código da Moneta: baixa o repositório oficial na versão fixada em
+# organ.json e sobe o compose.yaml dele, num projeto Docker separado ("ayla-moneta").
+# Este arquivo só sobrepõe o que a Ayla precisa:
+# - dados próprios, na pasta de dados da Ayla. A Moneta instalada separadamente lacra os
+#   segredos com o systemd-creds do computador, que o contêiner não abre; por isso as duas
+#   versões não dividem a mesma pasta (backups da Moneta levam os dados de uma para a outra);
+# - a porta vem da Ayla (4174), para conviver com a Moneta separada na 4173;
+# - o fuso do computador, para "hoje" e a fatura em aberto baterem com o dia da pessoa;
+# - o contêiner acompanha a Ayla e não reinicia sozinho.
+services:
+  moneta:
+    volumes:
+      - ${AYLA_MONETA_DATA:?pasta de dados da Moneta}:/app/data:Z
+    environment:
+      TZ: ${AYLA_TZ:-UTC}
+    labels:
+      dev.feit.ayla.organ: moneta
+    restart: "no"

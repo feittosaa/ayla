@@ -1,6 +1,6 @@
 # Ayla — Pipeline
 
-Atualizada em **20/11/2026** · Branch: `codex/ayla-fundacao`, criada da `development` (`306ec9c`).
+Atualizada em **20/11/2026** · Branch: `feature/moneta-orgao`, criada da `development` (`1a8dade`).
 
 ## 1. Ideia e decisões confirmadas
 
@@ -26,13 +26,13 @@ Ayla é uma plataforma pessoal offline-first de dados, serviços e automações.
 | IA local | Seleção automática por tipo de pedido e orçamento; seleção manual disponível. Um worker ativo, carregado sob demanda e liberado por inatividade. |
 | Cloud | Endpoint compatível com OpenAI configurável; chave por sessão ou cofre do sistema. Envia pedido atual e personalidade explicitamente revisados e declarados públicos; bloqueia conteúdo sensível/duvidoso e padrões adicionais. A heurística não garante detectar todo dado sensível. |
 | Memória/dados | Banco nativo separado, conversas isoladas, limites de contexto, respostas incompletas identificadas, backup SQLite e importação explícita do legado preservando origem. Vetores separados por modelo. |
-| Órgãos | Moneta e demais órgãos ainda sem integração; serviços independentes de IA continuam como direção P2. |
+| Órgãos | Moneta como órgão opcional na branch `feature/moneta-orgao`: baixada do repositório oficial (versão fixada), contêiner Docker separado e página na mesma janela pelo protocolo `moneta://`. Demais órgãos sem integração. |
 
 ## 3. Dependências e projetos separados
 
 | Projeto/serviço | Papel e próximo requisito |
 |---|---|
-| **Moneta** | Projeto financeiro desenvolvido separadamente. Checkout irmão `../moneta` identificado na revisão, com rotas `GET /api/finance` e `GET /api/portfolio`. Confirmar a versão e acordar o contrato antes de consumir os dados na Ayla. |
+| **Moneta** | Projeto financeiro separado (`github.com/feittosaa/moneta`), contrato local v1 em `docs/integracao.md` dela. A 1.3.6 (publicada em 20/11/2026, com autorização) corrige o build Docker. A 1.3.7 acrescenta `GET /api/resumo` (saldos, fatura em aberto pelo mesmo cálculo da Visão geral, próximas faturas, totais do mês e lançamentos recentes); commit `e4208dc`, enviada em 20/11/2026 com autorização e fixada em `organs/moneta/organ.json`. Instalação real pelo GitHub validada. |
 | **Pluggy** | Sincronização bancária prevista na Moneta. Credenciais, acesso, atualização e falhas pertencem ao projeto responsável; não implementar sincronização duplicada na Ayla. Só bloqueia a validação com dados bancários reais. |
 | **Securo** | Referência financeira citada no README; não é dependência de execução. Verificar licença antes de reutilizar código. |
 | **llama.cpp** | Runtime gerenciado para texto, raciocínio, visão e embeddings; pacotes Linux x86_64 CPU/Vulkan versionados, verificados por SHA-256. Ollama permanece somente no adaptador legado. |
@@ -274,6 +274,19 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 **Janela normal no Hyprland.** A seta e a pesquisa de aplicativos abrem a Ayla como tile. A janela principal entra no layout com maximização e tela cheia desativadas. Se já estiver visível nesse layout, só recebe foco. A configuração foi validada no Hyprland 0.51.1 e os testes de estado passaram. O usuário atualizou o pacote e confirmou a abertura em tile na própria sessão do Hyprland.
 
 ### P2 — Primeira integração com a Moneta
+
+**Moneta como órgão (pedido de 20/11/2026, branch `feature/moneta-orgao`).** Opcional, como os demais órgãos não simbióticos: a pessoa baixa em Configurações › Órgãos ou com `./install.sh --com-moneta` (que chama `ayla --instalar-moneta`). A Ayla não copia código da Moneta: busca a tag fixada no repositório oficial, confere o commit, sobe o `compose.yaml` dela num projeto Docker próprio (`ayla-moneta`) com a sobreposição `organs/moneta/compose.ayla.yaml` e mostra a página dela num espaço do trilho, na mesma janela Tauri. A camada `moneta://` (núcleo Rust) repassa cada pedido ao servidor da Moneta com a chave em `Authorization`, sem expô-la à página; troca só `frame-ancestors` e recusa `/entrar`. O contêiner sobe ao abrir o espaço e para quando a Ayla encerra. "Abrir em janela separada" mostra a mesma Moneta numa janela própria; remover apaga repositório, contêiner e imagem, nunca os dados.
+
+- **Relação simbiótica (decisão do usuário, 20/11/2026):** com a Moneta instalada neste computador (`~/.local/bin/moneta`), a Ayla usa essa mesma Moneta: porta 4173, chave e dados de `~/.local/share/moneta`, liga pelo serviço de usuário (`systemctl --user start moneta`) se estiver desligada e nunca a encerra. Assim a lateral, o tema e as respostas sobre finanças mostram os dados reais. O contêiner Docker (dados próprios, porta 4174) fica para quem não tem a Moneta instalada; os dois não dividem o cofre porque a instalada lacra os segredos com `systemd-creds`. A barra "Abrir em janela separada" saiu do espaço da Moneta (continua em Configurações › Órgãos).
+- **Aceite:** 64 testes Rust (6 do órgão: tema, finanças em texto, manifesto e sobreposição, CSP, caminhos/chave, instalação só com commit conferido), 9 do cliente, lint, TypeScript estrito e build. `ayla --instalar-moneta` real em pasta descartável: download do GitHub, commit conferido, ajuste e build em ~3 s. Teste real ignorado por padrão sobre essa instalação (`AYLA_ORGAN_TEST_ROOT`, porta 4199): início em ~0,6 s, página e `/api/finance` pela camada, `/entrar` recusado, escrita aceita, parada e remoção preservando dados. No Hyprland, com Ayla descartável: ícone da Moneta no trilho e painel dela dentro da janela.
+- **Tema (decisão de 20/11/2026, vale para todos os órgãos):** a camada serve `/__ayla/tema.css` (variáveis da Ayla + `organs/moneta/tema.css`) e o inclui no fim do `<head>` de cada página; fundos, superfícies, texto e fontes seguem a Ayla, destaque e gráficos seguem a Moneta. O contêiner recebe o fuso do computador (`TZ`) para "hoje" bater com o dia da pessoa.
+- **Finanças na conversa (pedido de 20/11/2026):** perguntas sobre fatura, saldo, gastos etc. (lista única no núcleo, usada também pela interface) consultam `/api/resumo` e respondem neste computador em qualquer modo; os números entram no contexto do modelo local com instrução de não inventar. Sem modelo local, a Ayla mostra o resumo da Moneta diretamente. Nada disso vai para a nuvem. Validado: Qwen3.5 4B local respondeu a fatura em aberto (total e por cartão) e o saldo a partir do contexto.
+- **Encerrar ou reiniciar** no fim das Configurações: reiniciar espera a Moneta gravar e parar e abre uma nova Ayla quando o processo anterior termina.
+- **Instalação e versão (pedido de 20/11/2026):** `./install.sh` pergunta pelos órgãos (lidos de `organs/*/organ.json`) só na primeira instalação com terminal; atualizações e instalações sem terminal nunca perguntam, e `--com-moneta` continua valendo. O rodapé da barra da Ayla mostra a versão e, se houver tag de versão mais nova no GitHub (`feittosaa/ayla`, consulta pública a cada 6 h, sem dados da pessoa), o aviso com link para a página da versão. Ainda não há tags. Testado: simulação com terminal em pastas temporárias (primeira pergunta e chama o binário; atualização não pergunta) e comparação de versões; instalada no computador do usuário em 20/11/2026.
+- **Órgãos no trilho (pedido de 20/11/2026):** aparecem sempre, separados por um divisor; apagados (cinza) enquanto não baixados. O clique abre um modal que explica e oferece "Instalar" (com etapa em andamento e aviso se faltar Docker); ao terminar, abre o órgão. O ícone vem em `organs/<órgão>/icon.png` (cópia do ícone do repositório do órgão), para aparecer antes do download.
+- **Transição entre espaços (20/11/2026):** ao trocar pelo trilho (Ayla, projetos, órgãos, Configurações), o espaço entra com esmaecer e deslize curto de 200 ms, só em CSS; desligado com "reduzir movimento" do sistema.
+- **Versão separada:** a Moneta instalada à parte segue independente, e "Abrir em janela separada" mostra a da Ayla numa janela própria.
+- **Pendências:** a Moneta instalada do usuário está na 1.3.5 e precisa ir para a 1.3.7 (botão de atualizar da própria Moneta) para a Ayla responder sobre finanças; workflows 1.3.6 e 1.3.7 concluídos com sucesso; reconhecimento por palavras pode errar em pedidos ambíguos; conferir reiniciar e o tema no desktop do usuário; na sessão do usuário escritas pelo WebKitGTK, widget da Pluggy, downloads de backup, links externos e "Abrir em janela separada"; Windows usa `http://moneta.localhost` e ainda não foi testado.
 
 - [ ] Identificar repositório, responsável, versão e capacidades realmente disponíveis.
 - [ ] Acordar transporte, autenticação, IDs, moeda, datas, paginação, erros e fonte de verdade.
