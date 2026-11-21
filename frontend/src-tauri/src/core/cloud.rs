@@ -372,18 +372,47 @@ pub enum Secret {
 }
 
 /// Monta o pedido de resposta em streaming para a plataforma.
-pub fn chat_request(api: Api, base: &str, secret: &Secret, model: &str, system: &str, message: &str) -> Result<reqwest::RequestBuilder, String> {
+pub fn chat_request(api: Api, base: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, message: &str) -> Result<reqwest::RequestBuilder, String> {
     let base = base.trim_end_matches('/');
     let client = client()?;
     Ok(match (api, secret) {
-        (Api::Compatible, Secret::Key(key)) => client.post(format!("{base}/chat/completions")).bearer_auth(key)
-            .json(&json!({"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}], "stream": true})),
+        (Api::Compatible, Secret::Key(key)) => client.post(format!("{base}/chat/completions")).bearer_auth(key).json(&compatible_body(model, effort, system, message)),
         (Api::Anthropic, Secret::Key(key)) => client.post(format!("{base}/messages")).header("x-api-key", key).header("anthropic-version", "2023-06-01")
-            .json(&json!({"model": model, "max_tokens": 16000, "system": system, "messages": [{"role": "user", "content": message}], "stream": true})),
-        (Api::ChatGpt, Secret::ChatGpt(token)) => client.post(format!("{OPENAI_API}/responses")).bearer_auth(token)
-            .json(&json!({"model": model, "instructions": system, "input": [{"role": "user", "content": message}], "store": false, "stream": true})),
+            .json(&anthropic_body(model, effort, system, message)),
+        (Api::ChatGpt, Secret::ChatGpt(token)) => client.post(format!("{OPENAI_API}/responses")).bearer_auth(token).json(&responses_body(model, effort, system, message)),
         _ => return Err("Credencial incompatível com a plataforma".into()),
     })
+}
+
+/// Esforço só vai quando a pessoa escolhe; sem escolha, cada plataforma usa o padrão dela.
+pub fn compatible_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
+    let mut body = json!({"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}], "stream": true});
+    if let Some(effort) = effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    body
+}
+/// Claude: esforço vira orçamento de raciocínio estendido; a resposta ganha espaço além dele.
+pub fn anthropic_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
+    let budget = match effort {
+        Some("low") => Some(2_048),
+        Some("medium") => Some(8_000),
+        Some("high") => Some(16_000),
+        _ => None,
+    };
+    let mut body = json!({"model": model, "max_tokens": 16000, "system": system, "messages": [{"role": "user", "content": message}], "stream": true});
+    if let Some(budget) = budget {
+        body["max_tokens"] = json!(budget + 8_000);
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    }
+    body
+}
+pub fn responses_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
+    let mut body = json!({"model": model, "instructions": system, "input": [{"role": "user", "content": message}], "store": false, "stream": true});
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({"effort": effort});
+    }
+    body
 }
 
 /// Um evento do streaming já interpretado.
@@ -631,6 +660,18 @@ pub fn parse_models(api: Api, body: &Value) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn esforco_so_vai_quando_escolhido_e_no_formato_de_cada_api() {
+        assert!(compatible_body("m", None, "s", "q").get("reasoning_effort").is_none());
+        assert_eq!(compatible_body("m", Some("high"), "s", "q")["reasoning_effort"], "high");
+        assert_eq!(responses_body("m", Some("low"), "s", "q")["reasoning"]["effort"], "low");
+        assert!(responses_body("m", None, "s", "q").get("reasoning").is_none());
+        let claude = anthropic_body("m", Some("medium"), "s", "q");
+        assert_eq!(claude["thinking"]["budget_tokens"], 8000);
+        assert!(claude["max_tokens"].as_u64().unwrap() > 8000, "resposta cabe além do raciocínio");
+        assert!(anthropic_body("m", None, "s", "q").get("thinking").is_none());
+    }
+
     use super::*;
     #[test]
     fn pkce_follows_rfc_7636() {
