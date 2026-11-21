@@ -65,6 +65,16 @@ impl<'a> Scope<'a> {
         Self { project, include_general: false }
     }
 }
+/// Lembrete agendado.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Reminder {
+    pub id: String,
+    pub text: String,
+    /// Próxima vez, em segundos Unix.
+    pub due: i64,
+    pub repeat: String,
+    pub conversation_id: Option<String>,
+}
 /// Trecho de um arquivo guardado (Iris).
 #[derive(Clone, Debug, Serialize)]
 pub struct Chunk {
@@ -78,7 +88,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -127,7 +137,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 5 {
+        if version > SCHEMA {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -141,7 +151,7 @@ impl Store {
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         }
-        if (1..5).contains(&version) {
+        if (1..SCHEMA).contains(&version) {
             // Backup consistente antes de alterar um banco com dados do usuário.
             let backups = path.parent().unwrap_or(Path::new(".")).join("backups");
             std::fs::create_dir_all(&backups)
@@ -163,7 +173,20 @@ impl Store {
         if version <= 4 {
             Self::migrate_v5(&mut conn)?;
         }
+        if version <= 5 {
+            Self::migrate_v6(&mut conn)?;
+        }
         Ok(Self { conn })
+    }
+    /// v6: lembretes. `due` em segundos Unix; `repeat` none/daily/weekly/monthly. Um lembrete
+    /// sem repetição sai da tabela depois de avisar; os repetidos avançam para a próxima vez.
+    fn migrate_v6(conn: &mut Connection) -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE reminders(id TEXT PRIMARY KEY, text TEXT NOT NULL, due INTEGER NOT NULL, repeat TEXT NOT NULL,
+                created_at INTEGER NOT NULL, conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL);
+            CREATE INDEX reminders_due ON reminders(due);
+            PRAGMA user_version=6;")?;
+        tx.commit()
     }
     /// v5 (Iris): trechos dos arquivos guardados, com índice FTS5 e vetores por modelo, para
     /// responder com o que está nos arquivos do projeto e da conversa. `file_index` marca o que
@@ -425,6 +448,24 @@ impl Store {
     /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.
     pub fn project_files(&self, project: Option<&str>) -> rusqlite::Result<Vec<FileInfo>> {
         self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE project_id IS ?1 AND kept=1 ORDER BY created_at DESC, rowid DESC"))?.query_map([project], Self::file_row)?.collect()
+    }
+    pub fn add_reminder(&self, text: &str, due: i64, repeat: &str, conversation: Option<&str>) -> rusqlite::Result<Reminder> {
+        let reminder = Reminder { id: id(), text: text.to_string(), due, repeat: repeat.to_string(), conversation_id: conversation.map(String::from) };
+        self.conn.execute("INSERT INTO reminders VALUES(?1,?2,?3,?4,?5,?6)", params![reminder.id, reminder.text, reminder.due, reminder.repeat, now(), reminder.conversation_id])?;
+        Ok(reminder)
+    }
+    /// Lembretes em ordem de horário; com `until`, só os que já venceram.
+    pub fn reminders(&self, until: Option<i64>) -> rusqlite::Result<Vec<Reminder>> {
+        self.conn
+            .prepare("SELECT id,text,due,repeat,conversation_id FROM reminders WHERE ?1 IS NULL OR due<=?1 ORDER BY due, rowid")?
+            .query_map([until], |r| Ok(Reminder { id: r.get(0)?, text: r.get(1)?, due: r.get(2)?, repeat: r.get(3)?, conversation_id: r.get(4)? }))?
+            .collect()
+    }
+    pub fn reschedule_reminder(&self, id: &str, due: i64) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute("UPDATE reminders SET due=?2 WHERE id=?1", params![id, due])? > 0)
+    }
+    pub fn delete_reminder(&self, id: &str) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute("DELETE FROM reminders WHERE id=?1", [id])? > 0)
     }
     /// Iris: arquivo já dividido em trechos.
     pub fn indexed(&self, file: &str) -> rusqlite::Result<bool> {
@@ -827,6 +868,20 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn lembretes_vencem_reagendam_e_saem() {
+        let path = std::env::temp_dir().join(format!("ayla-lembretes-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let later = db.add_reminder("regar as plantas", 2_000, "daily", None).unwrap();
+        let soon = db.add_reminder("ligar pro médico", 1_000, "none", None).unwrap();
+        assert_eq!(db.reminders(None).unwrap().iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), ["ligar pro médico", "regar as plantas"]);
+        assert_eq!(db.reminders(Some(1_500)).unwrap(), vec![soon.clone()]);
+        assert!(db.reschedule_reminder(&later.id, 90_000).unwrap());
+        assert!(db.delete_reminder(&soon.id).unwrap());
+        assert!(db.reminders(Some(5_000)).unwrap().is_empty());
+        assert_eq!(db.reminders(None).unwrap()[0].due, 90_000);
+        let _ = std::fs::remove_file(&path);
+    }
+    #[test]
     fn iris_indexa_busca_no_escopo_e_apaga_com_o_arquivo() {
         let path = std::env::temp_dir().join(format!("ayla-iris-{}.db", id()));
         let db = Store::open(&path).unwrap();
@@ -890,7 +945,7 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();

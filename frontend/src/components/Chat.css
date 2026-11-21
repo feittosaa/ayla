@@ -147,3 +147,6 @@
 
 /* Iris: arquivos de onde vieram os trechos da resposta */
 .message-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--ayla-text-faint); font-size: 12px; }
+.cloud-references { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--ayla-border-soft); border-radius: 10px; }
+.cloud-references legend { padding: 0 4px; font-weight: 600; }
+.cloud-references small { color: var(--ayla-text-faint); }

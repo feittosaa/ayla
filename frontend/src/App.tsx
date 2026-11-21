@@ -5,6 +5,7 @@ import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
+import Reminders from './components/Reminders';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
 import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
@@ -17,7 +18,7 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'nuvem', label: 'Nuvem' },
+  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
@@ -203,12 +204,18 @@ export default function App() {
                   <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.reply} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, reply: e.target.checked } })} />
                 </label>
                 <label className="group-row">
+                  <span className="row-text"><span className="row-title">Lembretes</span><span className="row-hint">Na hora marcada, com o texto do lembrete</span></span>
+                  <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.reminders} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, reminders: e.target.checked } })} />
+                </label>
+                <label className="group-row">
                   <span className="row-text"><span className="row-title">Preparo de modelos</span><span className="row-hint">Quando um download termina ou dá erro</span></span>
                   <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.setup} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, setup: e.target.checked } })} />
                 </label>
               </div>
-              <p className="group-note">As notificações nunca mostram o conteúdo das conversas.</p>
+              <p className="group-note">As notificações nunca mostram o conteúdo das conversas; os lembretes mostram só o texto do próprio lembrete.</p>
             </section>
+
+            <Reminders />
 
             <CloudSettings snapshot={snapshot} saving={saving} save={quickSave} />
 

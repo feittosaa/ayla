@@ -178,6 +178,14 @@ pub fn run() {
                     core::services::memory_tick(&handle).await;
                 }
             });
+            // Lembretes: confere ao abrir (os perdidos avisam como atrasados) e a cada 15 s.
+            let reminders = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    core::services::reminder_tick(&reminders).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                }
+            });
             app.manage(core::organs::Organ::moneta(&directory));
             app.manage(core);
             app.manage(ManagedBackend::default());
@@ -243,6 +251,10 @@ pub fn run() {
             core::services::conversation_messages,
             core::services::conversation_consent,
             core::services::chat,
+            core::services::cloud_references,
+            core::services::reminders_list,
+            core::services::reminder_delete,
+            core::services::reminder_snooze,
             core::services::backup_data,
             core::services::semantic_memory,
             core::services::voice_task,
