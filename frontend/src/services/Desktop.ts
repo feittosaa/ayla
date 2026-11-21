@@ -36,10 +36,14 @@ export type Conversation = { id: string; title: string; cloud_consent: boolean; 
 export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
 export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
 export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
-export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[] };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status'; text?: string; received?: number; total?: number; facts?: Fact[] };
+export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[] };
+/** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
+export type Source = { id: string; name: string; pages: number[]; date?: string };
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources'; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
-export type ChatRequest = Omit<CapabilityRequest, 'text' | 'cloud_model'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[] };
+/** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
+export type Effort = '' | 'low' | 'medium' | 'high';
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 

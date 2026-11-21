@@ -1,6 +1,6 @@
 # Ayla — Pipeline
 
-Atualizada em **20/11/2026** · Branch: `feature/moneta-orgao`, criada da `development` (`1a8dade`).
+Atualizada em **20/11/2026** · Branch: `feature/iris-arquivos`, criada da `development` (`737d28d`).
 
 ## 1. Ideia e decisões confirmadas
 
@@ -254,7 +254,7 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 
 1. **Linux.** Fechar a rodada desktop de anexos, troca de projeto durante uma resposta, prévia do microfone e aviso fora de foco. Integrar a Ayla ao desktop com acesso pela lateral esquerda. Início com a sessão e permanência em segundo plano ligados por padrão, cada um desativável em Configurações.
 2. **Iris.** Começar pela consulta local a arquivos já guardados no projeto. Primeiro caso proposto: perguntar sobre um PDF e identificar o arquivo de origem na resposta.
-3. **Moneta.** Integrar o produto separado após a Iris, começando pelas consultas de leitura do P2.
+3. **Moneta.** Entregue antes da Iris, a pedido do usuário (branch `feature/moneta-orgao`, juntada na `development` em 20/11/2026); ver P2.
 
 **Referência do desktop:** nos dotfiles, o painel original é um `PanelWindow` do QuickShell/illogical-impulse ancorado à esquerda sob Hyprland. O carregamento foi desligado e os acessos por botão, atalho e cantos foram retirados. Decisão confirmada: o botão abre uma visão rápida da janela Tauri, com uma seta para abrir a janela normal, com o tema do sistema e personalização própria. O app completo usa o tema Foco. A distribuição começa pelo terminal no Linux; o formato desejado para o futuro port Windows é um instalador `.exe`.
 
@@ -271,6 +271,23 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 **Ajuste após o primeiro uso no Fedora (20/11/2026).** O usuário confirmou que o painel abre. Para corrigir o salto, as regras de posição e animação do Hyprland são aplicadas antes de exibir a janela. A visão rápida desliza pela esquerda ao abrir e fechar, recolhe com clique fora e mantém a conversa ao expandir pela seta. Foram retirados o X e os contornos fixos do painel. A compilação, a geometria em escala e rotação, a configuração do Hyprland, o fluxo React com IPC simulado e a reinstalação em diretórios temporários passaram. Falta conferir o movimento e o clique fora na sessão gráfica do usuário.
 
 **Janela normal no Hyprland.** A seta e a pesquisa de aplicativos abrem a Ayla como tile. A janela principal entra no layout com maximização e tela cheia desativadas. Se já estiver visível nesse layout, só recebe foco. A configuração foi validada no Hyprland 0.51.1 e os testes de estado passaram. O usuário atualizou o pacote e confirmou a abertura em tile na própria sessão do Hyprland.
+
+### Iris — arquivos nas respostas (branch `feature/iris-arquivos`)
+
+**Decisões do usuário (20/11/2026):** a Iris é parte da própria Ayla (órgão simbiótico, sem instalação nem Docker); busca híbrida (palavras sempre, significado quando houver modelo de embeddings); escopo projeto + conversa (na conversa geral, só os arquivos dela).
+
+- [x] **Trechos e busca** (falta conferir no desktop). Banco v5 com backup automático: `file_chunks` (trechos de ~900 caracteres com sobreposição, página nos PDFs via `extract_text_by_pages`), índice FTS5 sem acentos, `chunk_vectors` por modelo e `file_index`. Apagar o arquivo apaga os trechos. A cada resposta local, a Ayla indexa o que falta, busca por palavras e por significado (até 96 vetores novos por pedido) e funde as duas listas; até 6 trechos (6.000 caracteres) entram no contexto com a origem, como `[contrato.pdf, p. 3]`, e a instrução de citar e não inventar. Anexos da mensagem atual continuam inteiros; os anteriores da conversa e os do projeto (inclusive os adicionados em Arquivos) entram pela Iris. Abaixo da resposta aparecem as fontes (arquivo e páginas). Nada vai para a nuvem.
+  - **Aceite:** testes de divisão em trechos, citação, orçamento, fontes e banco (indexar, buscar só no escopo, sem acentos, vetores, cascata ao apagar), além da migração até v5.
+  - **Limites:** fontes aparecem só durante a sessão (não são guardadas na mensagem); PDFs escaneados seguem sem OCR; áudio e vídeo só entram depois de transcritos num envio; DOCX e planilhas ainda não.
+
+- [x] **Comparar fotos ao longo do tempo** (pedido de 20/11/2026; falta conferir no desktop com fotos reais). Decisões do usuário: escolha automática pela data e fotos guardadas num projeto comum (ex.: "Treino"). Quando o pedido compara (comparar, evolução, mudou, surtindo efeito…) e cita fotos/corpo/treino ou um período, a Ayla reúne as imagens do projeto e da conversa, data cada uma pelo EXIF (`kamadak-exif`, BSD-2; sem EXIF, a data em que entrou na Ayla), filtra o período citado ("6 meses", "três semanas", "1 ano") a partir da foto mais recente e envia até 4 fotos espaçadas (primeira e última sempre) ao modelo de visão local, em ordem, com nome e data e a instrução de comparar com cautela (pose, luz e ângulo) e sem diagnóstico. As fotos aparecem nas fontes com a data. Só neste computador, em qualquer modo; não roda se a mensagem já trouxer imagens. Sem mudança no banco.
+  - **Aceite:** testes de detecção do pedido, período, datas EXIF e civis, escolha espaçada e texto das fotos; leitura de EXIF conferida num JPEG real gerado para o teste.
+  - **Limites:** modelos locais pequenos percebem mal mudanças sutis; a qualidade depende do modelo de visão e de fotos com pose e luz parecidas. Sem medidas numéricas (só comparação visual).
+
+**Ajustes pedidos em 20/11/2026:**
+
+- [x] **Memórias temporárias:** a extração automática não guarda valores em dinheiro nem estados do momento ("em aberto", "hoje", "este mês"), nem dados vindos dos órgãos; regra nas instruções e filtro em código (`memory::temporary`). Pedidos explícitos ("lembre que…") continuam valendo. Memórias já guardadas não foram apagadas.
+- [x] **Escolha do modelo na conversa:** em Ajustes desta resposta, a ordem é onde responder (neste computador ou na nuvem) → modelo (locais, ou os da conta conectada na nuvem) → esforço (automático, leve, médio, alto). Na nuvem, o esforço vai como `reasoning_effort` (APIs compatíveis), `reasoning.effort` (plano do ChatGPT) ou orçamento de raciocínio (Claude: 2.048/8.000/16.000 tokens); só é enviado quando escolhido. Neste computador, leve = resposta direta e alto = raciocínio. Revisão de envio e regras de privacidade inalteradas.
 
 ### P2 — Primeira integração com a Moneta
 

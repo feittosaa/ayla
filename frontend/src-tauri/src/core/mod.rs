@@ -2,6 +2,7 @@
 pub mod cloud;
 pub mod files;
 pub mod hardware;
+pub mod iris;
 pub mod memory;
 pub mod policy;
 pub mod preferences;

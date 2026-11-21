@@ -144,3 +144,6 @@
 .chat-image-loading { display: block; padding: 40px 16px; text-align: center; color: var(--ayla-text-faint); font-size: 13px; }
 .message.user .chat-image { max-width: 240px; margin: 0; }
 .message.user .message-files { align-items: flex-end; }
+
+/* Iris: arquivos de onde vieram os trechos da resposta */
+.message-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--ayla-text-faint); font-size: 12px; }
