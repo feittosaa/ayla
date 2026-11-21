@@ -107,7 +107,7 @@ fn panel_title() -> String {
     format!("Ayla · Visão rápida · {}", std::process::id())
 }
 
-fn panel_rules(monitor: &Value, radius: u8) -> Option<Vec<String>> {
+fn panel_rules(monitor: &Value, radius: u8, sidebar_width: i64, sidebar_gap: u8) -> Option<Vec<String>> {
     let scale = monitor["scale"].as_f64()?;
     if scale <= 0.0 { return None; }
     let (mut width, mut height) = (monitor["width"].as_i64()?, monitor["height"].as_i64()?);
@@ -115,13 +115,15 @@ fn panel_rules(monitor: &Value, radius: u8) -> Option<Vec<String>> {
         std::mem::swap(&mut width, &mut height);
     }
     // A regra estática move usa coordenadas lógicas relativas ao monitor escolhido.
-    let inset = |i: usize| monitor["reserved"][i].as_i64().unwrap_or(0) + 5;
-    let width = ((width as f64 / scale) as i64 - inset(0) - inset(2)).clamp(1, 460);
-    let height = ((height as f64 / scale) as i64 - inset(1) - inset(3)).max(1);
+    let inset = |i: usize| monitor["reserved"][i].as_i64().unwrap_or(0);
+    let width = ((width as f64 / scale) as i64 - inset(0) - inset(2) - 10).clamp(1, sidebar_width);
+    // O painel direito aplica esta margem dentro da área reservada pelo compositor.
+    let gap = i64::from(sidebar_gap);
+    let height = ((height as f64 / scale) as i64 - inset(1) - inset(3) - 2 * gap).max(1);
     let id = monitor["id"].as_i64()?;
     Some(vec![
         "float".into(), format!("monitor {id}"), format!("size {width} {height}"),
-        format!("move {} {}", inset(0), inset(1)), "bordersize 0".into(),
+        format!("move {} {}", inset(0) + 5, inset(1) + gap), "bordersize 0".into(),
         "noshadow on".into(), format!("rounding {radius}"), "animation slide left".into(),
     ])
 }
@@ -207,9 +209,26 @@ fn material_palette(path: &Path) -> Value {
 fn qml_value<'a>(qml: &'a str, declaration: &str) -> Option<&'a str> {
     qml.lines().find_map(|line| line.trim().strip_prefix(declaration)).map(|s| s.split("//").next().unwrap_or("").trim())
 }
+fn quickshell_appearance() -> String {
+    fs::read_to_string(xdg("XDG_CONFIG_HOME", ".config").join("quickshell/ii/modules/common/Appearance.qml"))
+        .unwrap_or_default()
+}
+fn sidebar_width(qml: &str) -> i64 {
+    qml_value(qml, "property real sidebarWidth:")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|width| *width > 0)
+        .unwrap_or(460)
+}
+fn sidebar_gap(qml: &str) -> u8 {
+    qml_value(qml, "property real hyprlandGapsOut:")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|gap| (0.0..=f64::from(u8::MAX)).contains(gap))
+        .map(|gap| gap.round() as u8)
+        .unwrap_or(5)
+}
 fn system_theme() -> Value {
     let colors = material_palette(&xdg("XDG_STATE_HOME",".local/state").join("quickshell/user/generated/colors.json"));
-    let qml = fs::read_to_string(xdg("XDG_CONFIG_HOME",".config").join("quickshell/ii/modules/common/Appearance.qml")).unwrap_or_default();
+    let qml = quickshell_appearance();
     let mut font = qml_value(&qml, "property string main:").map(|s| s.trim_matches('"').to_owned());
     if font.is_none() {
         font = Command::new("gsettings").args(["get","org.gnome.desktop.interface","font-name"]).output().ok()
@@ -220,7 +239,7 @@ fn system_theme() -> Value {
     let corner = qml_value(&qml, "property int screenRounding:").and_then(|v| {
         v.parse::<u8>().ok().or_else(|| number(&format!("property int {v}:")))
     });
-    let radius = corner.map(|r| r.saturating_sub(number("property real hyprlandGapsOut:").unwrap_or(5)).saturating_sub(1))
+    let radius = corner.map(|r| r.saturating_sub(sidebar_gap(&qml)).saturating_sub(1))
         .or_else(|| number("property int windowRounding:")).unwrap_or(18).min(48);
     json!({"colors":colors,"font":font,"radius":radius})
 }
@@ -282,7 +301,9 @@ fn set_mode(app: &AppHandle, quick: bool) -> Result<(), String> {
             } else { prefs.panel_radius };
             let monitor = hypr_json("monitors").and_then(|items| items.as_array()?.iter().find(|m| m["focused"] == true).cloned())
                 .ok_or("Não foi possível identificar o monitor ativo")?;
-            Some(panel_rules(&monitor, radius).ok_or("Geometria de monitor inválida")?)
+            let qml = quickshell_appearance();
+            Some(panel_rules(&monitor, radius, sidebar_width(&qml), sidebar_gap(&qml))
+                .ok_or("Geometria de monitor inválida")?)
         } else { None };
         if let Some(rules) = &rules {
             if !configure_hypr_panel(rules) { return Err("O Hyprland não aceitou as regras da visão rápida".into()); }
@@ -374,19 +395,31 @@ fn close(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// Reinício pedido em Configurações: a Ayla encerra normalmente e abre de novo.
-static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// O executável instalado pode ter sido substituído enquanto esta sessão rodava.
+static RESTART_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-pub fn restart_requested() -> bool { RESTART.load(std::sync::atomic::Ordering::SeqCst) }
+pub fn restart_requested() -> bool { RESTART_PATH.get().is_some() }
 
-/// Abre outra Ayla depois que este processo terminar (o nome na sessão D-Bus é de um processo só).
+fn restart_path() -> Result<PathBuf, String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let running = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bytes = running.as_os_str().as_bytes();
+    let path = Path::new(std::ffi::OsStr::from_bytes(bytes.strip_suffix(b" (deleted)").unwrap_or(bytes)));
+    let metadata = path.metadata().map_err(|_| "Não encontrei o executável instalado para reiniciar a Ayla.")?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("O arquivo instalado da Ayla não é executável.".into());
+    }
+    Ok(path.to_owned())
+}
+
 pub fn relaunch_if_requested() {
-    if !RESTART.load(std::sync::atomic::Ordering::SeqCst) { return; }
-    let Ok(exe) = std::env::current_exe() else { return };
-    let _ = std::process::Command::new("sh")
-        .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$0\"", &exe.to_string_lossy(), &std::process::id().to_string()])
-        .stdin(std::process::Stdio::null())
-        .spawn();
+    use std::os::unix::process::CommandExt;
+    if let Some(path) = RESTART_PATH.get() {
+        let error = Command::new(path).exec();
+        eprintln!("Não foi possível reabrir a Ayla: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[tauri::command]
@@ -398,7 +431,7 @@ pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
         "hide" => close(&app, &window),
         "restore" => window.set_fullscreen(false).map_err(|e| e.to_string()),
         "quit" => { app.exit(0); Ok(()) }
-        "restart" => { RESTART.store(true, std::sync::atomic::Ordering::SeqCst); app.exit(0); Ok(()) }
+        "restart" => { let _ = RESTART_PATH.set(restart_path()?); app.exit(0); Ok(()) }
         _ => Err("Ação de janela desconhecida".into()),
     }
 }
@@ -409,10 +442,13 @@ mod tests {
     #[test]
     fn positions_the_panel_on_the_focused_scaled_rotated_output() {
         let m=json!({"id":3,"x":-900,"y":70,"width":1800,"height":1200,"scale":1.5,"transform":1,"reserved":[18,30,0,12],"activeWorkspace":{"id":4}});
-        let rules = panel_rules(&m, 17).unwrap();
-        assert!(rules.iter().any(|r| r == "size 460 1148"));
-        assert!(rules.iter().any(|r| r == "move 23 35"));
+        let qml = "property real sidebarWidth: 480 // painel direito\nproperty real hyprlandGapsOut: 7.0";
+        let rules = panel_rules(&m, 17, sidebar_width(qml), sidebar_gap(qml)).unwrap();
+        assert!(rules.iter().any(|r| r == "size 480 1144"));
+        assert!(rules.iter().any(|r| r == "move 23 37"));
         assert!(rules.iter().any(|r| r == "monitor 3"));
+        assert_eq!(sidebar_width(""), 460);
+        assert_eq!(sidebar_gap(""), 5);
     }
 
     #[test]

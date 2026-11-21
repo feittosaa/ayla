@@ -7,6 +7,7 @@ pub mod hardware;
 pub mod iris;
 pub mod memory;
 pub mod policy;
+pub mod research;
 pub mod reminders;
 pub mod preferences;
 

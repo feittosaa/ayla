@@ -51,6 +51,9 @@ pub struct Preferences {
     pub athena_vaults: Vec<String>,
     /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
     pub athena_git: bool,
+    /// Modo de resposta escolhido na conversa ("local", "auto" ou "cloud"); vale para as
+    /// próximas conversas até ser trocado. Vazio: segue o modo de uso.
+    pub response_source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -123,6 +126,7 @@ impl Default for Preferences {
             athena_folder: String::new(),
             athena_vaults: Vec::new(),
             athena_git: true,
+            response_source: String::new(),
         }
     }
 }
@@ -195,6 +199,7 @@ impl Preferences {
             || self.context_tokens < 512
             || self.context_tokens > 32768
             || self.idle_seconds > 3600
+            || !["", "local", "auto", "cloud"].contains(&self.response_source.as_str())
         {
             return Err(io::Error::other("Configuração fora dos limites suportados"));
         }
@@ -273,6 +278,19 @@ impl PreferenceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn response_source_is_kept_and_validated() {
+        let mut prefs = Preferences::default();
+        for source in ["", "local", "auto", "cloud"] {
+            prefs.response_source = source.into();
+            assert!(prefs.validate().is_ok(), "{source}");
+        }
+        prefs.response_source = "nuvem".into();
+        assert!(prefs.validate().is_err());
+        let old: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.response_source, "");
+    }
+
     #[test]
     fn desktop_defaults_and_opt_out_survive_reopening() {
         let root = std::env::temp_dir().join(format!("ayla-desktop-prefs-{}", super::super::store::id()));

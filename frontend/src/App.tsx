@@ -43,13 +43,14 @@ export default function App() {
   const organInstalled = Boolean(organ.status?.installed);
   useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
-  const view = useDesktopView(onQuick, setDesktopError);
+  const { view, markShown } = useDesktopView(onQuick, setDesktopError);
   const panelReady = Boolean((snapshot && draft) || error);
   useLayoutEffect(() => {
-    if (panelReady && view.quick && view.pending != null) {
-      void native('quick_ready', { generation: view.pending }).catch(e => setDesktopError(errorText(e)));
+    const generation = view.pending;
+    if (panelReady && view.quick && generation != null) {
+      void native('quick_ready', { generation }).then(() => markShown(generation)).catch(e => setDesktopError(errorText(e)));
     }
-  }, [panelReady, view.quick, view.pending]);
+  }, [panelReady, view.quick, view.pending, markShown]);
   function desktopAction(action: string) {
     void native('desktop_action', {action}).catch(e => setDesktopError(errorText(e)));
   }
@@ -140,14 +141,14 @@ export default function App() {
 
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
-        <Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
+        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
           projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
@@ -258,7 +259,7 @@ export default function App() {
                   <button className="primary-action" disabled={saving} onClick={() => void apply('Limites salvos.')}>Salvar limites</button>
                 </div>
                 <div className="advanced-block"><h3>Outro provedor compatível</h3>
-                  <p>Para um serviço compatível com a API da OpenAI que não está na lista de Nuvem. A nuvem recebe só o pedido e a personalidade, revisados e declarados públicos.</p>
+                  <p>Para um serviço compatível com a API da OpenAI que não está na lista de Nuvem. O modo Automático classifica a privacidade do pedido neste computador antes de usar a nuvem.</p>
                   <label>Endereço HTTPS<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label>
                   <label>Modelo<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label>
                   <button className="primary-action" disabled={saving || !draft.cloud_endpoint} onClick={() => { const value = { ...draft, cloud_provider: 'custom', onboarding_complete: true }; setDraft(value); void savePreferences(value).then(() => refresh()).then(() => setNotice('Provedor próprio salvo e em uso.')).catch(e => setError(errorText(e))); }}>Usar este provedor</button>

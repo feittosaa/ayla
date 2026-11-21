@@ -132,12 +132,12 @@ pub fn run() {
         std::process::exit(code);
     }
     let initial = desktop::Launch::from_args();
-    let (_instance, requests) = match desktop::register(initial) {
+    let (instance, requests) = match desktop::register(initial) {
         Ok(Some(primary)) => primary,
         Ok(None) => return,
         Err(error) => { eprintln!("Falha ao registrar a Ayla na sessão: {error}"); return; }
     };
-    tauri::Builder::default()
+    let exit_code = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         // Camada de compatibilidade da Moneta: a página dela aparece dentro da Ayla e cada pedido
@@ -298,11 +298,14 @@ pub fn run() {
             core::organs::organ_remove,
             core::organs::organ_open_separate,
             core::organs::organ_local_words,
+            core::research::suggests_web_search,
+            core::research::automatic_check,
+            core::services::set_response_source,
             core::version::app_version
         ])
         .build(tauri::generate_context!())
         .expect("Não foi possível iniciar a Ayla")
-        .run(|app, event| {
+        .run_return(|app, event| {
             if let tauri::RunEvent::WindowEvent { ref label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } = event {
                 if let Some(win) = app.get_webview_window(label) {
                     if app.state::<Core>().prefs().is_ok_and(|p| p.desktop.background) && win.hide().is_ok() {
@@ -321,7 +324,6 @@ pub fn run() {
                     // No reinício, espera a Moneta gravar e sair antes de a nova Ayla subi-la de novo.
                     organ.stop(desktop::restart_requested());
                 }
-                desktop::relaunch_if_requested();
                 if let Some(state) = app.try_state::<ManagedBackend>() {
                     if let Ok(mut backend) = state.0.lock() {
                         if let Some(backend) = backend.take() {
@@ -331,6 +333,9 @@ pub fn run() {
                 }
             }
         });
+    drop(instance);
+    desktop::relaunch_if_requested();
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]

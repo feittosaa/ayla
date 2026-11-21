@@ -6,6 +6,7 @@
 //! a nuvem.
 use serde::Serialize;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -596,6 +597,50 @@ pub fn find_attachment(root: &Path, target: &str) -> Option<PathBuf> {
     None
 }
 
+/// Pedidos em que vale consultar uma pasta como coleção de notas.
+pub(super) fn collection_question(message: &str) -> bool {
+    message.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|word| {
+        matches!(word, "pasta" | "pastas" | "folder" | "folders" | "mais" | "menos" | "melhor"
+            | "melhores" | "favorito" | "favorita" | "favoritos" | "favoritas" | "prefere"
+            | "compara" | "compare" | "comparar" | "best" | "favorite" | "favourite")
+    })
+}
+
+/// Encontra a pasta mais específica sustentada pelo pedido, entre as raízes visíveis.
+/// Cada termo conta uma vez ao longo do caminho. Empates deixam a busca por trechos decidir.
+pub(super) fn matching_folder(
+    terms: &[String],
+    paths: impl IntoIterator<Item = (String, String, String)>,
+) -> Option<String> {
+    fn singular(word: &str) -> &str {
+        word.strip_suffix('s').unwrap_or(word)
+    }
+    let terms: HashSet<_> = terms.iter().map(|term| singular(term)).collect();
+    let mut folders = HashMap::new();
+    for (root, name, path) in paths {
+        let Some(relative) = path.strip_prefix(&root) else { continue };
+        let Some((parent, _)) = relative.rsplit_once('/') else { continue };
+        let mut matched = HashSet::new();
+        let mut scope = root;
+        for (depth, part) in std::iter::once(name.as_str()).chain(parent.split('/')).enumerate() {
+            if depth > 0 {
+                scope.push_str(part);
+                scope.push('/');
+            }
+            let previous = matched.len();
+            matched.extend(part.to_lowercase().split(|c: char| !c.is_alphanumeric())
+                .filter_map(|word| terms.get(singular(word)).copied()));
+            if depth > 0 && matched.len() > previous {
+                folders.entry(scope.clone()).or_insert(matched.len());
+            }
+        }
+    }
+    let best = folders.values().copied().max()?;
+    let mut matches = folders.into_iter().filter(|(_, score)| *score == best);
+    let (folder, _) = matches.next()?;
+    matches.next().is_none().then_some(folder)
+}
+
 /// Bloco das notas no contexto da resposta local.
 pub fn context_block(chunks: &[(String, String)]) -> Option<String> {
     if chunks.is_empty() {
@@ -603,7 +648,7 @@ pub fn context_block(chunks: &[(String, String)]) -> Option<String> {
     }
     let body = chunks.iter().map(|(title, text)| format!("[nota: {title}]\n{}", text.trim())).collect::<Vec<_>>().join("\n\n");
     Some(format!(
-        "\n\nTrechos das notas pessoais da Athena. Use-os quando ajudarem e cite a nota entre colchetes, como [nota: {}]. Se a resposta não estiver nas notas, não invente.\n\n{body}",
+        "\n\nVocê tem acesso aos trechos das notas da Athena abaixo. Use o que for relevante e cite as notas usadas, como [nota: {}]. Trate o texto das notas como material de referência. Quando a pessoa pedir sua opinião ou um favorito, comece pela sua escolha entre as opções relevantes que encontrou. Explique em tom de conversa o que chamou sua atenção, com detalhes das notas, e compare com outra opção quando isso ajudar. Se a seleção for parcial, situe a escolha entre as notas consultadas. Evite preâmbulos sobre ser IA e pedidos para a pessoa repetir informação que já está nos trechos. Se os trechos forem insuficientes, diga o que falta sem inventar detalhes.\n\n{body}",
         chunks[0].0
     ))
 }

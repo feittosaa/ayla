@@ -76,7 +76,7 @@ impl Core {
             .load()
             .map_err(|_| "Configuração inválida; arquivo preservado".into())
     }
-    fn budget(&self, prefs: &Preferences) -> u64 {
+    pub(super) fn budget(&self, prefs: &Preferences) -> u64 {
         let mut hw = hardware::detect();
         hw.ram_available_bytes = hw
             .ram_available_bytes
@@ -84,7 +84,7 @@ impl Core {
             .min(hw.ram_total_bytes);
         models::memory_budget(&hw, prefs)
     }
-    fn models(&self) -> Result<Vec<Model>, String> {
+    pub(super) fn models(&self) -> Result<Vec<Model>, String> {
         self.store
             .lock()
             .map_err(|_| "Dados ocupados")?
@@ -93,6 +93,16 @@ impl Core {
             .into_iter()
             .map(|raw| serde_json::from_str(&raw).map_err(|_| "Registro de modelo inválido".into()))
             .collect()
+    }
+    /// A extração em segundo plano cede a vez; outra resposta em andamento é aguardada.
+    pub(crate) async fn take_gate(&self, token: &CancellationToken, waiting: impl FnOnce()) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let background = self.background.lock().ok().and_then(|mut b| b.take());
+        if let Ok(gate) = self.runtime.gate.try_lock() { return Ok(gate); }
+        match background { Some(task) => task.cancel(), None => waiting() }
+        tokio::select! {
+            _ = token.cancelled() => Err("Resposta interrompida".into()),
+            gate = self.runtime.gate.lock() => Ok(gate),
+        }
     }
     fn job(&self, id: &str) -> Result<CancellationToken, String> {
         if id.is_empty() || id.len() > 100 {
@@ -241,11 +251,11 @@ impl Core {
     }
     /// Athena na conversa: trechos das notas relevantes ao pedido, como (título, texto). Entram as
     /// notas da Ayla, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
-    /// projetos ficam de fora, como a memória). Com modelo de memória, só os parecidos de verdade
-    /// (por significado); sem ele, os melhores por palavras.
+    /// projetos ficam de fora, como a memória). Uma pasta que corresponde ao pedido fornece
+    /// trechos de notas distintas. Para os demais pedidos, vale a busca por significado ou palavras.
     async fn notes_context(&self, prefs: &Preferences, message: &str, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String)> {
         let result: Result<Vec<(String, String)>, String> = async {
-            let mut keys = Vec::new();
+            let mut roots = Vec::new();
             for root in self.athena_roots(prefs) {
                 let visible = match root.kind { "project" => project.is_some_and(|p| root.id == format!("project:{p}")), _ => true };
                 if !visible || (root.kind == "vault" && !root.available) {
@@ -255,12 +265,41 @@ impl Core {
                     continue;
                 }
                 if let Ok(key) = self.sync_notes(&root.path).await {
-                    keys.push(key);
+                    roots.push((key, root.name));
+                }
+            }
+            let query = memory::fts_query(message);
+            let excerpt = |(note, text): (String, String)| {
+                let filename = note.rsplit('/').next().unwrap_or(&note);
+                let title = filename.rsplit_once('.').map_or(filename, |(title, _)| title);
+                (title.to_string(), text)
+            };
+            if athena::collection_question(message) {
+                let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+                let paths = roots.iter().flat_map(|(key, name)| {
+                    db.indexed_note_paths(key).unwrap_or_default().into_iter()
+                        .map(move |path| (key.clone(), name.clone(), path))
+                });
+                if let Some(folder) = athena::matching_folder(&memory::search_terms(message), paths) {
+                    const LIMIT: usize = 4;
+                    let mut ids = query.as_ref()
+                        .and_then(|q| db.search_note_chunks(q, &folder, 32).ok())
+                        .unwrap_or_default();
+                    ids.extend(db.note_openings(&folder, LIMIT).unwrap_or_default());
+                    let mut seen = std::collections::HashSet::new();
+                    let notes: Vec<_> = db.note_chunks_by_ids(&ids).unwrap_or_default().into_iter()
+                        .filter(|(note, _)| seen.insert(note.clone()))
+                        .take(LIMIT)
+                        .map(excerpt)
+                        .collect();
+                    if !notes.is_empty() {
+                        return Ok(notes);
+                    }
                 }
             }
             let chosen: Vec<i64> = match self.memory_model(prefs) {
                 Some(model) => {
-                    for key in &keys {
+                    for (key, _) in &roots {
                         let pending = self.store.lock().map_err(|_| "Dados ocupados")?.note_chunks_without_vector(&model.id, key, 64).unwrap_or_default();
                         if pending.is_empty() {
                             continue;
@@ -275,26 +314,23 @@ impl Core {
                     }
                     let query = self.runtime.embed(&model, prefs, &memory::query_text(message), cancel).await?;
                     let mut hits: Vec<(i64, f64)> = Vec::new();
-                    for key in &keys {
+                    for (key, _) in &roots {
                         hits.extend(self.store.lock().map_err(|_| "Dados ocupados")?.note_vectors(&model.id, key).unwrap_or_default().into_iter()
                             .filter_map(|(id, v)| memory::cosine(&query, &v).filter(|s| *s >= 0.42).map(|s| (id, s))));
                     }
                     hits.sort_by(|a, b| b.1.total_cmp(&a.1));
                     hits.into_iter().take(4).map(|(id, _)| id).collect()
                 }
-                None => match memory::fts_query(message) {
+                None => match query {
                     Some(query) => {
                         let db = self.store.lock().map_err(|_| "Dados ocupados")?;
-                        keys.iter().flat_map(|key| db.search_note_chunks(&query, key, 3).unwrap_or_default()).take(3).collect()
+                        roots.iter().flat_map(|(key, _)| db.search_note_chunks(&query, key, 3).unwrap_or_default()).take(3).collect()
                     }
                     None => Vec::new(),
                 },
             };
             let rows = self.store.lock().map_err(|_| "Dados ocupados")?.note_chunks_by_ids(&chosen).unwrap_or_default();
-            Ok(rows.into_iter().map(|(note, text)| {
-                let title = note.rsplit('/').next().unwrap_or(&note).trim_end_matches(".md").to_string();
-                (title, text)
-            }).collect())
+            Ok(rows.into_iter().map(excerpt).collect())
         }
         .await;
         result.unwrap_or_default()
@@ -495,6 +531,8 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
         json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null),"projects":projects}),
     )
 }
+/// Instrução padrão da Ayla (não faz parte da personalidade editável).
+pub const OPTIONS_GUIDE: &str = "\n\nQuando o pedido aceitar mais de uma boa resposta (receitas, recomendações, ideias, soluções, caminhos, produtos), ofereça de 3 a 4 opções distintas, ordenadas da melhor para a pior segundo o seu próprio julgamento, e diga em uma frase por que cada uma funciona melhor ou pior. Se a pessoa pedir uma quantidade, respeite-a. Para perguntas com uma única resposta correta, responda direto.";
 #[tauri::command]
 pub fn save_preferences(
     state: tauri::State<'_, Core>,
@@ -508,6 +546,15 @@ pub fn save_preferences(
         .map_err(|_| {
             "Não foi possível salvar: verifique os limites e a URL HTTPS do provedor".into()
         })
+}
+/// Guarda só o modo de resposta, sem sobrescrever outras preferências salvas no meio-tempo.
+#[tauri::command]
+pub fn set_response_source(state: tauri::State<'_, Core>, source: String) -> Result<(), String> {
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler as configurações")?;
+    if prefs.response_source == source { return Ok(()); }
+    prefs.response_source = source;
+    store.save(&prefs).map_err(|_| "Modo de resposta inválido".into())
 }
 #[tauri::command]
 pub fn cloud_key(
@@ -971,6 +1018,14 @@ pub struct ChatRequest {
     pub sensitivity: Sensitivity,
     pub reviewed: bool,
     pub request_cloud: bool,
+    #[serde(default)]
+    pub web_search: bool,
+    #[serde(default)]
+    pub automatic: bool,
+    /// Automático: resposta da pessoa quando a Ayla perguntou ("cloud" ou "local"), ou a rota já
+    /// verificada antes do envio. Os bloqueios locais valem de novo aqui.
+    #[serde(default)]
+    pub auto_route: Option<String>,
     /// Arquivos anexados (ids devolvidos por `add_file`), no máximo 5.
     #[serde(default)]
     pub attachments: Vec<String>,
@@ -1381,26 +1436,18 @@ pub async fn chat(
     ) {
         return Err("Tipo de conversa inválido".into());
     }
-    // A extração em segundo plano cede a vez: cancela e espera liberar.
-    let background = state.background.lock().ok().and_then(|mut b| b.take());
-    let _gate = match state.runtime.gate.try_lock() {
-        Ok(gate) => gate,
-        Err(_) => match background {
-            Some(task) => {
-                task.cancel();
-                tokio::time::timeout(Duration::from_secs(10), state.runtime.gate.lock())
-                    .await
-                    .map_err(|_| "Já existe uma tarefa de IA em andamento")?
-            }
-            None => return Err("Já existe uma tarefa de IA em andamento".into()),
-        },
-    };
     let token = state.job(&request.id)?;
+    // Outra conversa respondendo: esta espera a vez (o modelo local atende um pedido por vez).
+    let _gate = match state.take_gate(&token, || { let _ = events.send(json!({"type":"status","text":"Esperando a outra resposta terminar…"})); }).await {
+        Ok(gate) => gate,
+        Err(error) => { state.finish(&request.id); return Err(error); }
+    };
     let start = Instant::now();
     let mut partial = String::new();
     let mut first = None;
     let mut chunks = 0;
     let mut metric_model = String::from("unresolved");
+    let mut origin = None;
     let mut recalled = 0usize;
     let mut result=async{
         let prefs=state.prefs()?;
@@ -1471,14 +1518,42 @@ pub async fn chat(
             let _=events.send(json!({"type":"token","text":reply}));
             return Ok(());
         }
-        let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
-        let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
+        use super::research::AutoRoute;
+        let auto_route = if request.automatic && prefs.usage_mode != UsageMode::LocalOnly
+            && (prefs.usage_mode != UsageMode::PerConversation || consent)
+            && prefs.cloud_platform().is_some() && request.sensitivity != Sensitivity::Sensitive
+            && request.attachments.is_empty() && request.references.is_empty() {
+            match request.auto_route.as_deref() {
+                Some(choice) => super::research::confirmed_route(&request.message, choice),
+                None => super::research::automatic_route(&state,&prefs,&request.message,&token).await,
+            }
+        } else { AutoRoute::Local };
+        // Sem a resposta da pessoa, a dúvida fica neste computador.
+        let auto_route = if auto_route == AutoRoute::Ask { AutoRoute::Local } else { auto_route };
+        if token.is_cancelled() { return Err("Resposta interrompida".into()); }
+        let use_cloud = if request.automatic { auto_route != AutoRoute::Local }
+            else { prefs.usage_mode==UsageMode::CloudOnly || request.request_cloud };
+        let web_search = if request.automatic { auto_route == AutoRoute::Search } else { request.web_search };
         // Finanças: a Ayla consulta o resumo da Moneta. Esses dados ficam neste computador em
         // qualquer modo, então a resposta é local (com modelo, ou direta, sem modelo).
         let finance={use tauri::Manager;let organ=app.state::<super::organs::Organ>();
             if organ.installed()&&super::organs::finance_question(&request.message){Some(organ.finance().await)}else{None}};
         let use_cloud=use_cloud&&finance.is_none();
         if let Some(data)=&finance{let _=events.send(json!({"type":"routing","text":match data{Ok(_)=>"Moneta consultada · resposta neste computador".to_string(),Err(e)=>format!("Moneta indisponível: {e}")}}));}
+        let public_search = super::research::suggests_web_search(&request.message);
+        if !request.automatic && web_search && (!use_cloud || !public_search || !request.references.is_empty()) {
+            return Err("O pedido de pesquisa mudou. Revise novamente o envio.".into());
+        }
+        if !request.automatic && !use_cloud && finance.is_none() && public_search && request.attachments.is_empty()
+            && super::research::wants_youtube(&request.message) && request.sensitivity != Sensitivity::Sensitive {
+            let reply = "Para pesquisar na internet e trazer fontes, escolha Automático ou Na nuvem nos ajustes desta resposta.";
+            metric_model = "local".into();
+            first = Some(start.elapsed().as_millis() as u64);
+            partial.push_str(reply);
+            chunks += 1;
+            let _ = events.send(json!({"type":"token","text":reply}));
+            return Ok(());
+        }
         // Anexos ficam neste computador: lidos, transcritos ou convertidos em quadros localmente.
         if use_cloud && !request.attachments.is_empty(){return Err("Arquivos anexados ficam neste computador. Responda localmente para usá-los.".into());}
         let attached=state.attachments(&request)?;
@@ -1530,9 +1605,14 @@ pub async fn chat(
         }
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
+        system.push_str(OPTIONS_GUIDE);
         if !use_cloud{
             system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
-            let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten().and_then(|id|state.store.lock().ok()?.project(&id).ok().flatten());
+            let project = {
+                let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+                db.conversation_project(&request.conversation).ok().flatten()
+                    .and_then(|id| db.project(&id).ok().flatten())
+            };
             if let Some(p)=&project{system.push_str(&project_block(p));}
             let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
             let found=state.iris(&prefs,&request.conversation,&request.message,&request.attachments,&token).await;
@@ -1555,17 +1635,26 @@ pub async fn chat(
         let mut report=|event:Value|{if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
         if use_cloud{
             metric_model = prefs.cloud_model.clone();
-            if !gate.allowed{return Err(gate.reason);}
-            if request.personality_preview.as_deref()!=Some(prefs.system_prompt()){return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into());}
-            let cloud_model=request.cloud_model.as_deref().map(str::trim).filter(|m|!m.is_empty()&&m.len()<=200).unwrap_or(&prefs.cloud_model).to_string();
-            if cloud_model.is_empty(){return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into());}
-            metric_model = cloud_model.clone();
+            if !request.automatic {
+                let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
+                if !gate.allowed { return Err(gate.reason); }
+                if request.personality_preview.as_deref()!=Some(prefs.system_prompt()) { return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into()); }
+            }
             let effort=match request.effort.as_deref(){None|Some("")=>None,Some(e@("low"|"medium"|"high"))=>Some(e),Some(_)=>return Err("Esforço inválido".into())};
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
+            let preferred = if request.automatic { prefs.cloud_model.as_str() }
+                else { request.cloud_model.as_deref().map(str::trim).filter(|m| !m.is_empty() && m.len() <= 200).unwrap_or(&prefs.cloud_model) };
+            let cloud_model = if !preferred.is_empty() { preferred.to_string() }
+                else if request.automatic {
+                    let catalog = tokio::select! { _ = token.cancelled() => return Err("Resposta interrompida".into()), list = cloud::models(api,&base,&secret,false) => list? };
+                    cloud::automatic_model(&platform,&catalog)?.to_owned()
+                } else { return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into()); };
+            metric_model = cloud_model.clone();
             // Referências: só memórias públicas, iguais ao revisado e do escopo desta conversa.
-            let mut instructions=prefs.system_prompt().to_string();
+            let mut instructions=if request.automatic { include_str!("persona.txt").trim() } else { prefs.system_prompt() }.to_owned();
+            instructions.push_str(OPTIONS_GUIDE);
             if !request.references.is_empty(){
                 let db=state.store.lock().map_err(|_|"Dados ocupados")?;
                 let project=db.conversation_project(&request.conversation).map_err(|_|"Conversa não encontrada")?;
@@ -1574,8 +1663,15 @@ pub async fn chat(
                 memory::check_references(&request.references,&facts,project.as_deref())?;
                 if let Some(block)=memory::reference_block(&request.references){instructions.push_str(&block);}
             }
-            let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
-            cloud::stream(outgoing,api,&token,&mut report).await?;
+            origin = Some(if web_search { "cloud_search" } else { "cloud" });
+            if web_search {
+                let _ = events.send(json!({"type":"status","text":"Pesquisando fontes na web…"}));
+                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &request.message)?;
+                cloud::stream_search(outgoing, &token, super::research::wants_youtube(&request.message), &mut report).await?;
+            } else {
+                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
+                cloud::stream(outgoing,api,&token,&mut report).await?;
+            }
         }else{
             // Sem modelo local, a pergunta sobre finanças recebe os números da Moneta diretamente.
             if selection.is_err(){if let Some(data)=&finance{
@@ -1602,12 +1698,16 @@ pub async fn chat(
                         result.is_ok(),
                         &request.attachments,
                         &[],
+                        origin,
                     )
                     .is_err()
                 {
                     result = Err(
                         "A resposta foi recebida, mas não foi possível salvar esta conversa".into(),
                     );
+                }
+                if let Some(source) = origin {
+                    let _ = events.send(json!({"type":"origin","origin":source}));
                 }
                 let _ = db.metric(
                     &metric_model,
@@ -2089,7 +2189,7 @@ pub async fn generate_image(state: tauri::State<'_, Core>, request: ImageRequest
         let file = state.store_file(&format!("imagem-{}.{extension}", store::now()), |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a imagem".to_string()), project, false)?;
         let reply = format!("Imagem criada com {} ({}).", provider.name, prefs.image_model);
         let db = state.store.lock().map_err(|_| "Dados ocupados")?;
-        db.save_turn(&request.conversation, &prompt, &reply, true, &[], &[file.id.clone()]).map_err(|_| "A imagem foi criada, mas não foi possível salvar a conversa")?;
+        db.save_turn(&request.conversation, &prompt, &reply, true, &[], &[file.id.clone()], Some("cloud")).map_err(|_| "A imagem foi criada, mas não foi possível salvar a conversa")?;
         let saved = db.file(&file.id).ok().flatten().unwrap_or(file);
         Ok(json!({"content": reply, "attachments": [saved]}))
     }
@@ -2613,6 +2713,70 @@ pub async fn import_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_second_reply_waits_its_turn_and_can_be_cancelled_while_waiting() {
+        let root = std::env::temp_dir().join(format!("ayla-gate-{}", store::id()));
+        let core = std::sync::Arc::new(Core::open(root.clone()).unwrap());
+        let first = core.take_gate(&CancellationToken::new(), || panic!("livre: não espera")).await.unwrap();
+        let cancelled = CancellationToken::new();
+        let waiting = std::sync::atomic::AtomicBool::new(false);
+        let stop = cancelled.clone();
+        let (result, ()) = tokio::join!(core.take_gate(&cancelled, || waiting.store(true, std::sync::atomic::Ordering::SeqCst)), async { stop.cancel(); });
+        assert!(result.is_err() && waiting.load(std::sync::atomic::Ordering::SeqCst));
+        drop(result);
+        let queued = { let core = core.clone(); tokio::spawn(async move { core.take_gate(&CancellationToken::new(), || {}).await.map(|_| ()) }) };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!queued.is_finished());
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap().unwrap().unwrap();
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn athena_compares_distinct_notes_from_the_matching_folder() {
+        let root = std::env::temp_dir().join(format!("ayla-athena-core-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let other_project = core.store.lock().unwrap().create_project("Outra mesa", "").unwrap();
+        let vault = root.join("wilderfeast");
+        let other_vault = root.join("Outra mesa");
+        let prefs = Preferences {
+            athena_vaults: vec![
+                other_vault.to_string_lossy().into_owned(),
+                vault.to_string_lossy().into_owned(),
+            ],
+            ..Preferences::default()
+        };
+        let write = |base: &std::path::Path, path: &str, content: &str| {
+            let file = base.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, content).unwrap();
+        };
+        write(&root.join("athena"), "NPCs Rápidos.md", "NPC legal para Wilderfeast: um mercador.");
+        write(&other_vault, "NPCs/Nera.md", "Uma cartógrafa de montanhas.");
+        write(&vault, "Locais/Porto.md", "Um porto movimentado.");
+        write(&vault, "NPCs/Vila/Lua.md", "Uma cozinheira que ouve as árvores.");
+        write(&vault, "NPCs/Aliados/Ivo.md", &"Um guardião do rio. ".repeat(60));
+        let project_notes = root.join("projetos-notas").join(&other_project.id);
+        write(&project_notes, "Wilderfeast/NPCs/Segredo.md", "Uma nota privada de outro projeto.");
+        core.sync_notes(&project_notes).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let notes = core.notes_context(&prefs, "qual NPC mais legal que eu criei no Wilderfeast?", None, &cancel).await;
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|(name, text)| name == "Lua" && text.contains("cozinheira")));
+        assert!(notes.iter().any(|(name, text)| name == "Ivo" && text.contains("guardião")));
+        let block = athena::context_block(&notes).unwrap();
+        assert!(block.contains("[nota: Lua]") && block.contains("[nota: Ivo]"));
+        assert!(!block.contains(vault.to_str().unwrap()));
+
+        let notes = core.notes_context(&prefs, "O que está escrito sobre cartógrafa?", None, &cancel).await;
+        assert_eq!(notes[0].0, "Nera");
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Rode com AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark: ffmpeg e Whisper vêm do cache (sem rede).
     #[tokio::test]
     #[ignore = "ffmpeg e Whisper reais via cache local; motor do Whisper de /tmp/ayla-p1-runtime-validation"]
@@ -2713,7 +2877,7 @@ mod tests {
         // Anexo pendente não aparece em Arquivos; depois de enviado, aparece e fica ligado à mensagem.
         assert!(core.store.lock().unwrap().project_files(Some(&project.id)).unwrap().is_empty());
         let chat = core.store.lock().unwrap().create_conversation("c", Some(&project.id)).unwrap();
-        core.store.lock().unwrap().save_turn(&chat.id, "resuma", "ok", true, &[note.id.clone()], &[]).unwrap();
+        core.store.lock().unwrap().save_turn(&chat.id, "resuma", "ok", true, &[note.id.clone()], &[], None).unwrap();
         let listed = core.store.lock().unwrap().project_files(Some(&project.id)).unwrap();
         assert_eq!(listed.len(), 1);
         let messages = core.store.lock().unwrap().messages(&chat.id).unwrap();

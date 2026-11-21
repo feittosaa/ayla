@@ -27,14 +27,7 @@ pub struct CloudDecision {
     pub reason: String,
 }
 
-pub fn cloud_gate(
-    mode: UsageMode,
-    sensitivity: Sensitivity,
-    reviewed: bool,
-    conversation_consent: bool,
-    explicit: bool,
-    text: &str,
-) -> CloudDecision {
+pub(super) fn suspect_content(text: &str) -> bool {
     let lower = text.to_lowercase();
     // Barreiras adicionais; nunca classificar automaticamente como público.
     let mut digits = 0;
@@ -46,7 +39,7 @@ pub fn cloud_gate(
         }
         digits >= 8
     });
-    let suspect = long_identifier
+    long_identifier
         || text.contains('@')
         || [
             "senha",
@@ -73,8 +66,18 @@ pub fn cloud_gate(
             "chave privada",
         ]
         .iter()
-        .any(|pattern| lower.contains(pattern));
-    let reason = if sensitivity != Sensitivity::Public || suspect {
+        .any(|pattern| lower.contains(pattern))
+}
+
+pub fn cloud_gate(
+    mode: UsageMode,
+    sensitivity: Sensitivity,
+    reviewed: bool,
+    conversation_consent: bool,
+    explicit: bool,
+    text: &str,
+) -> CloudDecision {
+    let reason = if sensitivity != Sensitivity::Public || suspect_content(text) {
         Some("Conteúdo sensível ou duvidoso permanece local. Remova ou anonimize os dados antes de usar cloud.")
     } else if mode == UsageMode::LocalOnly {
         Some("O modo somente local bloqueia cloud.")
