@@ -913,10 +913,24 @@ pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, d
 pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
     let db = state.store.lock().map_err(|_| "Dados ocupados")?;
     let copies = db.project_file_paths(&id).unwrap_or_default();
+    let name = db.projects().unwrap_or_default().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_else(|| "Projeto".into());
     match db.delete_project(&id) {
         Ok(true) => {
             for path in copies {
                 remove_copy(&state.root, &path);
+            }
+            // Notas do projeto (Athena): vão para a lixeira das notas da Ayla, não somem.
+            let notes = state.root.join("projetos-notas").join(&id);
+            if notes.is_dir() {
+                let bin = state.root.join("athena").join(".trash");
+                let _ = fs::create_dir_all(&bin);
+                let mut target = bin.join(format!("Projeto {}", athena::file_name(&name)));
+                let mut n = 2;
+                while target.exists() {
+                    target = bin.join(format!("Projeto {} {n}", athena::file_name(&name)));
+                    n += 1;
+                }
+                let _ = fs::rename(&notes, &target);
             }
             Ok(())
         }
@@ -1154,6 +1168,59 @@ pub async fn athena_daily(state: tauri::State<'_, Core>, root: String) -> Result
 pub async fn athena_trash(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
     athena::trash(&dir, &path)
+}
+
+/// Renomeia ou move a nota (caminho novo, com pastas) e atualiza os links das outras notas.
+#[tauri::command]
+pub async fn athena_rename(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_note(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+    Ok(json!({"path": new, "relinked": changed}))
+}
+
+/// Renomeia ou move uma pasta e atualiza os links das notas dela.
+#[tauri::command]
+pub async fn athena_rename_folder(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_folder(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+    Ok(json!({"path": new, "relinked": changed}))
+}
+
+/// Tags de todas as raízes, com as notas de cada uma.
+#[tauri::command]
+pub async fn athena_tags(state: tauri::State<'_, Core>) -> Result<Vec<Value>, String> {
+    let roots: Vec<AthenaRoot> = state.athena_roots(&state.prefs()?).into_iter().filter(|r| r.path.is_dir()).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut map: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
+        for root in roots {
+            for note in athena::list(&root.path) {
+                let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
+                for tag in athena::tags(&text) {
+                    map.entry(tag).or_default().push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+                }
+            }
+        }
+        map.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect()
+    }).await.map_err(|_| "Falha ao ler as tags".into())
+}
+
+/// Imagem anexada a uma nota (![[foto.png]]), procurada pelo nome na raiz, como data URL.
+#[tauri::command]
+pub async fn athena_attachment(state: tauri::State<'_, Core>, root: String, target: String) -> Result<Option<String>, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = athena::find_attachment(&dir, &target) else { return Ok(None) };
+        let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !athena::ATTACHMENT_IMAGES.contains(&extension.as_str()) {
+            return Ok(None);
+        }
+        if fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > athena::MAX_ATTACHMENT {
+            return Err("Imagem grande demais para mostrar".to_string());
+        }
+        let bytes = fs::read(&path).map_err(|_| "Não foi possível ler o anexo".to_string())?;
+        let mime = match extension.as_str() { "jpg" | "jpeg" => "image/jpeg", "svg" => "image/svg+xml", "gif" => "image/gif", "webp" => "image/webp", "bmp" => "image/bmp", "avif" => "image/avif", _ => "image/png" };
+        Ok(Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))))
+    }).await.map_err(|_| "Falha ao ler o anexo".to_string())?
 }
 
 /// Notas da mesma raiz que têm link `[[…]]` para esta (como os backlinks do Obsidian).

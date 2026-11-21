@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
+import Confirm from './Confirm';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort, type Reference } from '../services/Desktop';
@@ -352,7 +353,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.complete && m.content && <div className="message-actions"><button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button></div>}
                 </div>
               </div>)}
-          {learned.map(fact => <div key={fact.id} className="memory-note"><span>Ayla lembrou: {fact.content}</span><button className="link-button" onClick={() => void forget(fact)}>Desfazer</button></div>)}
+          {learned.map(fact => <div key={fact.id} className="memory-note"><span>Ayla lembrou: {fact.content}</span><Confirm className="link-button" question="Apagar esta memória?" confirm="Apagar" onConfirm={() => void forget(fact)}>Desfazer</Confirm></div>)}
         </div>
       </div>
 
@@ -392,7 +393,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>
           {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}` : 'Transcrevendo…'}</p>}
           {(attachments.length > 0 || adding) && <ul className="composer-files" aria-label="Arquivos anexados">
-            {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><button type="button" className="chip-remove" aria-label={`Remover ${file.name}`} disabled={busy} onClick={() => removeAttachment(file)}><CloseIcon size={14} /></button></li>)}
+            {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><Confirm className="chip-remove" ariaLabel={`Remover ${file.name}`} disabled={busy} question="Tirar este anexo?" confirm="Tirar" onConfirm={() => removeAttachment(file)}><CloseIcon size={14} /></Confirm></li>)}
             {adding && <li className="file-chip" role="status">Guardando…</li>}
           </ul>}
           <textarea ref={field} rows={1} aria-label="Mensagem" value={input} readOnly={listening !== 'idle'} disabled={busy}

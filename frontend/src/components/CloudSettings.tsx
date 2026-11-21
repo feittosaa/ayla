@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import Confirm from './Confirm';
 import { native, errorText, modeLabels, taskId, type CloudProvider, type Preferences, type Snapshot, type UsageMode } from '../services/Desktop';
 
 type Props = {
@@ -89,7 +90,7 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
                 <span className="row-hint">{provider.connected ? (provider.account ? `Conectado como ${provider.account}` : 'Conectado') : provider.summary}</span></span>
               {provider.connected ? <span className="row-actions">
                 {!selected && <button disabled={saving || working} onClick={() => void use(provider)}>Usar</button>}
-                <button className="ghost-button" disabled={working} onClick={() => void act(provider.id, async () => { await native('cloud_disconnect', { provider: provider.id }); if (selected) await save({ cloud_provider: '', cloud_model: '' }); return `${provider.name} desconectado.`; })}>{provider.login === 'key' ? 'Remover chave' : 'Sair'}</button>
+                <Confirm className="ghost-button" disabled={working} question={provider.login === 'key' ? `Remover a chave de ${provider.name} deste computador?` : `Sair da conta ${provider.name}? O acesso é revogado.`} confirm={provider.login === 'key' ? 'Remover' : 'Sair'} onConfirm={() => void act(provider.id, async () => { await native('cloud_disconnect', { provider: provider.id }); if (selected) await save({ cloud_provider: '', cloud_model: '' }); return `${provider.name} desconectado.`; })}>{provider.login === 'key' ? 'Remover chave' : 'Sair'}</Confirm>
               </span> : provider.login !== 'key' && (working && busy?.request
                 ? <span className="row-actions"><span className="row-hint" role="status">Termine o login no navegador…</span><button className="ghost-button" onClick={() => void native('cancel_job', { requestId: busy.request })}>Cancelar</button></span>
                 : <button className={provider.login === 'chat_gpt' ? 'primary-action' : ''} disabled={!!busy} onClick={() => void login(provider)}>{provider.login === 'chat_gpt' ? 'Continuar com o ChatGPT' : 'Entrar com OpenRouter'}</button>)}

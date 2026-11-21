@@ -343,6 +343,259 @@ pub fn parse_model(raw: &str) -> Option<(String, String)> {
     (!title.is_empty() && !content.is_empty()).then(|| (file_name(title), content.to_string()))
 }
 
+// Renomear e mover, com os links atualizados (como o Obsidian).
+
+/// Troca, no texto, os links wiki que apontam para `old` (pelo nome ou caminho) por `target`,
+/// mantendo seção e apelido; também links Markdown para o caminho antigo. Devolve o texto novo,
+/// se mudou.
+pub fn relink(text: &str, old: &str, target: &str, new_path: &str) -> Option<String> {
+    // Código (em bloco ou em linha) fica como está, como no Obsidian.
+    let mut out = String::new();
+    let mut changed = false;
+    for (code, part) in code_spans(text) {
+        match (code, relink_plain(part, old, target, new_path)) {
+            (false, Some(updated)) => {
+                out.push_str(&updated);
+                changed = true;
+            }
+            _ => out.push_str(part),
+        }
+    }
+    changed.then_some(out)
+}
+
+/// Divide o texto em trechos de código (```bloco``` e `linha`) e o resto.
+fn code_spans(text: &str) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let fence = rest.find("```");
+        let tick = rest.find('`');
+        let Some(start) = fence.or(tick).map(|f| tick.map_or(f, |t| t.min(f))) else {
+            out.push((false, rest));
+            break;
+        };
+        let (marker, len) = if fence == Some(start) { ("```", 3) } else { ("`", 1) };
+        let Some(end) = rest[start + len..].find(marker).map(|e| start + len + e + len) else {
+            out.push((false, rest));
+            break;
+        };
+        if start > 0 {
+            out.push((false, &rest[..start]));
+        }
+        out.push((true, &rest[start..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+fn relink_plain(text: &str, old: &str, target: &str, new_path: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(start) = rest.find("[[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let inner = &after[..end];
+        let cut = inner.find(['|', '#']).unwrap_or(inner.len());
+        let (name, tail) = inner.split_at(cut);
+        if !inner.contains('\n') && links_to(name, old) {
+            out.push_str(&format!("[[{target}{tail}]]"));
+            changed = true;
+        } else {
+            out.push_str(&format!("[[{inner}]]"));
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    for (from, to) in [(old.to_string(), new_path.to_string()), (old.replace(' ', "%20"), new_path.replace(' ', "%20"))] {
+        let pattern = format!("]({from})");
+        if out.contains(&pattern) {
+            out = out.replace(&pattern, &format!("]({to})"));
+            changed = true;
+        }
+    }
+    changed.then_some(out)
+}
+
+/// Como os links devem citar a nota: pelo nome, se ele for único na raiz; senão, pelo caminho.
+pub fn link_target(notes: &[Note], path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".md");
+    let same = notes.iter().filter(|n| n.title.eq_ignore_ascii_case(name)).count();
+    if same <= 1 { name.to_string() } else { path.trim_end_matches(".md").to_string() }
+}
+
+/// Atualiza os links de todas as notas da raiz para as mudanças (antigo, novo). Devolve quantas notas mudaram.
+fn relink_all(root: &Path, moves: &[(String, String)]) -> usize {
+    let notes = list(root);
+    let mut changed = 0;
+    for note in &notes {
+        let Ok((mut text, _)) = read(root, &note.path) else { continue };
+        let mut touched = false;
+        for (old, new) in moves {
+            if let Some(updated) = relink(&text, old, &link_target(&notes, new), new) {
+                text = updated;
+                touched = true;
+            }
+        }
+        if touched && write(root, &note.path, &text, None).is_ok() {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Renomeia ou move uma nota dentro da raiz (pastas criadas se preciso) e atualiza os links.
+/// Devolve o caminho novo e quantas notas tiveram links atualizados.
+pub fn rename_note(root: &Path, from: &str, to: &str) -> Result<(String, usize), String> {
+    let from_path = safe_relative(from).ok_or("Nota inválida")?;
+    let to = if to.to_lowercase().ends_with(".md") { to.to_string() } else { format!("{to}.md") };
+    let to_path = safe_relative(&to).ok_or("Nome ou pasta inválidos")?;
+    let name = to_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    if file_name(&name) != name {
+        return Err("O nome não pode ter / \\ : * ? \" < > | # ^ [ ]".into());
+    }
+    if !root.join(&from_path).is_file() {
+        return Err("Nota não encontrada".into());
+    }
+    if root.join(&to_path).exists() {
+        return Err("Já existe uma nota com esse nome nessa pasta".into());
+    }
+    if let Some(parent) = root.join(&to_path).parent() {
+        fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?;
+    }
+    fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível renomear a nota")?;
+    let (old, new) = (relative_string(&from_path), relative_string(&to_path));
+    let changed = relink_all(root, &[(old, new.clone())]);
+    Ok((new, changed))
+}
+
+/// Renomeia ou move uma pasta inteira e atualiza os links que usavam o caminho das notas dela.
+pub fn rename_folder(root: &Path, from: &str, to: &str) -> Result<(String, usize), String> {
+    let from_path = safe_folder(from).filter(|p| !p.as_os_str().is_empty()).ok_or("Pasta inválida")?;
+    let to_path = safe_folder(to).filter(|p| !p.as_os_str().is_empty()).ok_or("Nome inválido")?;
+    if to_path.starts_with(&from_path) {
+        return Err("Uma pasta não pode ir para dentro dela mesma".into());
+    }
+    if !root.join(&from_path).is_dir() {
+        return Err("Pasta não encontrada".into());
+    }
+    if root.join(&to_path).exists() {
+        return Err("Já existe uma pasta com esse nome".into());
+    }
+    let (old, new) = (relative_string(&from_path), relative_string(&to_path));
+    let moved: Vec<(String, String)> = list(root)
+        .into_iter()
+        .filter(|n| n.path.starts_with(&format!("{old}/")))
+        .map(|n| (n.path.clone(), format!("{new}{}", &n.path[old.len()..])))
+        .collect();
+    if let Some(parent) = root.join(&to_path).parent() {
+        fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?;
+    }
+    fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível renomear a pasta")?;
+    let changed = relink_all(root, &moved);
+    Ok((new, changed))
+}
+
+// Tags (#tag no texto e `tags:` no cabeçalho YAML, como o Obsidian).
+
+/// Tags de uma nota, sem `#`, em minúsculas, sem repetição. Ignora código, títulos e âncoras de links.
+pub fn tags(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |tag: &str| {
+        let tag = tag.trim().trim_start_matches('#').trim_matches(|c: char| c == '"' || c == '\'').to_lowercase();
+        if !tag.is_empty() && tag.chars().any(|c| !c.is_ascii_digit()) && !out.contains(&tag) {
+            out.push(tag);
+        }
+    };
+    let mut body = text;
+    // Cabeçalho YAML: "tags: [a, b]", "tags: a, b" ou lista "- a".
+    if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---") {
+            let yaml = &rest[..end];
+            let mut in_tags = false;
+            for line in yaml.lines() {
+                let trimmed = line.trim();
+                if let Some(value) = trimmed.strip_prefix("tags:").or_else(|| trimmed.strip_prefix("tag:")) {
+                    in_tags = value.trim().is_empty();
+                    for tag in value.trim().trim_matches(['[', ']']).split(',') {
+                        push(tag);
+                    }
+                } else if in_tags && trimmed.starts_with("- ") {
+                    push(&trimmed[2..]);
+                } else if !trimmed.is_empty() {
+                    in_tags = false;
+                }
+            }
+            body = &rest[end + 4..];
+        }
+    }
+    let mut in_code = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let line: String = line.split('`').enumerate().filter(|(i, _)| i % 2 == 0).map(|(_, p)| p).collect::<Vec<_>>().join(" ");
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
+                let tag: String = chars[i + 1..].iter().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/')).collect();
+                if !tag.is_empty() {
+                    push(&tag);
+                    i += tag.chars().count();
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+// Anexos (![[foto.png]]): procurados pelo nome na raiz, como o Obsidian.
+
+pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+pub const MAX_ATTACHMENT: u64 = 15 * 1024 * 1024;
+
+/// Caminho de um anexo pelo nome (ou caminho relativo), dentro da raiz e fora de pastas ocultas.
+pub fn find_attachment(root: &Path, target: &str) -> Option<PathBuf> {
+    let direct = safe_folder(target).map(|p| root.join(p)).filter(|p| p.is_file());
+    if direct.is_some() {
+        return direct;
+    }
+    let wanted = target.rsplit('/').next()?.to_lowercase();
+    let mut pending = vec![root.to_path_buf()];
+    let mut seen = 0;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            seen += 1;
+            if seen > 50_000 {
+                return None;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(entry.path()),
+                Ok(kind) if kind.is_file() && name.to_lowercase() == wanted => return Some(entry.path()),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Bloco das notas no contexto da resposta local.
 pub fn context_block(chunks: &[(String, String)]) -> Option<String> {
     if chunks.is_empty() {
@@ -418,6 +671,38 @@ mod tests {
         assert!(links_to("Personagens", "RPG/Personagens.md"));
         assert!(links_to("rpg/personagens", "RPG/Personagens.md"));
         assert!(!links_to("Mapa", "RPG/Mapa antigo.md"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn renomear_e_mover_atualiza_links() {
+        let root = temp();
+        create_in(&root, "RPG", "Personagens", "# Personagens\n").unwrap();
+        create_in(&root, "", "Índice", "Ver [[Personagens]], [[Personagens#Elfos|os elfos]] e [[RPG/Personagens]]. Também [ficha](RPG/Personagens.md). `[[Personagens]]` fica.").unwrap();
+        let (path, changed) = rename_note(&root, "RPG/Personagens.md", "RPG/Elenco").unwrap();
+        assert_eq!((path.as_str(), changed), ("RPG/Elenco.md", 1));
+        let index = read(&root, "Índice.md").unwrap().0;
+        assert_eq!(index, "Ver [[Elenco]], [[Elenco#Elfos|os elfos]] e [[Elenco]]. Também [ficha](RPG/Elenco.md). `[[Personagens]]` fica.");
+        assert!(rename_note(&root, "RPG/Elenco.md", "Índice").is_err(), "não sobrescreve");
+        assert!(rename_note(&root, "RPG/Elenco.md", "../fora").is_err());
+        let (folder, _) = rename_folder(&root, "RPG", "Jogos/RPG").unwrap();
+        assert_eq!(folder, "Jogos/RPG");
+        assert!(root.join("Jogos/RPG/Elenco.md").is_file());
+        assert!(rename_folder(&root, "Jogos", "Jogos/RPG/dentro").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tags_e_anexos() {
+        assert_eq!(tags("---\ntags: [treino, saúde]\n---\n# Título\nTexto #Academia e #rpg/sessão, não #1 nem a#b.\n```\n#codigo\n```"), ["treino", "saúde", "academia", "rpg/sessão"]);
+        assert_eq!(tags("---\ntags:\n  - a\n  - b\n---\n"), ["a", "b"]);
+        assert!(tags("## Título\n[link](x#ancora) `#codigo`").is_empty());
+        let root = temp();
+        fs::create_dir_all(root.join("anexos")).unwrap();
+        fs::write(root.join("anexos/Foto 1.png"), "x").unwrap();
+        assert_eq!(find_attachment(&root, "foto 1.png"), Some(root.join("anexos/Foto 1.png")));
+        assert_eq!(find_attachment(&root, "anexos/Foto 1.png"), Some(root.join("anexos/Foto 1.png")));
+        assert_eq!(find_attachment(&root, "../fora.png"), None);
         let _ = fs::remove_dir_all(&root);
     }
 

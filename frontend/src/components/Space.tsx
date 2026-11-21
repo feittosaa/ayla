@@ -194,10 +194,10 @@ function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, o
     <section className="settings-group" aria-labelledby="danger-title"><h2 id="danger-title">Apagar projeto</h2>
       <div className="group-card">
         {confirmDelete ? <div className="group-row stacked" role="group" aria-label="Confirmar exclusão">
-          <span>Apagar <b>{project.name}</b> com {project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} e {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}? Isso não pode ser desfeito; o backup em Configurações guarda uma cópia antes.</span>
+          <span>Apagar <b>{project.name}</b> com {project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} e {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}? Isso não pode ser desfeito; o backup em Configurações guarda uma cópia antes. As notas do projeto vão para a lixeira da Athena (Notas da Ayla › .trash).</span>
           <div className="row-actions"><button className="danger-action" disabled={saving} onClick={() => void remove()}>Apagar de vez</button><button className="ghost-button" onClick={() => setConfirmDelete(false)}>Cancelar</button></div>
         </div> : <div className="group-row">
-          <span className="row-text"><span className="row-hint">Remove o projeto, as conversas e as memórias dele. As memórias gerais não são afetadas.</span></span>
+          <span className="row-text"><span className="row-hint">Remove o projeto, as conversas, as memórias e os arquivos dele; as notas vão para a lixeira da Athena. As memórias gerais não são afetadas.</span></span>
           <button onClick={() => setConfirmDelete(true)}>Apagar…</button>
         </div>}
       </div>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import Confirm from './Confirm';
 import { listen } from '@tauri-apps/api/event';
 import { errorText, native } from '../services/Desktop';
 
@@ -22,7 +23,7 @@ export default function Reminders() {
         <span className="row-text"><span className="row-title">{r.text}</span><span className="row-hint">{r.label}</span></span>
         <span className="row-actions">
           <button className="ghost-button" onClick={() => act('reminder_snooze', { id: r.id, minutes: 60 })}>Adiar 1 h</button>
-          <button className="ghost-button" onClick={() => act('reminder_delete', { id: r.id })}>Cancelar</button>
+          <Confirm className="ghost-button" question="Cancelar este lembrete?" confirm="Cancelar lembrete" onConfirm={() => act('reminder_delete', { id: r.id })}>Cancelar</Confirm>
         </span>
       </div>)}
     </div>
