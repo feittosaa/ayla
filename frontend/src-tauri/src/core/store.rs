@@ -65,6 +65,20 @@ impl<'a> Scope<'a> {
         Self { project, include_general: false }
     }
 }
+/// Trecho de um arquivo guardado (Iris).
+#[derive(Clone, Debug, Serialize)]
+pub struct Chunk {
+    pub id: i64,
+    pub file_id: String,
+    pub file_name: String,
+    pub page: Option<u32>,
+    pub text: String,
+}
+/// `?n,?n+1,…` para uma lista `IN` com `count` valores a partir do parâmetro `first`.
+fn in_list(count: usize, first: usize) -> String {
+    (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
+}
+const SCHEMA: u32 = 5;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -113,7 +127,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version == 0 {
@@ -127,12 +141,12 @@ impl Store {
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         }
-        if (1..4).contains(&version) {
+        if (1..5).contains(&version) {
             // Backup consistente antes de alterar um banco com dados do usuário.
             let backups = path.parent().unwrap_or(Path::new(".")).join("backups");
             std::fs::create_dir_all(&backups)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            Self { conn }.backup(&backups.join(format!("ayla-antes-v4-{}.db", id())))?;
+            Self { conn }.backup(&backups.join(format!("ayla-antes-v{SCHEMA}-{}.db", id())))?;
             conn = Connection::open(path)?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -146,7 +160,25 @@ impl Store {
         if version <= 3 {
             Self::migrate_v4(&mut conn)?;
         }
+        if version <= 4 {
+            Self::migrate_v5(&mut conn)?;
+        }
         Ok(Self { conn })
+    }
+    /// v5 (Iris): trechos dos arquivos guardados, com índice FTS5 e vetores por modelo, para
+    /// responder com o que está nos arquivos do projeto e da conversa. `file_index` marca o que
+    /// já foi dividido (inclusive arquivos sem texto). Apagar o arquivo apaga os trechos.
+    fn migrate_v5(conn: &mut Connection) -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE file_chunks(id INTEGER PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE, ord INTEGER NOT NULL, page INTEGER, text TEXT NOT NULL);
+            CREATE INDEX file_chunks_file ON file_chunks(file_id, ord);
+            CREATE VIRTUAL TABLE file_chunks_fts USING fts5(text, content='file_chunks', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+            CREATE TRIGGER file_chunks_ai AFTER INSERT ON file_chunks BEGIN INSERT INTO file_chunks_fts(rowid,text) VALUES(new.id,new.text); END;
+            CREATE TRIGGER file_chunks_ad AFTER DELETE ON file_chunks BEGIN INSERT INTO file_chunks_fts(file_chunks_fts,rowid,text) VALUES('delete',old.id,old.text); END;
+            CREATE TABLE chunk_vectors(chunk_id INTEGER NOT NULL REFERENCES file_chunks(id) ON DELETE CASCADE, model_id TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(chunk_id, model_id));
+            CREATE TABLE file_index(file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE, chunks INTEGER NOT NULL);
+            PRAGMA user_version=5;")?;
+        tx.commit()
     }
     /// v4: arquivos inseridos (cópias guardadas pela Ayla), ligados à conversa, ao
     /// projeto e à mensagem em que foram enviados; texto extraído fica em cache.
@@ -393,6 +425,69 @@ impl Store {
     /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.
     pub fn project_files(&self, project: Option<&str>) -> rusqlite::Result<Vec<FileInfo>> {
         self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE project_id IS ?1 AND kept=1 ORDER BY created_at DESC, rowid DESC"))?.query_map([project], Self::file_row)?.collect()
+    }
+    /// Iris: arquivo já dividido em trechos.
+    pub fn indexed(&self, file: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM file_index WHERE file_id=?1)", [file], |r| r.get(0))
+    }
+    /// Troca os trechos de um arquivo (página opcional, texto).
+    pub fn index_file(&self, file: &str, chunks: &[(Option<u32>, String)]) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM file_chunks WHERE file_id=?1", [file])?;
+        for (ord, (page, text)) in chunks.iter().enumerate() {
+            tx.execute("INSERT INTO file_chunks(file_id,ord,page,text) VALUES(?1,?2,?3,?4)", params![file, ord as i64, page, text])?;
+        }
+        tx.execute("INSERT OR REPLACE INTO file_index VALUES(?1,?2)", params![file, chunks.len() as i64])?;
+        tx.commit()
+    }
+    /// Trechos que contêm as palavras da consulta FTS, dentro dos arquivos indicados.
+    pub fn search_chunks(&self, query: &str, files: &[String], limit: usize) -> rusqlite::Result<Vec<i64>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!("SELECT c.id FROM file_chunks_fts JOIN file_chunks c ON c.id=file_chunks_fts.rowid WHERE file_chunks_fts MATCH ?1 AND c.file_id IN ({}) ORDER BY bm25(file_chunks_fts) LIMIT {limit}", in_list(files.len(), 2));
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&query];
+        values.extend(files.iter().map(|f| f as &dyn rusqlite::ToSql));
+        self.conn.prepare(&sql)?.query_map(values.as_slice(), |r| r.get(0))?.collect()
+    }
+    pub fn chunks_without_vector(&self, model: &str, files: &[String], limit: usize) -> rusqlite::Result<Vec<(i64, String)>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!("SELECT id,text FROM file_chunks WHERE file_id IN ({}) AND NOT EXISTS(SELECT 1 FROM chunk_vectors WHERE chunk_id=file_chunks.id AND model_id=?1) ORDER BY id LIMIT {limit}", in_list(files.len(), 2));
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&model];
+        values.extend(files.iter().map(|f| f as &dyn rusqlite::ToSql));
+        self.conn.prepare(&sql)?.query_map(values.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+    }
+    pub fn set_chunk_vector(&self, chunk: i64, model: &str, vector: &[f32]) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO chunk_vectors VALUES(?1,?2,?3)", params![chunk, model, memory::encode(vector)])?;
+        Ok(())
+    }
+    pub fn chunk_vectors(&self, model: &str, files: &[String]) -> rusqlite::Result<Vec<(i64, Vec<f32>)>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!("SELECT v.chunk_id,v.vector FROM chunk_vectors v JOIN file_chunks c ON c.id=v.chunk_id WHERE v.model_id=?1 AND c.file_id IN ({})", in_list(files.len(), 2));
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&model];
+        values.extend(files.iter().map(|f| f as &dyn rusqlite::ToSql));
+        self.conn.prepare(&sql)?
+            .query_map(values.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|row| match row {
+                Ok((id, raw)) => memory::decode(&raw).map(|v| Ok((id, v))),
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+    /// Trechos na ordem pedida, com o nome do arquivo.
+    pub fn chunks_by_ids(&self, ids: &[i64]) -> rusqlite::Result<Vec<Chunk>> {
+        let mut out = Vec::new();
+        let mut statement = self.conn.prepare("SELECT c.id,c.file_id,f.name,c.page,c.text FROM file_chunks c JOIN files f ON f.id=c.file_id WHERE c.id=?1")?;
+        for id in ids {
+            if let Some(chunk) = statement.query_map([id], |r| Ok(Chunk { id: r.get(0)?, file_id: r.get(1)?, file_name: r.get(2)?, page: r.get(3)?, text: r.get(4)? }))?.next() {
+                out.push(chunk?);
+            }
+        }
+        Ok(out)
     }
     pub fn set_extracted(&self, id: &str, text: &str) -> rusqlite::Result<()> {
         self.conn.execute("UPDATE files SET extracted=?2 WHERE id=?1", params![id, text])?;
@@ -689,7 +784,7 @@ mod tests {
         assert!(db.context(&a.id, 10, 1).unwrap().is_empty());
         assert!(!db.consent(&a.id).unwrap());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 4);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), SCHEMA);
         std::fs::remove_file(path).unwrap();
     }
     #[test]
@@ -710,7 +805,7 @@ mod tests {
                 PRAGMA user_version=1;").unwrap();
         }
         let db = Store::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 4);
+        assert_eq!(db.version().unwrap(), SCHEMA);
         let backups: Vec<_> = std::fs::read_dir(root.join("backups")).unwrap().flatten().collect();
         assert_eq!(backups.len(), 1);
         let old = Connection::open(backups[0].path()).unwrap();
@@ -728,8 +823,36 @@ mod tests {
         db.set_memory_cursor("c", 0).unwrap();
         assert!(db.pending_extraction().unwrap().is_none() && db.extraction_range("c").unwrap().is_none());
         drop(db);
-        assert_eq!(Store::open(&path).unwrap().version().unwrap(), 4);
+        assert_eq!(Store::open(&path).unwrap().version().unwrap(), SCHEMA);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn iris_indexa_busca_no_escopo_e_apaga_com_o_arquivo() {
+        let path = std::env::temp_dir().join(format!("ayla-iris-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let file = |id: &str, name: &str| FileInfo { id: id.into(), name: name.into(), kind: Kind::Pdf, bytes: 1, created_at: 0, conversation_id: None, project_id: None, message_id: None, path: format!("files/{id}/{name}"), extracted: None };
+        db.insert_file(&file("a", "contrato.pdf"), "sha", true).unwrap();
+        db.insert_file(&file("b", "outro.pdf"), "sha", true).unwrap();
+        assert!(!db.indexed("a").unwrap());
+        db.index_file("a", &[(Some(1), "Partes e objeto".into()), (Some(3), "O prazo de entrega é 12 de março.".into())]).unwrap();
+        db.index_file("b", &[(None, "O prazo do outro documento é abril.".into())]).unwrap();
+        db.index_file("b", &[]).unwrap();
+        assert!(db.indexed("a").unwrap() && db.indexed("b").unwrap(), "sem texto também conta como indexado");
+        let only_a = vec!["a".to_string()];
+        let hits = db.search_chunks("\"prazo\"", &only_a, 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        let chunk = &db.chunks_by_ids(&hits).unwrap()[0];
+        assert_eq!((chunk.file_name.as_str(), chunk.page), ("contrato.pdf", Some(3)));
+        assert!(db.search_chunks("\"prazo\"", &["b".to_string()], 5).unwrap().is_empty(), "trechos antigos substituídos");
+        assert!(db.search_chunks("\"marco\"", &only_a, 5).unwrap().len() == 1, "sem acentos na busca");
+        assert_eq!(db.chunks_without_vector("emb", &only_a, 10).unwrap().len(), 2);
+        db.set_chunk_vector(chunk.id, "emb", &[1.0, 0.0]).unwrap();
+        assert_eq!(db.chunk_vectors("emb", &only_a).unwrap().len(), 1);
+        assert_eq!(db.chunks_without_vector("emb", &only_a, 10).unwrap().len(), 1);
+        db.delete_file("a").unwrap();
+        assert!(db.chunks_by_ids(&hits).unwrap().is_empty());
+        assert!(db.search_chunks("\"prazo\"", &only_a, 5).unwrap().is_empty() && !db.indexed("a").unwrap());
+        let _ = std::fs::remove_file(&path);
     }
     #[test]
     fn facts_support_editing_text_search_vectors_and_deletion() {
@@ -767,11 +890,11 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();
-        assert_eq!(db.version().unwrap(), 4);
+        assert_eq!(db.version().unwrap(), SCHEMA);
         assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(), 1, "backup antes de migrar");
         assert_eq!((db.conversations(None).unwrap().len(), db.facts(None).unwrap().len()), (1, 1));
 

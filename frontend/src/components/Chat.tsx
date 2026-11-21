@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
 import { asksForImage } from '../services/Intent';
 import { ArrowUpIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
@@ -29,7 +29,10 @@ const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds
 
 export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, onOpenSettings }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState(''); const [kind, setKind] = useState<Capability | 'auto'>('auto');
+  const [input, setInput] = useState(''); const [effort, setEffort] = useState<Effort>('');
+  // Neste computador, o esforço escolhe entre resposta direta (leve) e raciocínio (alto).
+  const kind: Capability | 'auto' = effort === 'low' ? 'text' : effort === 'high' ? 'reasoning' : 'auto';
+  const [cloudModel, setCloudModel] = useState(''); const [cloudModels, setCloudModels] = useState<{ id: string; name: string }[]>([]);
   const [model, setModel] = useState(''); const [attachments, setAttachments] = useState<FileInfo[]>([]);
   const [adding, setAdding] = useState(false); const [dragging, setDragging] = useState(false); const [status, setStatus] = useState('');
   /** Escolha explícita de criar imagem; `null` = seguir a frase do pedido. */
@@ -55,6 +58,14 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   const [localWords, setLocalWords] = useState<string[]>([]);
   useEffect(() => { void native<string[]>('organ_local_words').then(setLocalWords).catch(() => setLocalWords([])); }, [snapshot]);
   const organLocal = localWords.some(word => input.toLowerCase().includes(word));
+  const provider = snapshot.preferences.cloud_provider;
+  // Modelos da conta conectada, listados quando a resposta vai para a nuvem.
+  useEffect(() => {
+    if (!options || !provider || !(source === 'cloud' || mode === 'cloud_only')) return;
+    let alive = true;
+    void native<{ id: string; name: string }[]>('cloud_models', { provider }).then(list => { if (alive) setCloudModels(list); }).catch(() => { if (alive) setCloudModels([]); });
+    return () => { alive = false; };
+  }, [options, provider, source, mode]);
   const cloud = !organLocal && (source === 'cloud' || mode === 'cloud_only');
   const needsSetup = mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
   const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
@@ -201,7 +212,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     const message = text; if (spokenText === undefined) setInput('');
     const sent = attachments; setAttachments([]);
     setMessages(prev => [...prev, { role: 'user', content: message, complete: true, attachments: sent }, { role: 'assistant', content: '', complete: false }]);
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: source === 'cloud' };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: source === 'cloud', cloud_model: cloud ? cloudModel || null : null, effort: cloud ? effort || null : null };
     try {
       await nativeTask<void>('chat', { request }, event => {
         if (event.type === 'routing') setRouting(event.text || '');
@@ -209,6 +220,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
         if (event.type === 'memory_error') setError(`Não consegui atualizar a memória: ${event.text}`);
         if (event.type === 'status') setStatus(event.text || '');
+        if (event.type === 'sources' && event.files?.length) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; const known = last.sources || []; next[next.length - 1] = { ...last, sources: [...known, ...event.files!.filter(f => !known.some(k => k.id === f.id))] }; return next; });
         if (event.type === 'token' && event.text) setStatus('');
         if (event.type === 'token' && event.text) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; next[next.length - 1] = { ...last, content: last.content + event.text }; return next; });
       });
@@ -320,6 +332,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                 <div className="assistant-body">
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
+                  {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => <span key={source.id} className="file-chip"><FileIcon size={14} />{source.name}{source.date ? ` · ${source.date}` : ''}{source.pages.length ? ` · p. ${source.pages.join(', ')}` : ''}</span>)}</p> : null}
                   {!m.complete && m.content && !busy && <small className="incomplete">Resposta incompleta</small>}
                   {m.complete && m.content && <div className="message-actions"><button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button></div>}
                 </div>
@@ -332,12 +345,15 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         {error && <p className="chat-error" role="alert">{error}</p>}
         {options && <div className="response-options" id="response-options" role="group" aria-label="Ajustes desta resposta">
           {routing && <p role="status">Última resposta: {routing}</p>}
-          <label>Tipo de pedido<select value={kind} disabled={busy} onChange={e => { setKind(e.target.value as Capability | 'auto'); setModel(''); }}>
-            <option value="auto">Automático pelo pedido</option>
-            {(['text', 'reasoning', 'vision'] as Capability[]).map(k => <option key={k} value={k}>{labels[k]}</option>)}
+          <label>Onde responder<select value={mode === 'cloud_only' ? 'cloud' : source} disabled={busy || mode === 'local_only' || mode === 'cloud_only'} onChange={e => { setSource(e.target.value as 'local' | 'cloud'); setReviewed(false); setEffort(''); }}><option value="local">Neste computador</option><option value="cloud">Na nuvem{provider ? '' : ' · conecte uma conta'}</option></select></label>
+          {cloud
+            ? <label>Modelo da nuvem<select value={cloudModel} disabled={busy || !provider} onChange={e => setCloudModel(e.target.value)}><option value="">{snapshot.preferences.cloud_model ? `Padrão · ${snapshot.preferences.cloud_model}` : 'Escolha em Configurações › Nuvem'}</option>{cloudModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+            : <label>Modelo<select value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Escolha automática</option>{snapshot.models.filter(m => visual ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>}
+          <label>Esforço<select value={effort} disabled={busy} onChange={e => { setEffort(e.target.value as Effort); if (!cloud) setModel(''); }}>
+            <option value="">Automático</option><option value="low">{cloud ? 'Leve' : 'Leve · resposta direta'}</option><option value="medium">Médio</option><option value="high">{cloud ? 'Alto' : 'Alto · raciocínio'}</option>
           </select></label>
-          <label>Modelo<select value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Escolha automática</option>{snapshot.models.filter(m => visual ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
-          <label>Onde responder<select value={source} disabled={busy || mode === 'local_only' || mode === 'cloud_only'} onChange={e => { setSource(e.target.value as 'local' | 'cloud'); setReviewed(false); }}><option value="local">Neste computador</option><option value="cloud">Na nuvem</option></select></label>
+          {cloud && effort && <p className="row-hint">O esforço vale para modelos que raciocinam; outros podem recusar o pedido.</p>}
+          {mode === 'local_only' && <p className="row-hint">Nuvem desligada. <button type="button" className="link-button" onClick={() => onOpenSettings?.('nuvem')}>Ativar em Configurações › Nuvem</button></p>}
           {mode === 'per_conversation' && conversation && <label className="check"><input type="checkbox" checked={conversation.cloud_consent} disabled={busy} onChange={e => void consent(e.target.checked)} />Permitir nuvem nesta conversa, respeitando a privacidade de cada pedido</label>}
         </div>}
         {image && <div className="cloud-review" aria-label="Revisão do pedido de imagem">

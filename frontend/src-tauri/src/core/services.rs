@@ -2,6 +2,7 @@ use super::{
     cloud::{self, Api, Login, Secret},
     files::{self, Kind},
     hardware,
+    iris,
     memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
     notify,
@@ -177,6 +178,82 @@ impl Core {
         .await;
         result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
     }
+    /// Arquivos que a Iris consulta: os da conversa e, num projeto, os do projeto.
+    fn scope_files(&self, conversation: &str, skip: &[String]) -> Result<Vec<FileInfo>, String> {
+        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+        let project = db.conversation_project(conversation).map_err(|_| "Conversa não encontrada")?;
+        let mut list = db.conversation_files(conversation).unwrap_or_default();
+        if let Some(project) = project.as_deref() {
+            list.extend(db.project_files(Some(project)).unwrap_or_default());
+        }
+        let mut seen = std::collections::HashSet::new();
+        list.retain(|f| !skip.contains(&f.id) && seen.insert(f.id.clone()));
+        Ok(list)
+    }
+    /// Iris: fotos para comparar no tempo, pela data em que foram tiradas (EXIF; sem ela, a
+    /// data em que entraram na Ayla). Do período citado, até `files::MAX_IMAGES` espaçadas.
+    async fn iris_photos(&self, conversation: &str, message: &str, skip: &[String]) -> Vec<(FileInfo, i64)> {
+        let Ok(files) = self.scope_files(conversation, skip) else { return Vec::new() };
+        let root = self.root.clone();
+        let dated = tauri::async_runtime::spawn_blocking(move || {
+            files.into_iter()
+                .filter(|f| f.kind == Kind::Image)
+                .map(|f| { let date = iris::photo_date(&root.join(&f.path)).unwrap_or(f.created_at); (f, date) })
+                .collect::<Vec<_>>()
+        }).await.unwrap_or_default();
+        let mut chosen = iris::within_period(&dated, iris::period(message));
+        chosen.sort_by_key(|(f, date)| (*date, f.created_at));
+        iris::spread(&chosen, files::MAX_IMAGES)
+    }
+    /// Iris: trechos dos arquivos do projeto e da conversa mais relevantes para o pedido.
+    /// Divide e indexa o que ainda não foi indexado; busca por palavras sempre e, havendo modelo
+    /// de embeddings, também por significado. Anexos desta mensagem (`skip`) já vão inteiros.
+    async fn iris(&self, prefs: &Preferences, conversation: &str, message: &str, skip: &[String], cancel: &CancellationToken) -> Vec<store::Chunk> {
+        let result: Result<Vec<store::Chunk>, String> = async {
+            let files = self.scope_files(conversation, skip)?;
+            for file in &files {
+                if self.store.lock().map_err(|_| "Dados ocupados")?.indexed(&file.id).unwrap_or(true) {
+                    continue;
+                }
+                let (kind, path, extracted) = (file.kind, self.root.join(&file.path), file.extracted.clone());
+                let chunks = tauri::async_runtime::spawn_blocking(move || iris::file_chunks(kind, &path, extracted.as_deref())).await.unwrap_or_default();
+                let _ = self.store.lock().map_err(|_| "Dados ocupados")?.index_file(&file.id, &chunks);
+            }
+            let ids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let words: Vec<String> = match memory::fts_query(message) {
+                Some(query) => self.store.lock().map_err(|_| "Dados ocupados")?.search_chunks(&query, &ids, 20).unwrap_or_default().into_iter().map(|id| id.to_string()).collect(),
+                None => Vec::new(),
+            };
+            let mut hits: Vec<(String, f64)> = Vec::new();
+            if let Some(model) = self.memory_model(prefs) {
+                let pending = self.store.lock().map_err(|_| "Dados ocupados")?.chunks_without_vector(&model.id, &ids, iris::EMBED_PER_REQUEST).unwrap_or_default();
+                if !pending.is_empty() {
+                    let texts: Vec<String> = pending.iter().map(|(_, t)| memory::document_text(t)).collect();
+                    if let Ok(vectors) = self.runtime.embed_many(&model, prefs, &texts, cancel).await {
+                        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+                        for ((id, _), vector) in pending.iter().zip(vectors) {
+                            let _ = db.set_chunk_vector(*id, &model.id, &vector);
+                        }
+                    }
+                }
+                if let Ok(query) = self.runtime.embed(&model, prefs, &memory::query_text(message), cancel).await {
+                    hits = self.store.lock().map_err(|_| "Dados ocupados")?.chunk_vectors(&model.id, &ids).unwrap_or_default().into_iter()
+                        .filter_map(|(id, v)| memory::cosine(&query, &v).filter(|s| *s >= iris::SEMANTIC_MIN).map(|s| (id.to_string(), s)))
+                        .collect();
+                    hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    hits.truncate(20);
+                }
+            }
+            let chosen: Vec<i64> = memory::fuse(&hits, &words, iris::CONTEXT_CHUNKS).iter().filter_map(|id| id.parse().ok()).collect();
+            let chunks = self.store.lock().map_err(|_| "Dados ocupados")?.chunks_by_ids(&chosen).map_err(|_| "Falha ao consultar arquivos")?;
+            Ok(iris::within_budget(chunks))
+        }
+        .await;
+        result.unwrap_or_default()
+    }
     /// Extrai memórias das mensagens novas de uma conversa e as aplica. Numa conversa
     /// de projeto, compara e grava só no projeto: o que se aprende ali fica ali.
     async fn remember(&self, prefs: &Preferences, conversation: &str, origin: &str, cancel: &CancellationToken) -> Result<Vec<Fact>, String> {
@@ -196,7 +273,11 @@ impl Core {
             let probe = self.runtime.embed(&embedder, prefs, &memory::document_text(&said), cancel).await?;
             let related: Vec<Fact> = self.search(&embedder.id, &probe, &said, memory::RELATED_MIN, 10, scope)?.into_iter().map(|(f, _)| f).collect();
             let raw = self.runtime.complete_json(&chat, prefs, memory::extraction_request(&turns, &related), memory::extraction_schema(), cancel).await?;
-            let extraction = memory::parse_extraction(&raw, &related)?;
+            let mut extraction = memory::parse_extraction(&raw, &related)?;
+            // Automático: nada temporário (valores, "em aberto", "hoje"). Pedido explícito vale.
+            if origin != "explicit" {
+                extraction.remember.retain(|f| !memory::temporary(&f.content));
+            }
             let texts: Vec<String> = extraction.remember.iter().map(|f| memory::document_text(&f.content)).collect();
             let vectors = self.runtime.embed_many(&embedder, prefs, &texts, cancel).await?;
             if cancel.is_cancelled() {
@@ -744,6 +825,12 @@ pub struct ChatRequest {
     /// Arquivos anexados (ids devolvidos por `add_file`), no máximo 5.
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// Modelo da nuvem escolhido para esta resposta (vazio: o de Configurações › Nuvem).
+    #[serde(default)]
+    pub cloud_model: Option<String>,
+    /// Esforço de raciocínio na nuvem: "low", "medium" ou "high" (vazio: padrão da plataforma).
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
@@ -876,13 +963,25 @@ pub async fn chat(
             images.extend(prepared.images);
         }
         images.truncate(files::MAX_IMAGES);
-        // Arquivos de mensagens anteriores continuam disponíveis para perguntas seguintes.
-        if !use_cloud{
-            let earlier=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_files(&request.conversation).unwrap_or_default();
-            for file in earlier{if let Some(text)=file.extracted{if !text.trim().is_empty(){texts.push((file.name,file.kind,text));}}}
+        // Iris: comparar fotos no tempo. Só neste computador (fotos pessoais são sensíveis) e
+        // quando a mensagem não trouxe imagens próprias.
+        let mut photo_note=None;
+        if !use_cloud && images.is_empty() && iris::comparison_question(&request.message){
+            let photos=state.iris_photos(&request.conversation,&request.message,&request.attachments).await;
+            if photos.len()>=2{
+                let mut labels=Vec::new();let mut listed=Vec::new();
+                for (file,date) in &photos{
+                    let prepared=state.prepare_file(&prefs,file,&token,&mut |event:Value|{let _=events.send(event);}).await?;
+                    if let Some(path)=prepared.images.into_iter().next(){images.push(path);labels.push((file.name.clone(),*date));listed.push(json!({"id":file.id,"name":file.name,"pages":[],"date":iris::date_label(*date)}));}
+                }
+                if labels.len()>=2{photo_note=Some(iris::photos_block(&labels));let _=events.send(json!({"type":"sources","files":listed}));}
+                else{images.clear();}
+            }
         }
+        // Arquivos anteriores da conversa e os do projeto entram pela Iris (só os trechos relevantes).
         let lengths:Vec<usize>=texts.iter().map(|(_,_,t)|t.chars().count()).collect();
-        let blocks:Vec<String>=texts.iter().zip(files::budgets(&lengths,files::PROMPT_BUDGET)).filter(|(_,limit)|*limit>0).map(|((name,kind,text),limit)|files::prompt_block(name,*kind,text,limit)).collect();
+        let mut blocks:Vec<String>=texts.iter().zip(files::budgets(&lengths,files::PROMPT_BUDGET)).filter(|(_,limit)|*limit>0).map(|((name,kind,text),limit)|files::prompt_block(name,*kind,text,limit)).collect();
+        if let Some(note)=photo_note{blocks.push(note);}
         let models=state.models()?;let mut kind=if !images.is_empty(){Capability::Vision}else{request.capability.unwrap_or_else(||models::request_kind(&request.message,false))};
         if request.capability.is_none() && kind==Capability::Reasoning && !models.iter().any(|m|m.supports(kind)){kind=Capability::Text;}
         if images.is_empty(){if let Some(selected)=request.model.as_ref().and_then(|id|models.iter().find(|m|m.id==*id)){
@@ -909,6 +1008,8 @@ pub async fn chat(
             let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten().and_then(|id|state.store.lock().ok()?.project(&id).ok().flatten());
             if let Some(p)=&project{system.push_str(&project_block(p));}
             let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
+            let found=state.iris(&prefs,&request.conversation,&request.message,&request.attachments,&token).await;
+            if let Some(block)=iris::context_block(&found){system.push_str(&block);let _=events.send(json!({"type":"sources","files":iris::sources(&found)}));}
             match &finance{
                 Some(Ok(resumo))=>system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo))),
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
@@ -922,11 +1023,14 @@ pub async fn chat(
             metric_model = prefs.cloud_model.clone();
             if !gate.allowed{return Err(gate.reason);}
             if request.personality_preview.as_deref()!=Some(prefs.system_prompt()){return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into());}
-            if prefs.cloud_model.is_empty(){return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into());}
+            let cloud_model=request.cloud_model.as_deref().map(str::trim).filter(|m|!m.is_empty()&&m.len()<=200).unwrap_or(&prefs.cloud_model).to_string();
+            if cloud_model.is_empty(){return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into());}
+            metric_model = cloud_model.clone();
+            let effort=match request.effort.as_deref(){None|Some("")=>None,Some(e@("low"|"medium"|"high"))=>Some(e),Some(_)=>return Err("Esforço inválido".into())};
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
-            let outgoing=cloud::chat_request(api,&base,&secret,&prefs.cloud_model,prefs.system_prompt(),&request.message)?;
+            let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,prefs.system_prompt(),&request.message)?;
             cloud::stream(outgoing,api,&token,&mut report).await?;
         }else{
             // Sem modelo local, a pergunta sobre finanças recebe os números da Moneta diretamente.
