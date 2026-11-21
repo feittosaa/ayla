@@ -178,12 +178,24 @@ pub fn run() {
                     core::services::memory_tick(&handle).await;
                 }
             });
-            // Lembretes: confere ao abrir (os perdidos avisam como atrasados) e a cada 15 s.
+            // Athena: Git das notas (puxar ao abrir e intervalo do obsidian-git), conferido a cada minuto.
+            let notes = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let mut boot = true;
+                loop {
+                    core::services::athena_git_tick(&notes, boot).await;
+                    boot = false;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
+            // Lembretes: confere ao abrir (os perdidos avisam como atrasados) e a cada 2 s
+            // (consulta barata ao índice por horário), para avisos de segundos chegarem na hora.
             let reminders = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     core::services::reminder_tick(&reminders).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             });
             app.manage(core::organs::Organ::moneta(&directory));
@@ -253,6 +265,23 @@ pub fn run() {
             core::services::chat,
             core::services::cloud_references,
             core::services::reminders_list,
+            core::notify::notify_test,
+            core::services::athena_pick_folder,
+            core::services::athena_tree,
+            core::services::athena_add_vault,
+            core::services::athena_remove_vault,
+            core::services::athena_mkdir,
+            core::services::athena_backlinks,
+            core::services::athena_read,
+            core::services::athena_write,
+            core::services::athena_create,
+            core::services::athena_daily,
+            core::services::athena_trash,
+            core::services::athena_search,
+            core::services::athena_open_folder,
+            core::services::athena_open_obsidian,
+            core::services::athena_git_status,
+            core::services::athena_git_sync,
             core::services::reminder_delete,
             core::services::reminder_snooze,
             core::services::backup_data,

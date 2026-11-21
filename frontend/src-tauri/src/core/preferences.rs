@@ -45,6 +45,12 @@ pub struct Preferences {
     /// Notificações do sistema; arquivos anteriores recebem o padrão (todas ligadas).
     pub notifications: Notifications,
     pub desktop: DesktopPreferences,
+    /// Versões anteriores: uma pasta de notas escolhida. Agora vale como um cofre a mais.
+    pub athena_folder: String,
+    /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Ayla.
+    pub athena_vaults: Vec<String>,
+    /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
+    pub athena_git: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -114,6 +120,9 @@ impl Default for Preferences {
             voice: Some(true),
             notifications: Notifications::default(),
             desktop: DesktopPreferences::default(),
+            athena_folder: String::new(),
+            athena_vaults: Vec::new(),
+            athena_git: true,
         }
     }
 }
@@ -158,11 +167,24 @@ impl Preferences {
             75
         }
     }
+    /// Cofres da Athena, incluindo a pasta escolhida em versões anteriores.
+    pub fn vaults(&self) -> Vec<String> {
+        let mut out = self.athena_vaults.clone();
+        if !self.athena_folder.is_empty() && !out.contains(&self.athena_folder) {
+            out.insert(0, self.athena_folder.clone());
+        }
+        out
+    }
     pub fn validate(&self) -> io::Result<()> {
         if !hex_color(&self.desktop.panel_color) || !hex_color(&self.desktop.panel_accent)
             || self.desktop.panel_radius > 48 || self.desktop.panel_font.chars().count() > 100
             || self.desktop.panel_font.chars().any(char::is_control)
             || self.personality.chars().count() > 4000
+            || self.athena_folder.chars().count() > 4096
+            || self.athena_folder.chars().any(char::is_control)
+            || (!self.athena_folder.is_empty() && !std::path::Path::new(&self.athena_folder).is_absolute())
+            || self.athena_vaults.len() > 50
+            || self.athena_vaults.iter().any(|v| v.is_empty() || v.chars().count() > 4096 || v.chars().any(char::is_control) || !std::path::Path::new(v).is_absolute())
             || self.version != VERSION
             || self.percent() < 5
             || self.percent() > 90
