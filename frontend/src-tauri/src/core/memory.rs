@@ -145,6 +145,45 @@ pub fn context_block(facts: &[Fact]) -> Option<String> {
     ))
 }
 
+/// Memória mostrada na revisão de envio à nuvem e enviada junto, se a pessoa mantiver marcada.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Reference {
+    pub id: String,
+    pub content: String,
+}
+
+/// No máximo 5 referências por envio.
+pub const MAX_REFERENCES: usize = 5;
+
+/// Confere, no envio, que cada referência continua igual ao revisado, pública e visível nesta
+/// conversa (memória geral ou do mesmo projeto). Sem isso, nada é enviado.
+pub fn check_references(references: &[Reference], facts: &[Fact], project: Option<&str>) -> Result<(), String> {
+    if references.len() > MAX_REFERENCES {
+        return Err("Envie até 5 referências por pedido".into());
+    }
+    for reference in references {
+        let ok = facts.iter().any(|f| {
+            f.id == reference.id
+                && f.content == reference.content
+                && f.privacy == Privacy::Public
+                && (f.project_id.is_none() || f.project_id.as_deref() == project)
+        });
+        if !ok {
+            return Err("Uma referência mudou ou deixou de ser pública. Revise o envio de novo.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Bloco acrescentado às instruções enviadas à nuvem, só com as referências revisadas.
+pub fn reference_block(references: &[Reference]) -> Option<String> {
+    if references.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = references.iter().map(|r| format!("- {}", r.content)).collect();
+    Some(format!("\n\nInformações sobre o usuário que ele revisou para este pedido (use só se ajudarem):\n{}", lines.join("\n")))
+}
+
 /// Pedido explícito para lembrar ou esquecer: extrair logo após a resposta.
 pub fn explicit_command(message: &str) -> bool {
     let lower = message.to_lowercase();
@@ -265,6 +304,27 @@ mod tests {
     use super::*;
     fn fact(id: &str, content: &str) -> Fact {
         Fact { id: id.into(), content: content.into(), kind: "fato".into(), privacy: Privacy::Uncertain, origin: "auto".into(), conversation_id: None, created_at: 0, updated_at: 0, project_id: None }
+    }
+    #[test]
+    fn referencias_so_publicas_iguais_e_no_escopo() {
+        let mut public = fact("a", "O usuário prefere Python.");
+        public.privacy = Privacy::Public;
+        let mut other_project = public.clone();
+        other_project.id = "b".into();
+        other_project.project_id = Some("outro".into());
+        let uncertain = fact("c", "O usuário mora em Recife.");
+        let facts = vec![public.clone(), other_project, uncertain];
+        let r = |id: &str, content: &str| Reference { id: id.into(), content: content.into() };
+        assert!(check_references(&[r("a", "O usuário prefere Python.")], &facts, None).is_ok());
+        assert!(check_references(&[r("a", "O usuário prefere Python.")], &facts, Some("p")).is_ok(), "geral vale no projeto");
+        assert!(check_references(&[r("a", "editada")], &facts, None).is_err(), "mudou depois da revisão");
+        assert!(check_references(&[r("c", "O usuário mora em Recife.")], &facts, None).is_err(), "não pública");
+        assert!(check_references(&[r("b", "O usuário prefere Python.")], &facts, Some("p")).is_err(), "outro projeto");
+        assert!(check_references(&[r("x", "?")], &facts, None).is_err());
+        let many: Vec<Reference> = (0..6).map(|_| r("a", "O usuário prefere Python.")).collect();
+        assert!(check_references(&many, &facts, None).is_err());
+        assert!(reference_block(&[r("a", "O usuário prefere Python.")]).unwrap().ends_with("\n- O usuário prefere Python."));
+        assert!(reference_block(&[]).is_none());
     }
     #[test]
     fn memorias_temporarias_ficam_de_fora() {

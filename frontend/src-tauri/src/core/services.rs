@@ -3,6 +3,7 @@ use super::{
     files::{self, Kind},
     hardware,
     iris,
+    reminders,
     memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
     notify,
@@ -177,6 +178,20 @@ impl Core {
         }
         .await;
         result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
+    }
+    /// Memórias públicas relevantes ao pedido, para a revisão de envio à nuvem (até 5).
+    async fn references(&self, prefs: &Preferences, project: Option<&str>, message: &str, cancel: &CancellationToken) -> Vec<Fact> {
+        let mut facts = self.recall(prefs, message, project, cancel).await;
+        if facts.is_empty() {
+            // Sem modelo de memória: busca por palavras.
+            if let (Some(query), Ok(db)) = (memory::fts_query(message), self.store.lock()) {
+                let ids = db.search_text(&query, 10, Scope::visible(project)).unwrap_or_default();
+                facts = db.facts_by_ids(&ids).unwrap_or_default();
+            }
+        }
+        facts.retain(|f| f.privacy == Privacy::Public);
+        facts.truncate(memory::MAX_REFERENCES);
+        facts
     }
     /// Arquivos que a Iris consulta: os da conversa e, num projeto, os do projeto.
     fn scope_files(&self, conversation: &str, skip: &[String]) -> Result<Vec<FileInfo>, String> {
@@ -831,6 +846,9 @@ pub struct ChatRequest {
     /// Esforço de raciocínio na nuvem: "low", "medium" ou "high" (vazio: padrão da plataforma).
     #[serde(default)]
     pub effort: Option<String>,
+    /// Memórias públicas que a pessoa manteve marcadas na revisão de envio à nuvem.
+    #[serde(default)]
+    pub references: Vec<memory::Reference>,
 }
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
@@ -905,6 +923,17 @@ fn project_block(project: &store::Project) -> String {
     block
 }
 
+/// Referências sugeridas para a revisão de envio à nuvem (memórias públicas relevantes).
+#[tauri::command]
+pub async fn cloud_references(state: tauri::State<'_, Core>, project: Option<String>, message: String) -> Result<Vec<memory::Reference>, String> {
+    if message.trim().chars().count() < 3 || message.len() > 200_000 {
+        return Ok(Vec::new());
+    }
+    let prefs = state.prefs()?;
+    let facts = state.references(&prefs, project.as_deref(), &message, &CancellationToken::new()).await;
+    Ok(facts.into_iter().map(|f| memory::Reference { id: f.id, content: f.content }).collect())
+}
+
 #[tauri::command]
 pub async fn chat(
     app: tauri::AppHandle,
@@ -944,8 +973,31 @@ pub async fn chat(
     let mut recalled = 0usize;
     let mut result=async{
         let prefs=state.prefs()?;
+        // Lembretes: criados neste computador e confirmados com data e hora, sem passar pela nuvem.
+        if reminders::is_request(&request.message)&&request.attachments.is_empty(){
+            let now=reminders::now_local();
+            let mut parsed=reminders::parse(&request.message,now);
+            if parsed.is_none(){
+                if let Ok(model)=state.models().and_then(|m|models::choose(&m,Capability::Text,state.budget(&prefs),prefs.context_tokens,None)){
+                    let _=events.send(json!({"type":"status","text":"Entendendo o lembrete…"}));
+                    parsed=state.runtime.complete_json(&model,&prefs,reminders::model_request(&request.message,now),reminders::model_schema(),&token).await.ok().and_then(|raw|reminders::parse_model(&raw,now));
+                }
+            }
+            let reply=match parsed{
+                Some(p)=>{
+                    state.store.lock().map_err(|_|"Dados ocupados")?.add_reminder(&p.text,reminders::to_unix(p.when),p.repeat.as_str(),Some(&request.conversation)).map_err(|_|"Não foi possível guardar o lembrete")?;
+                    use tauri::Emitter;let _=app.emit("reminders-updated",());
+                    reminders::confirmation(&p,now)
+                }
+                None=>"Não entendi quando devo te lembrar. Diga, por exemplo: \"me lembra amanhã às 9h de ligar pro médico\" ou \"me lembra toda segunda às 7h de ir pra academia\".".to_string(),
+            };
+            metric_model="lembretes".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+            let _=events.send(json!({"type":"token","text":reply}));
+            return Ok(());
+        }
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
-        let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}",prefs.personality,request.message));
+        let referenced=request.references.iter().map(|r|r.content.as_str()).collect::<Vec<_>>().join("\n");
+        let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
         let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
         // Finanças: a Ayla consulta o resumo da Moneta. Esses dados ficam neste computador em
         // qualquer modo, então a resposta é local (com modelo, ou direta, sem modelo).
@@ -1030,7 +1082,17 @@ pub async fn chat(
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
-            let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,prefs.system_prompt(),&request.message)?;
+            // Referências: só memórias públicas, iguais ao revisado e do escopo desta conversa.
+            let mut instructions=prefs.system_prompt().to_string();
+            if !request.references.is_empty(){
+                let db=state.store.lock().map_err(|_|"Dados ocupados")?;
+                let project=db.conversation_project(&request.conversation).map_err(|_|"Conversa não encontrada")?;
+                let ids:Vec<String>=request.references.iter().map(|r|r.id.clone()).collect();
+                let facts=db.facts_by_ids(&ids).map_err(|_|"Falha ao consultar memórias")?;
+                memory::check_references(&request.references,&facts,project.as_deref())?;
+                if let Some(block)=memory::reference_block(&request.references){instructions.push_str(&block);}
+            }
+            let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
             cloud::stream(outgoing,api,&token,&mut report).await?;
         }else{
             // Sem modelo local, a pergunta sobre finanças recebe os números da Moneta diretamente.
@@ -1077,7 +1139,7 @@ pub async fn chat(
         }
     }
     // Pedido explícito ("lembre que…", "esqueça…"): processar já, sem esperar a pausa.
-    if result.is_ok() && memory::explicit_command(&request.message) {
+    if result.is_ok() && memory::explicit_command(&request.message) && !reminders::is_request(&request.message) {
         if let Ok(prefs) = state.prefs() {
             if prefs.memory_auto {
                 match state.remember(&prefs, &request.conversation, "explicit", &token).await {
@@ -1767,6 +1829,78 @@ pub fn memory_delete(state: tauri::State<'_, Core>, id: String) -> Result<(), St
 }
 
 /// Chamado periodicamente: extrai memórias de conversas paradas e completa vetores.
+/// Lembretes vencidos: avisa e, se repetem, avança para a próxima vez no futuro; senão, saem.
+/// Roda com a Ayla em segundo plano; os perdidos com o computador desligado avisam ao abrir.
+pub async fn reminder_tick(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    let Some(state) = app.try_state::<Core>() else { return };
+    let Ok(prefs) = state.prefs() else { return };
+    let now = reminders::to_unix(reminders::now_local());
+    let Ok(due) = state.store.lock().map(|db| db.reminders(Some(now)).unwrap_or_default()) else { return };
+    if due.is_empty() {
+        return;
+    }
+    for reminder in due {
+        notify::reminder(app, &prefs, &reminder.text, now - reminder.due > 180);
+        let repeat = reminders::Repeat::parse(&reminder.repeat);
+        let Ok(db) = state.store.lock() else { return };
+        if repeat == reminders::Repeat::None {
+            let _ = db.delete_reminder(&reminder.id);
+        } else {
+            let mut next = reminders::from_unix(reminder.due);
+            while reminders::to_unix(next) <= now {
+                next = reminders::next(next, repeat);
+            }
+            let _ = db.reschedule_reminder(&reminder.id, reminders::to_unix(next));
+        }
+    }
+    let _ = app.emit("reminders-updated", ());
+}
+
+#[derive(serde::Serialize)]
+pub struct ReminderView {
+    pub id: String,
+    pub text: String,
+    pub due: i64,
+    pub repeat: String,
+    /// "amanhã às 09:00 (todo dia)".
+    pub label: String,
+}
+
+#[tauri::command]
+pub fn reminders_list(state: tauri::State<'_, Core>) -> Result<Vec<ReminderView>, String> {
+    let now = reminders::now_local();
+    let list = state.store.lock().map_err(|_| "Dados ocupados")?.reminders(None).map_err(|_| "Falha ao consultar lembretes")?;
+    Ok(list.into_iter().map(|r| {
+        let when = reminders::from_unix(r.due);
+        let label = format!("{}{}", reminders::describe(when, now), reminders::repeat_label(reminders::Repeat::parse(&r.repeat), when));
+        ReminderView { id: r.id, text: r.text, due: r.due, repeat: r.repeat, label }
+    }).collect())
+}
+
+#[tauri::command]
+pub fn reminder_delete(app: tauri::AppHandle, state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    use tauri::Emitter;
+    state.store.lock().map_err(|_| "Dados ocupados")?.delete_reminder(&id).map_err(|_| "Falha ao cancelar o lembrete")?;
+    let _ = app.emit("reminders-updated", ());
+    Ok(())
+}
+
+/// Adia a próxima vez (a partir de agora, se já tiver passado).
+#[tauri::command]
+pub fn reminder_snooze(app: tauri::AppHandle, state: tauri::State<'_, Core>, id: String, minutes: i64) -> Result<(), String> {
+    use tauri::Emitter;
+    if !(1..=7 * 24 * 60).contains(&minutes) {
+        return Err("Adiamento inválido".into());
+    }
+    let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+    let current = db.reminders(None).map_err(|_| "Falha ao consultar lembretes")?.into_iter().find(|r| r.id == id).ok_or("Lembrete não encontrado")?;
+    let now = reminders::to_unix(reminders::now_local());
+    db.reschedule_reminder(&id, current.due.max(now) + minutes * 60).map_err(|_| "Falha ao adiar o lembrete")?;
+    let _ = app.emit("reminders-updated", ());
+    Ok(())
+}
+
 pub async fn memory_tick(app: &tauri::AppHandle) {
     use tauri::{Emitter, Manager};
     let Some(state) = app.try_state::<Core>() else { return };
