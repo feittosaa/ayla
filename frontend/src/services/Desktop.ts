@@ -9,7 +9,7 @@ export type Preferences = {
   resource_percent: number | null; usage_mode: UsageMode; cloud_provider: string; cloud_endpoint: string; cloud_model: string; cloud_asked: boolean; image_provider: string; image_model: string;
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
-  notifications: { reply: boolean; setup: boolean };
+  notifications: { reply: boolean; setup: boolean; reminders: boolean };
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
@@ -43,7 +43,9 @@ export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' 
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
 export type Effort = '' | 'low' | 'medium' | 'high';
-export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null };
+/** Memória pública que pode acompanhar um envio à nuvem, se continuar marcada na revisão. */
+export type Reference = { id: string; content: string };
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[] };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 

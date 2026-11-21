@@ -873,7 +873,12 @@ pub const FINANCE_WORDS: &[&str] = &[
 /// Palavras que fazem a conversa responder localmente com a Moneta (vazio sem a Moneta baixada).
 #[tauri::command]
 pub fn organ_local_words(organ: tauri::State<'_, Organ>) -> Vec<&'static str> {
-    if organ.installed() { FINANCE_WORDS.to_vec() } else { Vec::new() }
+    // Lembretes também são criados neste computador, em qualquer modo.
+    let mut words = super::reminders::WORDS.to_vec();
+    if organ.installed() {
+        words.extend_from_slice(FINANCE_WORDS);
+    }
+    words
 }
 
 /// Valor em centavos no formato brasileiro: "R$ 1.234,56", "USD 12,34".

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort, type Reference } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
 import { asksForImage } from '../services/Intent';
 import { ArrowUpIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
@@ -81,6 +81,17 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   // Criar imagem só quando a pessoa pede: botão ou frase explícita ("gere uma imagem de…").
   const asksImage = asksForImage(input);
   const image = (imageChoice ?? asksImage) && mode !== 'local_only';
+  // Referências: memórias públicas relevantes, listadas na revisão; só as marcadas vão junto.
+  const [references, setReferences] = useState<Reference[]>([]); const [dropped, setDropped] = useState<string[]>([]);
+  const reviewing = cloud && !image && input.trim().length >= 3;
+  useEffect(() => {
+    if (!reviewing) return;
+    let alive = true;
+    const timer = setTimeout(() => void native<Reference[]>('cloud_references', { project: project?.id ?? null, message: input }).then(list => { if (alive) setReferences(list); }).catch(() => { if (alive) setReferences([]); }), 600);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [reviewing, input, project?.id]);
+  const shownReferences = reviewing ? references : [];
+  const kept = shownReferences.filter(r => !dropped.includes(r.id));
   const imageProvider = snapshot.preferences.image_provider;
   const canSend = image
     ? !busy && !adding && listening === 'idle' && Boolean(input.trim()) && reviewed && Boolean(imageProvider && snapshot.preferences.image_model)
@@ -212,7 +223,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     const message = text; if (spokenText === undefined) setInput('');
     const sent = attachments; setAttachments([]);
     setMessages(prev => [...prev, { role: 'user', content: message, complete: true, attachments: sent }, { role: 'assistant', content: '', complete: false }]);
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: source === 'cloud', cloud_model: cloud ? cloudModel || null : null, effort: cloud ? effort || null : null };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: source === 'cloud', cloud_model: cloud ? cloudModel || null : null, effort: cloud ? effort || null : null, references: cloud ? kept : [] };
     try {
       await nativeTask<void>('chat', { request }, event => {
         if (event.type === 'routing') setRouting(event.text || '');
@@ -367,7 +378,11 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         {cloud && !image && <div className="cloud-review">
           <label>Privacidade do pedido<select value={sensitivity} disabled={busy} onChange={e => { setSensitivity(e.target.value as Sensitivity); setReviewed(false); }}><option value="uncertain">Ainda não verificada</option><option value="sensitive">Sensível · somente local</option><option value="public">Pública</option></select></label>
           <b>Personalidade que será enviada</b><pre>{snapshot.system_prompt}</pre><b>Seu pedido</b><pre>{input || 'Digite o pedido para revisar.'}</pre>
-          <p>Somente a personalidade acima e este pedido. Histórico, memórias e anexos não serão enviados.</p>
+          {shownReferences.length > 0 && <fieldset className="cloud-references"><legend>Referências que podem ir junto</legend>
+            {shownReferences.map(r => <label key={r.id} className="check"><input type="checkbox" checked={!dropped.includes(r.id)} disabled={busy} onChange={e => { setDropped(prev => e.target.checked ? prev.filter(id => id !== r.id) : [...prev, r.id]); setReviewed(false); }} />{r.content}</label>)}
+            <small>Só memórias marcadas como públicas e relacionadas ao pedido aparecem aqui.</small>
+          </fieldset>}
+          <p>{kept.length ? 'Somente a personalidade, este pedido e as referências marcadas acima.' : 'Somente a personalidade acima e este pedido.'} Histórico, outras memórias e anexos ficam neste computador.</p>
           <label className="check"><input type="checkbox" checked={reviewed} disabled={busy || sensitivity !== 'public'} onChange={e => setReviewed(e.target.checked)} />Revisei a personalidade e o pedido e confirmo que são públicos.</label>
         </div>}
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>

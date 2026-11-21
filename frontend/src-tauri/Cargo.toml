@@ -43,6 +43,8 @@ getrandom = "0.3"
 # Texto de PDFs anexados (MIT, Rust puro).
 pdf-extract = "0.12"
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+# Horário local dos lembretes e repetições (já presente na árvore do Tauri).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Data em que a foto foi tirada (EXIF), para a Iris comparar fotos ao longo do tempo (BSD-2, Rust puro).
 kamadak-exif = "0.6"
 

@@ -36,6 +36,15 @@ pub fn should_notify(event: Event, prefs: &Preferences, focused: bool) -> bool {
     !focused && event.enabled(prefs)
 }
 
+/// Lembrete na hora marcada: o texto é do próprio lembrete; avisa mesmo com a Ayla em foco.
+pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: bool) {
+    if !prefs.notifications.reminders {
+        return;
+    }
+    let title = if late { "Lembrete atrasado" } else { "Lembrete" };
+    let _ = app.notification().builder().title(title).body(text).show();
+}
+
 pub fn send(app: &tauri::AppHandle, prefs: &Preferences, event: Event) {
     let focused = app
         .webview_windows()
