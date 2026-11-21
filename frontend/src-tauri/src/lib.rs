@@ -115,7 +115,22 @@ fn allow_microphone(app: &tauri::App) {
 #[cfg(not(target_os = "linux"))]
 fn allow_microphone(_: &tauri::App) {}
 
+/// `ayla --instalar-moneta`: baixa a Moneta junto da Ayla (opção do `install.sh`), sem abrir janela.
+fn install_organ_cli() -> Option<i32> {
+    if std::env::args().nth(1).as_deref() != Some("--instalar-moneta") {
+        return None;
+    }
+    let organ = core::organs::Organ::moneta(&desktop::data_root());
+    Some(match organ.install(&|step| println!("{step}…")) {
+        Ok(()) => { println!("Moneta {} pronta. Ela aparece na lateral da Ayla.", organ.manifest.tag); 0 }
+        Err(error) => { eprintln!("{error}"); 1 }
+    })
+}
+
 pub fn run() {
+    if let Some(code) = install_organ_cli() {
+        std::process::exit(code);
+    }
     let initial = desktop::Launch::from_args();
     let (_instance, requests) = match desktop::register(initial) {
         Ok(Some(primary)) => primary,
@@ -125,11 +140,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Camada de compatibilidade da Moneta: a página dela aparece dentro da Ayla e cada pedido
+        // segue para o servidor local da Moneta com a chave de acesso, sem expô-la à página.
+        .register_asynchronous_uri_scheme_protocol(core::organs::SCHEME, |context, request, responder| {
+            use tauri::http::{Response, StatusCode};
+            let label = context.webview_label();
+            if label != "main" && label != core::organs::SEPARATE_WINDOW {
+                responder.respond(Response::builder().status(StatusCode::FORBIDDEN).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let organ = app.state::<core::organs::Organ>();
+                responder.respond(organ.forward(request).await);
+            });
+        })
         .setup(move |app| {
             let directory = std::env::var_os("AYLA_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
-            let core = Core::open(directory).map_err(io::Error::other)?;
+            let core = Core::open(directory.clone()).map_err(io::Error::other)?;
             let weak = std::sync::Arc::downgrade(&core.runtime);
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -148,6 +178,7 @@ pub fn run() {
                     core::services::memory_tick(&handle).await;
                 }
             });
+            app.manage(core::organs::Organ::moneta(&directory));
             app.manage(core);
             app.manage(ManagedBackend::default());
             app.manage(Mutex::new(desktop::View::default()));
@@ -215,7 +246,14 @@ pub fn run() {
             core::services::backup_data,
             core::services::semantic_memory,
             core::services::voice_task,
-            core::services::import_legacy
+            core::services::import_legacy,
+            core::organs::organ_status,
+            core::organs::organ_install,
+            core::organs::organ_start,
+            core::organs::organ_remove,
+            core::organs::organ_open_separate,
+            core::organs::organ_local_words,
+            core::version::app_version
         ])
         .build(tauri::generate_context!())
         .expect("Não foi possível iniciar a Ayla")
@@ -233,6 +271,12 @@ pub fn run() {
                 if let Some(core) = app.try_state::<Core>() {
                     core.shutdown();
                 }
+                // O contêiner da Moneta acompanha a Ayla; a versão separada continua como está.
+                if let Some(organ) = app.try_state::<core::organs::Organ>() {
+                    // No reinício, espera a Moneta gravar e sair antes de a nova Ayla subi-la de novo.
+                    organ.stop(desktop::restart_requested());
+                }
+                desktop::relaunch_if_requested();
                 if let Some(state) = app.try_state::<ManagedBackend>() {
                     if let Ok(mut backend) = state.0.lock() {
                         if let Some(backend) = backend.take() {

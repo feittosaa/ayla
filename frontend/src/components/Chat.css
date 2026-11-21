@@ -60,6 +60,8 @@
 .sidebar-footer { display: flex; flex-direction: column; gap: 6px; }
 .where { display: flex; align-items: center; gap: 10px; margin: 0; padding: 10px 12px; border-radius: 12px; background: var(--ayla-panel); color: var(--ayla-text-soft); font-size: 13px; line-height: 1.45; }
 .where svg { flex: none; }
+.app-version { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 6px 12px 0; border-top: 1px solid var(--ayla-border-soft); color: var(--ayla-text-faint); font-size: 12px; line-height: 1.5; }
+.app-shell .app-version .link-button { min-height: 0; padding: 0; border: 0; background: none; color: var(--ayla-accent); font-size: 12px; text-align: left; }
 .app-shell .sidebar-link { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border: 0; background: transparent; color: #b9bcc2; text-align: left; }
 .app-shell .sidebar-link:hover:not(:disabled) { background: var(--ayla-hover); border: 0; }
 

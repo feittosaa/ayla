@@ -51,7 +51,11 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   /** Conversa criada pelo envio em andamento: já está na tela, não recarregar. */
   const created = useRef<string | null>(null);
   const mode = snapshot.preferences.usage_mode;
-  const cloud = source === 'cloud' || mode === 'cloud_only';
+  // Pedidos sobre finanças usam a Moneta e respondem neste computador em qualquer modo (mesma lista do núcleo).
+  const [localWords, setLocalWords] = useState<string[]>([]);
+  useEffect(() => { void native<string[]>('organ_local_words').then(setLocalWords).catch(() => setLocalWords([])); }, [snapshot]);
+  const organLocal = localWords.some(word => input.toLowerCase().includes(word));
+  const cloud = !organLocal && (source === 'cloud' || mode === 'cloud_only');
   const needsSetup = mode !== 'cloud_only' && !snapshot.models.some(m => supports(m, 'text'));
   const suggested = snapshot.catalog.find(entry => entry.id === snapshot.recommended_model);
   const memoryEntry = snapshot.catalog.find(entry => entry.capabilities.includes('embedding'));
@@ -371,7 +375,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
               : <button type="submit" className="round-button accent" aria-label="Enviar" disabled={!canSend}><ArrowUpIcon size={18} /></button>}
           </div>
         </form>
-        <p className="composer-note">{image ? 'A imagem será criada na nuvem depois da sua revisão e ficará guardada nesta conversa.' : cloud ? (snapshot.preferences.cloud_provider === 'chatgpt' ? <>Usando o seu plano do ChatGPT, depois da sua revisão · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Esta resposta usará a nuvem depois da sua revisão.') : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
+        <p className="composer-note">{image ? 'A imagem será criada na nuvem depois da sua revisão e ficará guardada nesta conversa.' : cloud ? (snapshot.preferences.cloud_provider === 'chatgpt' ? <>Usando o seu plano do ChatGPT, depois da sua revisão · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Esta resposta usará a nuvem depois da sua revisão.') : organLocal ? 'Pergunta sobre finanças: a Ayla consulta a Moneta e responde neste computador.' : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
       </div>
     </main>
   </>;

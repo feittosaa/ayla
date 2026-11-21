@@ -27,10 +27,15 @@ fn xdg(var: &str, relative: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(relative))
 }
 
+/// Pasta de dados da Ayla, a mesma que o Tauri usa (`app_data_dir`).
+pub fn data_root() -> PathBuf {
+    std::env::var_os("AYLA_DATA_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share").join("dev.feit.ayla"))
+}
+
 // GApplication encaminha as ativações à instância dona do nome no D-Bus da sessão.
 pub fn register(launch: Launch) -> Result<Option<(gio::Application, mpsc::Receiver<Launch>)>, String> {
-    let root = std::env::var_os("AYLA_DATA_DIR").map(PathBuf::from)
-        .unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share").join("dev.feit.ayla"));
+    let root = data_root();
     if launch == Launch::Login && !PreferenceStore::new(&root).load().map_err(|e| e.to_string())?.desktop.autostart {
         return Ok(None);
     }
@@ -357,6 +362,21 @@ fn close(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Reinício pedido em Configurações: a Ayla encerra normalmente e abre de novo.
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn restart_requested() -> bool { RESTART.load(std::sync::atomic::Ordering::SeqCst) }
+
+/// Abre outra Ayla depois que este processo terminar (o nome na sessão D-Bus é de um processo só).
+pub fn relaunch_if_requested() {
+    if !RESTART.load(std::sync::atomic::Ordering::SeqCst) { return; }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let _ = std::process::Command::new("sh")
+        .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$0\"", &exe.to_string_lossy(), &std::process::id().to_string()])
+        .stdin(std::process::Stdio::null())
+        .spawn();
+}
+
 #[tauri::command]
 pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("Janela indisponível")?;
@@ -366,6 +386,7 @@ pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
         "hide" => close(&app, &window),
         "restore" => window.set_fullscreen(false).map_err(|e| e.to_string()),
         "quit" => { app.exit(0); Ok(()) }
+        "restart" => { RESTART.store(true, std::sync::atomic::Ordering::SeqCst); app.exit(0); Ok(()) }
         _ => Err("Ação de janela desconhecida".into()),
     }
 }
