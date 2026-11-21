@@ -254,3 +254,27 @@ label.group-row { cursor: pointer; }
 .markdown a.note-link { color: var(--ayla-accent); text-decoration: none; border-bottom: 1px dashed currentColor; cursor: pointer; }
 .athena-backlinks { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--ayla-border-soft); display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
 .athena-backlinks h2 { width: 100%; margin: 0 0 4px; font-size: 13px; color: var(--ayla-text-faint); font-weight: 600; }
+.confirm-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.confirm-question { color: var(--ayla-text-soft); }
+.app-shell .confirm-inline button { min-height: 30px; padding: 4px 10px; font-size: 13px; }
+
+/* Athena: tags, renomear, mover, editor */
+.athena-tags { display: flex; flex-direction: column; gap: 6px; }
+.athena-tags > .link-button { align-self: flex-start; font-size: 13px; color: var(--ayla-text-soft); }
+.tag-list { display: flex; flex-wrap: wrap; gap: 4px; max-height: 140px; overflow-y: auto; }
+.app-shell .tag-chip { min-height: 24px; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--ayla-panel); }
+.app-shell .tag-chip.active { border-color: var(--ayla-accent); color: var(--ayla-accent); }
+.tag-chip small { color: var(--ayla-text-faint); }
+.tree-filter { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-weight: 600; color: var(--ayla-accent); }
+.athena-heading h1 { cursor: text; }
+.app-shell .athena-rename { width: 100%; font-size: 20px; font-weight: 600; padding: 2px 6px; }
+.app-shell .athena-move { max-width: 200px; min-height: 34px; font-size: 13px; }
+.athena-edit { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.athena-toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+.app-shell .athena-toolbar button { min-height: 30px; min-width: 32px; padding: 2px 8px; font-size: 13px; }
+.link-suggest { position: absolute; top: 44px; right: 12px; z-index: 5; width: 280px; max-height: 260px; overflow-y: auto; margin: 0; padding: 4px; list-style: none; border: 1px solid var(--ayla-border); border-radius: 10px; background: var(--ayla-panel); box-shadow: 0 8px 24px #0008; }
+.app-shell .link-suggest button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding: 6px 8px; border: 0; background: none; text-align: left; font-size: 13px; }
+.app-shell .link-suggest button:hover { background: var(--ayla-hover); }
+.link-suggest small { color: var(--ayla-text-faint); font-size: 11px; }
+.markdown a.note-tag { color: var(--ayla-accent-soft); text-decoration: none; padding: 0 4px; border-radius: 6px; background: var(--ayla-accent-ring); cursor: pointer; }
+.markdown img.note-image { max-width: 100%; border-radius: 8px; }

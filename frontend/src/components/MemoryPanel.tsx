@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import Confirm from './Confirm';
 import { native, errorText, savePreferences, type Fact, type MemoryList, type Privacy, type Project, type Snapshot } from '../services/Desktop';
 import ModelSetup from './ModelSetup';
 
@@ -49,7 +50,7 @@ export default function MemoryPanel({ snapshot, refresh, project = null }: Props
           <div className="memory-actions">
             <select aria-label="Privacidade da memória" value={fact.privacy} disabled={busy} onChange={e => void save(fact, { privacy: e.target.value as Privacy })}>{Object.entries(privacyLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>
             {editing?.id !== fact.id && <button disabled={busy} onClick={() => setEditing({ id: fact.id, content: fact.content })}>Editar</button>}
-            <button disabled={busy} onClick={() => void act(() => native('memory_delete', { id: fact.id }))}>Apagar</button>
+            <Confirm disabled={busy} question="Apagar esta memória? A Ayla deixa de lembrar disso." confirm="Apagar" onConfirm={() => void act(() => native('memory_delete', { id: fact.id }))}>Apagar</Confirm>
           </div>
         </li>)}</ul>
       </div>

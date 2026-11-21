@@ -6,6 +6,7 @@ import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
 import Reminders from './components/Reminders';
+import Confirm from './components/Confirm';
 import Athena from './components/Athena';
 import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
@@ -265,7 +266,7 @@ export default function App() {
                   <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar no cofre do sistema</label>
                   <div className="row-actions">
                     <button disabled={saving || !key || !providerSaved} onClick={() => void saveKey()}>{remember ? 'Guardar chave no cofre' : 'Usar chave nesta sessão'}</button>
-                    <button disabled={saving || !providerSaved} onClick={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</button>
+                    <Confirm disabled={saving || !providerSaved} question="Esquecer a chave deste provedor neste computador?" confirm="Esquecer" onConfirm={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</Confirm>
                   </div>
                 </div>
                 <div className="advanced-block"><h3>Dados</h3>
