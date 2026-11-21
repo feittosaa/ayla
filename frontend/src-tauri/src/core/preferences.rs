@@ -78,10 +78,12 @@ pub struct Notifications {
     pub reply: bool,
     /// Preparo de modelos concluído ou com erro.
     pub setup: bool,
+    /// Lembretes na hora marcada (com o texto do lembrete, mesmo com a Ayla em foco).
+    pub reminders: bool,
 }
 impl Default for Notifications {
     fn default() -> Self {
-        Self { reply: true, setup: true }
+        Self { reply: true, setup: true, reminders: true }
     }
 }
 
@@ -332,7 +334,7 @@ mod tests {
         let migrated = store.load().unwrap();
         assert_eq!((migrated.version, migrated.context_tokens), (2, 8192));
         assert_eq!(migrated.personality, "breve");
-        assert_eq!(migrated.notifications, Notifications { reply: true, setup: true });
+        assert_eq!(migrated.notifications, Notifications { reply: true, setup: true, reminders: true });
         fs::write(&store.path, r#"{"version":1,"context_tokens":4096}"#).unwrap();
         assert_eq!(store.load().unwrap().context_tokens, 4096);
         // Carregar não reescreve o arquivo; a migração persiste no próximo salvamento.
