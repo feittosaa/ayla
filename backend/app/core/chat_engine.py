@@ -8,30 +8,42 @@ from app.core.persistent_memory import persistent_memory
 from app.core.prompt_builder import build_prompt
 from app.core.memory_manager import maybe_compress_memory
 from app.services.llm_service import llm_service
-
+from app.core.heuristic_classifier import HeuristicClassifier
 
 def chat_stream(user_message: str):
+    # O prompt recebe apenas o histórico anterior; a entrada atual aparece uma vez.
+    recent_messages = conversation_memory.get_messages()
     # 1️⃣ salva mensagem do usuário
     conversation_memory.add_user_message(user_message)
     persistent_memory.add_message("user", user_message)
 
     # 2️⃣ recupera memórias
-    recent_messages = conversation_memory.get_messages()
     summaries = persistent_memory.get_all_summaries()
 
     # 3️⃣ monta prompt final
-    prompt = build_prompt(
+    # prompt completo (só local)
+    local_prompt = build_prompt(
         user_message=user_message,
         recent_messages=recent_messages,
         memory_summaries=summaries,
     )
 
+    # prompt mínimo (cloud-safe)
+    cloud_prompt = user_message
+
     full_response = ""
 
     # 4️⃣ stream do modelo
-    for chunk in llm_service.stream(prompt):
+    private = HeuristicClassifier.is_private(user_message)
+
+    for chunk in llm_service.stream(
+        local_prompt=local_prompt,
+        cloud_prompt=cloud_prompt,
+        private=private,
+    ):
         full_response += chunk
         yield chunk
+
 
     # 5️⃣ salva resposta da Ayla
     conversation_memory.add_assistant_message(full_response)

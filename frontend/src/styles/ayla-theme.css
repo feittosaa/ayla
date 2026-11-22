@@ -1,18 +1,33 @@
+/* Foco: escuro neutro, laranja só como destaque, fonte do sistema (cara de app nativo). */
 :root {
-  /* 🌞 Cores principais */
-  --ayla-bg: #0f1117;
-  --ayla-panel: #171923;
-  --ayla-accent: #ff9f43; /* laranja solar */
+  color-scheme: dark;
+
+  /* Superfícies, do fundo para cima */
+  --ayla-bg: #111214;
+  --ayla-sidebar: #161719;
+  --ayla-panel: #1a1c1f;
+  --ayla-control: #1c1e22;
+  --ayla-hover: #24262b;
+  --ayla-selected: #24262b;
+
+  /* Bordas */
+  --ayla-border: #2b2e34;
+  --ayla-border-soft: #24262b;
+
+  /* Texto (contraste ≥ 4,5:1 sobre todas as superfícies) */
+  --ayla-text: #ececee;
+  --ayla-text-soft: #a1a4ab;
+  --ayla-text-faint: #8b8f97;
+  --ayla-disabled: #7d818a;
+
+  /* Destaque */
+  --ayla-accent: #ff9f43;
   --ayla-accent-soft: #ffb870;
+  --ayla-accent-ring: #2a2118;
+  --ayla-on-accent: #1d1206;
+  --ayla-error: #ffb4a2;
 
-  /* 🌸 Texto */
-  --ayla-text: #e6e6eb;
-  --ayla-text-soft: #a8a8b3;
-
-  /* 🌑 Bordas */
-  --ayla-border: #2a2d3a;
-
-  /* ✨ Fontes */
-  --ayla-font-main: 'Inter', system-ui, sans-serif;
-  --ayla-font-mono: 'JetBrains Mono', monospace;
+  /* Fontes do sistema: Adwaita/Cantarell no GNOME, Segoe UI no Windows */
+  --ayla-font-main: system-ui, -apple-system, 'Segoe UI', Cantarell, 'Noto Sans', Ubuntu, sans-serif;
+  --ayla-font-mono: ui-monospace, 'DejaVu Sans Mono', 'Cascadia Mono', monospace;
 }

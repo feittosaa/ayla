@@ -1,0 +1,15 @@
+{
+  "id": "moneta",
+  "name": "Moneta",
+  "description": "Finanças pessoais: contas, cartões, faturas e patrimônio, num banco local cifrado.",
+  "repository": "https://github.com/feittosaa/moneta.git",
+  "tag": "1.3.7",
+  "commit": "e4208dc6d633a46fc0083f88acce51dd7320e023",
+  "contract": 1,
+  "service": "moneta",
+  "port": 4174,
+  "compose": "compose.yaml",
+  "standalone": ".local/bin/moneta",
+  "standalone_port": 4173,
+  "standalone_service": "moneta"
+}

@@ -113,6 +113,8 @@ O **Iris** concentra capacidades relacionadas a imagens, documentos e contexto v
 
 A **Moneta** é o órgão financeiro da Ayla e um dos candidatos mais fortes a funcionar como produto independente.
 
+Repositório da Moneta: [github.com/feittosaa/moneta](https://github.com/feittosaa/moneta)
+
 Responsabilidades:
 
 - Contas
@@ -418,6 +420,21 @@ A IA pode ajudar a transformar os dados em narrativas e análises, mas os dados 
 - Atividade
 - Retrospectivas técnicas
 
+## Mercúrio — Comparação de preços
+
+O Mercúrio será responsável por encontrar e comparar ofertas de um mesmo produto em diferentes marketplaces, ajudando o usuário a identificar o melhor preço disponível.
+
+Possíveis responsabilidades:
+
+- Busca de produtos em lojas como Amazon, Shopee e Mercado Livre
+- Identificação e comparação de produtos equivalentes
+- Comparação de preços, frete e descontos
+- Histórico e acompanhamento de preços
+- Alertas para quedas de preço e ofertas desejadas
+- Recomendações baseadas no custo-benefício
+
+O objetivo é simplificar decisões de compra e ajudar o usuário a economizar, mantendo os dados de ofertas organizados na infraestrutura compartilhada da Ayla.
+
 ---
 
 # 11. Estado atual
@@ -436,7 +453,7 @@ A infraestrutura inicial da Ayla já possui:
 
 Os próximos passos devem priorizar **fundação arquitetural e performance**, antes de adicionar dezenas de novas capacidades.
 
-Consulte [`PIPELINE.md`](PIPELINE.md) para o planejamento de implementação.
+Consulte [`pipeline.md`](pipeline.md) para o planejamento de implementação.
 
 ---
 

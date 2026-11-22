@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Ayla",
+        "visible": false,
         "width": 420,
         "height": 640,
         "resizable": true,
@@ -27,13 +28,10 @@
     }
   },
   "bundle": {
-    "active": true,
-    "targets": "all",
+    "active": false,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
-    ],
-    "externalBin": ["bin/ayla-backend"],
-    "resources": ["bin/ayla-backend.exe"]
+    ]
   }
 }
