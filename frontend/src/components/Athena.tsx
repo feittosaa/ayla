@@ -66,7 +66,7 @@ function restore(): Workspace {
     const saved = JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null') as Workspace | null;
     if (!saved || !Array.isArray(saved.panes) || !saved.panes.length) return empty;
     const panes = saved.panes.slice(0, 2).map(p => {
-      const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string').map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: false }));
+      const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string').map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: !isAttachment(t.path) }));
       return { tabs, active: Math.min(Math.max(0, Number(p.active) || 0), Math.max(0, tabs.length - 1)) };
     });
     return { panes, focused: Math.min(Number(saved.focused) || 0, panes.length - 1), panel: !!saved.panel };
@@ -160,7 +160,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       let tabs = pane.tabs; let at: number;
       if (found >= 0) { at = found; if (options.edit) tabs = tabs.map((t, k) => k === found ? { ...t, editing: true } : t); }
       else {
-        const tab: Tab = { root, path, pinned: false, editing: !!options.edit };
+        const tab: Tab = { root, path, pinned: false, editing: !isAttachment(path) };
         const current = pane.tabs[pane.active];
         if (!current || options.newTab || current.pinned) { at = current ? pane.active + 1 : 0; tabs = [...tabs.slice(0, at), tab, ...tabs.slice(at)]; }
         else { at = pane.active; tabs = tabs.map((t, k) => k === at ? tab : t); }
@@ -204,7 +204,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     setFocus(root); expand(root, path);
     setWorkspace(ws => {
       let list = ws.panes.map(p => ({ ...p, tabs: [...p.tabs] }));
-      let tab: Tab = { root, path, pinned: false, editing: false };
+      let tab: Tab = { root, path, pinned: false, editing: !isAttachment(path) };
       if (from && list[from.pane]?.tabs[from.at]) {
         const source = list[from.pane];
         tab = source.tabs[from.at]; source.tabs.splice(from.at, 1);

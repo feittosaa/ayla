@@ -31,20 +31,44 @@ export function wikiToMarkdown(text: string) {
   ).join('');
 }
 
+export function imageWidth(title?: string) {
+  return /^(\d+(?:x\d+)?)$/.exec(title ?? '')?.[1] ?? / \[largura=(\d+)\]$/.exec(title ?? '')?.[1];
+}
+
+export function resizedImage(original: string, src: string, alt: string, title: string | undefined, width: number) {
+  const wiki = /^!\[\[([^|\]]+)(?:\|[^\]]*)?\]\]$/.exec(original);
+  if (wiki) return `![[${wiki[1]}|${width}]]`;
+  const label = alt.replace(/[\\[\]]/g, '\\$&');
+  const caption = title && !/^\d+(?:x\d+)?$/.test(title) ? title.replace(/ \[largura=\d+\]$/, '') : '';
+  const nextTitle = (caption ? `${caption} [largura=${width}]` : String(width)).replace(/[\\"]/g, '\\$&');
+  return `![${label}](<${src.replace(/[<>]/g, char => encodeURIComponent(char))}> "${nextTitle}")`;
+}
+
 export type Property = { key: string; values: string[] };
-export type Banner = { target: string; y: number };
+export type Banner = { target: string; y: number; height?: number };
 export type Frontmatter = { properties: Property[]; banner: Banner | null; body: string };
 
 const unquote = (value: string) => value.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+const frontmatterBlock = /^(---[ \t]*(\r?\n))([\s\S]*?)(^---[ \t]*(?:\r?\n|$))/m;
+
+export function changeBanner(text: string, key: 'banner_height' | 'banner_y', value: number) {
+  const block = frontmatterBlock.exec(text);
+  if (!block || block.index !== 0) return text;
+  const [, opening, newline, properties, closing] = block;
+  const field = new RegExp(`^${key}:[^\\r\\n]*`, 'm');
+  const line = `${key}: ${key === 'banner_y' ? value / 100 : value}`;
+  const updated = field.test(properties) ? properties.replace(field, line) : properties + line + newline;
+  return opening + updated + closing + text.slice(block[0].length);
+}
 
 /** Propriedades do Obsidian (frontmatter YAML no início da nota): `chave: valor`, listas
  * (`- item` ou `[a, b]`). O banner segue o make-md/Banners: `banner` (caminho, [[imagem]] ou
  * ![[imagem]]) e `banner_y` (0–100, ou 0–1). Endereços da web não viram banner. */
 export function frontmatter(text: string): Frontmatter {
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
-  if (!match) return { properties: [], banner: null, body: text };
+  const match = frontmatterBlock.exec(text);
+  if (!match || match.index !== 0) return { properties: [], banner: null, body: text };
   const properties: Property[] = [];
-  for (const line of match[1].split(/\r?\n/)) {
+  for (const line of match[3].split(/\r?\n/)) {
     const item = /^\s+-\s*(.*)$/.exec(line);
     if (item && properties.length) { const value = unquote(item[1]); if (value) properties[properties.length - 1].values.push(value); continue; }
     const pair = /^([^\s:#][^:]*):\s*(.*)$/.exec(line);
@@ -57,6 +81,10 @@ export function frontmatter(text: string): Frontmatter {
   const target = value('banner').replace(/^!?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$/, '$1').trim();
   let y = Number.parseFloat(value('banner_y'));
   if (!Number.isFinite(y)) y = 50; else if (y <= 1) y *= 100;
-  const banner = target && !/^[a-z]+:\/\//i.test(target) ? { target, y: Math.min(100, Math.max(0, y)) } : null;
-  return { properties: properties.filter(p => !['banner', 'banner_y', 'banner_x', 'banner_icon', 'banner_lock'].includes(p.key)), banner, body: text.slice(match[0].length) };
+  const height = Number.parseInt(value('banner_height'), 10);
+  const banner = target && !/^[a-z]+:\/\//i.test(target) ? {
+    target, y: Math.min(100, Math.max(0, y)),
+    ...(Number.isFinite(height) ? { height: Math.min(600, Math.max(80, height)) } : {}),
+  } : null;
+  return { properties: properties.filter(p => !['banner', 'banner_y', 'banner_height', 'banner_x', 'banner_icon', 'banner_lock'].includes(p.key)), banner, body: text.slice(match[0].length) };
 }

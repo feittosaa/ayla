@@ -202,7 +202,7 @@ impl Core {
         }
         if let Ok(projects) = self.store.lock().map(|db| db.projects().unwrap_or_default()) {
             for project in projects {
-                out.push(AthenaRoot { id: format!("project:{}", project.id), kind: "project", name: project.name, path: self.root.join("projetos-notas").join(&project.id), available: true });
+                out.push(AthenaRoot { id: project_root_id(&project.id), kind: "project", name: project.name, path: self.root.join("projetos-notas").join(&project.id), available: true });
             }
         }
         out
@@ -214,6 +214,8 @@ impl Core {
         let mut items: Vec<(i64, Value)> = Vec::new();
         for (file, role, conversation, project) in stored {
             let Some(mime) = stored_mime(&file) else { continue };
+            let root = project.as_ref().map(|(id, _)| project_root_id(id));
+            let project = project.map(|(_, name)| name);
             let (source, place) = match role.as_deref() {
                 Some("assistant") => ("gerada", conversation.clone().unwrap_or_else(|| "Conversa".into())),
                 Some(_) => ("chat", conversation.clone().unwrap_or_else(|| "Conversa".into())),
@@ -223,7 +225,7 @@ impl Core {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(file.created_at, |d| d.as_secs() as i64);
             items.push((modified, json!({
                 "key": format!("arquivo:{}", file.id), "kind": kind_of_mime(mime), "name": file.name, "source": source, "place": place,
-                "project": project, "added": file.created_at, "date": modified, "bytes": file.bytes, "file": file.id, "conversation": file.conversation_id,
+                "project": project, "root": root, "added": file.created_at, "date": modified, "bytes": file.bytes, "file": file.id, "conversation": file.conversation_id,
             })));
         }
         Ok(items)
@@ -1157,6 +1159,10 @@ pub struct AthenaRoot {
     pub available: bool,
 }
 
+fn project_root_id(id: &str) -> String {
+    format!("project:{id}")
+}
+
 /// Árvore da Athena: cada raiz com as pastas e as notas, e os cofres do Obsidian ainda não abertos.
 #[tauri::command]
 pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String> {
@@ -1228,6 +1234,46 @@ pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: Stri
 pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
     athena::write(&dir, &path, &content, expected)
+}
+
+#[tauri::command]
+pub async fn athena_paste_image(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, before: String, after: String, expected: i64, data: String) -> Result<Value, String> {
+    use tauri::Emitter;
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        if data.len() > (athena::MAX_ATTACHMENT as usize).div_ceil(3) * 4 {
+            return Err("A imagem passa de 15 MB".into());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Imagem inválida")?;
+        athena::paste_image(&dir, &path, &before, &after, expected, &bytes)
+    }).await.map_err(|_| "Falha ao colar a imagem")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(json!({"embed": result.0, "modified": result.1}))
+}
+
+#[tauri::command]
+pub async fn athena_add_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64) -> Result<Option<Value>, String> {
+    use std::io::Read;
+    use tauri::Emitter;
+    use tauri_plugin_dialog::DialogExt;
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let picker = app.clone();
+    let selected = crate::desktop::panel_dialog(&app, move || {
+        picker.dialog().file().add_filter("Imagens", &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "avif"])
+            .blocking_pick_file().and_then(|file| file.into_path().ok())
+    }).await?;
+    let Some(selected) = selected else { return Ok(None) };
+    let (content, modified) = tauri::async_runtime::spawn_blocking(move || {
+        let file = fs::File::open(selected).map_err(|_| "Não foi possível abrir a imagem")?;
+        if !file.metadata().map_err(|_| "Não foi possível ler a imagem")?.is_file() {
+            return Err("Selecione um arquivo de imagem".to_string());
+        }
+        let mut bytes = Vec::new();
+        file.take(athena::MAX_ATTACHMENT + 1).read_to_end(&mut bytes).map_err(|_| "Não foi possível ler a imagem")?;
+        athena::add_banner(&dir, &path, &content, expected, &bytes)
+    }).await.map_err(|_| "Falha ao adicionar o banner")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(Some(json!({"content": content, "modified": modified})))
 }
 
 /// Nota nova numa pasta da raiz (vazia = raiz).
@@ -1593,6 +1639,10 @@ pub fn iris_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tauri
 /// do mais recente ao mais antigo, com o tipo e a origem de cada um.
 #[tauri::command]
 pub async fn iris_library(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    iris_library_for(&state).await
+}
+
+async fn iris_library_for(state: &Core) -> Result<Value, String> {
     let prefs = state.prefs()?;
     let mut roots: Vec<AthenaRoot> = state.athena_roots(&prefs).into_iter().filter(|r| r.available).collect();
     for dir in prefs.system_folders() {
@@ -1604,16 +1654,24 @@ pub async fn iris_library(state: tauri::State<'_, Core>) -> Result<Value, String
             name: dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy().into_owned(), path: dir });
     }
     let mut items = state.iris_stored()?;
-    let (athena, folders) = tauri::async_runtime::spawn_blocking(move || {
+    let projects_with_media: std::collections::HashSet<String> = items.iter()
+        .filter_map(|(_, item)| item["root"].as_str().map(str::to_owned))
+        .collect();
+    let (scanned, folders, athena_roots) = tauri::async_runtime::spawn_blocking(move || {
         let mut folders = Vec::new();
+        let mut athena_roots = Vec::new();
         let mut out = Vec::new();
         for root in roots {
             let computer = root.kind == "computer";
-            let entries = if computer {
-                let (files, dirs) = if root.available { athena::scan_attachments(&root.path, None) } else { Default::default() };
-                folders.push(json!({"id": root.id, "path": root.path, "name": root.name, "available": root.available, "folders": dirs}));
-                files
-            } else { athena::attachments(&root.path) };
+            let limit = (!computer).then_some(athena::MAX_NOTES);
+            let (entries, dirs) = if root.available { athena::scan_attachments(&root.path, limit) } else { Default::default() };
+            let has_media = !entries.is_empty() || projects_with_media.contains(&root.id);
+            let tree = json!({"id": root.id, "path": root.path, "name": root.name, "available": root.available, "folders": dirs, "hasMedia": has_media});
+            if computer {
+                folders.push(tree);
+            } else if has_media {
+                athena_roots.push(tree);
+            }
             for found in entries {
                 let Some(mime) = athena::attachment_mime(std::path::Path::new(&found.path)) else { continue };
                 let folder = found.path.rsplit_once('/').map(|(f, _)| f.to_string()).unwrap_or_default();
@@ -1624,11 +1682,11 @@ pub async fn iris_library(state: tauri::State<'_, Core>) -> Result<Value, String
                 })));
             }
         }
-        (out, folders)
+        (out, folders, athena_roots)
     }).await.map_err(|_| "Falha ao ler os cofres")?;
-    items.extend(athena);
+    items.extend(scanned);
     items.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(json!({"items": items.into_iter().map(|(_, item)| item).collect::<Vec<_>>(), "roots": folders}))
+    Ok(json!({"items": items.into_iter().map(|(_, item)| item).collect::<Vec<_>>(), "roots": folders, "athenaRoots": athena_roots}))
 }
 
 fn kind_of_mime(mime: &str) -> &'static str {
@@ -3182,7 +3240,9 @@ mod tests {
         let core = Core::open(tmp.join("ayla")).unwrap();
         let dir = tmp.join("Imagens");
         fs::create_dir_all(dir.join("férias/2026")).unwrap();
-        for name in ["foto.JPG", "férias/video.mp4", "férias/2026/doc.pdf", "notas.txt"] {
+        fs::create_dir_all(dir.join("férias/2026/Notas")).unwrap();
+        fs::create_dir_all(dir.join("cofre/Mapas")).unwrap();
+        for name in ["foto.JPG", "férias/video.mp4", "férias/2026/doc.pdf", "férias/2026/Notas/Resumo.md", "cofre/Mapas/mapa.png", "notas.txt"] {
             fs::write(dir.join(name), b"original").unwrap();
         }
         #[cfg(unix)]
@@ -3193,8 +3253,8 @@ mod tests {
         assert!(linked_media_path(&hidden, &iris_root_id(&hidden), "foto.jpg").is_none());
         assert!(linked_media_path(&dir, &iris_root_id(&dir), ".oculta/album/foto.jpg").is_none());
         let (listed, folders) = athena::scan_attachments(&dir, None);
-        assert_eq!(folders, ["férias", "férias/2026"]);
-        assert_eq!(listed.len(), 3);
+        assert_eq!(folders, ["cofre", "cofre/Mapas", "férias", "férias/2026"]);
+        assert_eq!(listed.len(), 4);
         let id = iris_root_id(&dir);
         let relative = "férias/2026/doc.pdf";
         let mut prefs = core.prefs().unwrap();
@@ -3242,6 +3302,49 @@ mod tests {
         assert!(find(&pending.id).is_none(), "anexo não enviado fica de fora");
         assert!(find(&text.id).is_none(), "texto não é mídia");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn iris_groups_project_conversations_and_athena_media_in_the_same_root() {
+        let root = std::env::temp_dir().join(format!("ayla-iris-project-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let (first, second, empty, chat) = {
+            let db = core.store.lock().unwrap();
+            let first = db.create_project("Campanha", "").unwrap();
+            let second = db.create_project("Campanha", "").unwrap();
+            let empty = db.create_project("Sem mídias", "").unwrap();
+            let chat = db.create_conversation("Conversa do projeto", Some(&first.id)).unwrap();
+            (first, second, empty, chat)
+        };
+        let first_root = project_root_id(&first.id);
+        let second_root = project_root_id(&second.id);
+        let empty_root = project_root_id(&empty.id);
+        let prefs = core.prefs().unwrap();
+        let project_dir = core.athena_path(&prefs, &first_root).unwrap();
+        let folder = athena::mkdir(&project_dir, "", "Mapas").unwrap();
+        let png = b"\x89PNG\r\n\x1a\n0000000000";
+        fs::write(project_dir.join(&folder).join("mapa.png"), png).unwrap();
+        let add = |name: &str, project, kept| core.store_file(name, |dest|
+            fs::write(dest, png).map(|_| png.len() as u64).map_err(|e| e.to_string()), project, kept).unwrap();
+        // A conversa define o projeto mesmo quando o anexo foi preparado sem essa associação.
+        let sent = add("chat.png", None, false);
+        let second_file = add("outro.png", Some(second.id.clone()), true);
+        core.store.lock().unwrap().save_turn(&chat.id, "olha", "pronto", true, &[sent.id], &[], None).unwrap();
+
+        let library = tauri::async_runtime::block_on(iris_library_for(&core)).unwrap();
+        let roots = library["athenaRoots"].as_array().unwrap();
+        let get_root = |id: &str| roots.iter().find(|root| root["id"] == id);
+        assert_eq!(get_root(&first_root).unwrap()["folders"], json!(["Mapas"]));
+        assert_eq!(get_root(&second_root).unwrap()["folders"], json!([]));
+        assert!(get_root(&empty_root).is_none());
+        let items = library["items"].as_array().unwrap();
+        let in_project: Vec<_> = items.iter().filter(|item| item["root"] == first_root).collect();
+        assert_eq!(in_project.len(), 2);
+        assert!(in_project.iter().any(|item| item["source"] == "chat" && item["name"] == "chat.png"));
+        assert!(in_project.iter().any(|item| item["source"] == "athena" && item["path"] == "Mapas/mapa.png"));
+        assert!(items.iter().any(|item| item["file"] == second_file.id && item["root"] == second_root));
+        drop(core);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

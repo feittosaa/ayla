@@ -310,6 +310,8 @@ pub fn run() {
             core::services::athena_attachment,
             core::services::athena_read,
             core::services::athena_write,
+            core::services::athena_paste_image,
+            core::services::athena_add_banner,
             core::services::athena_create,
             core::services::athena_daily,
             core::services::athena_trash,

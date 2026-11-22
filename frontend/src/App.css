@@ -305,10 +305,23 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .note-mode .icon-button { width: 32px; height: 30px; min-height: 30px; border-radius: calc(7px * var(--ayla-round, 1)); }
 .app-shell .note-mode .icon-button.active { background: var(--ayla-hover); color: var(--ayla-accent); }
 .note-scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.note-banner { height: 200px; overflow: hidden; border-bottom: 1px solid var(--ayla-border-soft); }
+.note-banner { position: relative; height: 200px; overflow: hidden; border-bottom: 1px solid var(--ayla-border-soft); }
 .note-banner img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.app-shell .note-banner-adjust { position: absolute; inset: 0; width: 100%; border: 0; border-radius: 0; background: transparent; color: transparent; }
+.app-shell .note-banner-adjust:hover:not(:disabled), .app-shell .note-banner-adjust:focus-visible, .app-shell .note-banner-adjust[aria-expanded="true"] { background: #0006; color: white; }
+.app-shell .note-banner-adjust:first-child { color: var(--ayla-text-soft); }
+.app-shell .note-banner-resize { position: absolute; inset: auto 0 0; width: 100%; min-height: 0; height: 12px; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: ns-resize; touch-action: none; }
+.app-shell .note-banner-resize:hover:not(:disabled), .app-shell .note-banner-resize:focus-visible { background: var(--ayla-accent); opacity: .65; }
+.note-banner-margin { box-sizing: border-box; min-height: 48px; max-width: 1080px; margin: 0 auto; padding: 6px 48px; }
+.note-banner-margin > button { opacity: 0; }
+.note-banner-margin:hover > button, .note-banner-margin:focus-within > button { opacity: 1; }
+@media (hover: none) { .note-banner-margin > button { opacity: 1; } }
+.note-banner-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 8px 24px; border-bottom: 1px solid var(--ayla-border-soft); }
+.note-banner-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.note-banner-controls output { font-variant-numeric: tabular-nums; min-width: 6ch; }
 .note-page { max-width: 1080px; margin: 0 auto; padding: 36px 48px 80px; line-height: 1.7; font-size: 15.5px; }
-.note-banner + .note-page { padding-top: 28px; }
+.note-banner-region + .note-page { padding-top: 28px; }
+.note-banner-margin + .note-page { padding-top: 0; }
 .note-title { margin: 0 0 18px; font-size: 32px; line-height: 1.2; font-weight: 700; letter-spacing: -0.01em; color: var(--ayla-text); overflow-wrap: anywhere; cursor: text; }
 .app-shell .note-page input.athena-rename { width: 100%; margin: 0 0 18px; padding: 0 4px; min-height: 0; font-size: 32px; line-height: 1.2; font-weight: 700; border: 0; border-bottom: 1px solid var(--ayla-accent); border-radius: 0; background: transparent; }
 .note-properties { margin: 0 0 22px; padding: 0 0 14px; border-bottom: 1px solid var(--ayla-border-soft); display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
@@ -318,11 +331,32 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .property-chip { padding: 1px 8px; border-radius: calc(6px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text-soft); overflow-wrap: anywhere; }
 .property-empty { color: var(--ayla-text-faint); font-style: italic; }
 .note-page .markdown h1 { font-size: 26px; } .note-page .markdown h2 { font-size: 21px; } .note-page .markdown h3 { font-size: 18px; }
+.note-page .markdown > p + p { margin-top: 1.7em; }
 .athena-edit { display: flex; flex-direction: column; gap: 8px; }
+.athena-visual-editor { min-width: 0; }
+.athena-visual-editor .cm-editor { min-height: 320px; color: var(--ayla-text); }
+.athena-visual-editor .cm-editor.cm-focused { outline: none; }
+.athena-visual-editor .cm-scroller { font: inherit; }
+.athena-visual-editor .cm-content { padding: 0 0 24px; caret-color: var(--ayla-text); }
+.athena-visual-editor .cm-line { padding: 0; }
+.athena-visual-editor .cm-placeholder { color: var(--ayla-text-faint); }
+.athena-visual-editor .athena-heading { font-size: 18px; font-weight: 700; }
+.athena-visual-editor .athena-heading-1 { font-size: 26px; }
+.athena-visual-editor .athena-heading-2 { font-size: 21px; }
+.athena-strong { font-weight: 700; }
+.athena-emphasis { font-style: italic; }
+.athena-strike { text-decoration: line-through; }
+.athena-visual-editor .athena-code { font-family: monospace; background: var(--ayla-hover); }
+.athena-visual-editor .athena-quote { color: var(--ayla-text-soft); }
+.note-resizable-image { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.note-page .markdown .note-resizable-image img.note-image { margin: 0; cursor: default; }
+.app-shell .note-resize-handle { position: absolute; top: 0; bottom: 0; width: 12px; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: ew-resize; touch-action: none; }
+.note-resize-handle[data-side="-1"] { left: 0; }
+.note-resize-handle[data-side="1"] { right: 0; }
+.app-shell .note-resize-handle:hover:not(:disabled), .app-shell .note-resize-handle:focus-visible { background: var(--ayla-accent); opacity: .65; }
 .athena-toolbar { position: sticky; top: 0; z-index: 4; display: flex; gap: 4px; flex-wrap: wrap; padding: 6px 0; background: var(--ayla-bg); }
 .link-suggest { position: absolute; top: calc(100% + 2px); right: 0; z-index: 5; width: 280px; max-height: 260px; overflow-y: auto; margin: 0; padding: 4px; list-style: none; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); box-shadow: 0 8px 24px #0008; }
-.app-shell .note-page textarea.athena-editor { width: 100%; min-height: 320px; overflow: hidden; resize: none; padding: 0; border: 0; border-radius: 0; background: transparent; font-family: inherit; font-size: 15.5px; line-height: 1.7; box-shadow: none; }
-.app-shell .note-page textarea.athena-editor:focus { outline: none; box-shadow: none; }
+
 /* Dica ao passar o mouse sobre ícones. */
 [data-tip] { position: relative; }
 [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 30; padding: 4px 8px; border-radius: calc(6px * var(--ayla-round, 1)); background: #000e; color: #f2f2f3; font-size: 12px; font-weight: 500; white-space: nowrap; pointer-events: none; }
@@ -447,7 +481,10 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-source small, .iris-system-row > small { color: var(--ayla-text-faint); font-size: 12px; }
 .iris-main > .app-error { margin: 12px 24px 0; }
 .iris-sidebar { overflow-y: auto; }
+.iris-folder > .iris-source { width: 100%; }
 .iris-folder nav { margin-top: 4px; }
+.iris-empty-roots { margin: 4px 8px 0; color: var(--ayla-text-soft); font-size: 13px; }
+.iris-empty-roots summary { padding: 5px 0; cursor: pointer; }
 .iris-action-row { display: flex; align-items: center; min-width: 0; }
 .iris-system-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
 .iris-system-row > .iris-source { grid-area: 1 / 1 / 2 / -1; }

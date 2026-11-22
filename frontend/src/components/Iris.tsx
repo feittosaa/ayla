@@ -9,15 +9,15 @@ import BrandMark from './BrandMark';
 
 type Kind = 'image' | 'video' | 'pdf';
 type Source = 'athena' | 'chat' | 'gerada' | 'arquivos' | 'computer';
-type SystemRoot = { id: string; path: string; name: string; folders: string[]; available: boolean };
+type LibraryRoot = { id: string; path: string; name: string; folders: string[]; available: boolean; hasMedia: boolean };
 type FolderDrop = { target: string; after: boolean };
 type FolderSelection = { root: string; path: string };
 type Item = {
   key: string; kind: Kind; name: string; source: Source; place: string; date: number; added?: number | null; bytes: number;
   /** Arquivo guardado na Ayla (anexo do chat, imagem gerada ou adicionado direto). */
   file?: string;
-  /** Arquivo de uma raiz da Athena (cofre, notas ou projeto). */
-  root?: string; path?: string;
+  /** Raiz de navegação. Nos arquivos de conversa, aponta para o projeto da conversa. */
+  root?: string | null; path?: string;
 };
 
 const kinds: { id: Kind; label: string; empty: string }[] = [
@@ -29,6 +29,10 @@ const sources: { id: Source | 'all'; label: string }[] = [
   { id: 'all', label: 'Tudo' }, { id: 'athena', label: 'Athena' }, { id: 'chat', label: 'Chat' }, { id: 'gerada', label: 'Geradas' }, { id: 'arquivos', label: 'Arquivos' },
 ];
 const sourceLabel: Record<Source, string> = { computer: 'Sistema', athena: 'Athena', chat: 'Anexo do chat', gerada: 'Gerada pela Ayla', arquivos: 'Arquivos' };
+function itemLocation(item: Item) {
+  const label = sourceLabel[item.source];
+  return item.place === label || item.place.startsWith(label + ' / ') ? item.place : `${label} · ${item.place}`;
+}
 const orders = {
   'modified-desc': 'Alteração · recentes primeiro', 'modified-asc': 'Alteração · antigas primeiro',
   'added-desc': 'Adição · recentes primeiro', 'added-asc': 'Adição · antigas primeiro',
@@ -85,10 +89,9 @@ function Thumb({ item }: { item: Item }) {
   return <img src={url(item, true) + '&v=' + item.date + '-' + item.bytes} alt="" decoding="async" onError={() => setFailed(true)} />;
 }
 
-function SystemFolder({ root, selected, selectFolder, changing, changeFolder, reorder, drop }: {
-  root: SystemRoot; selected: FolderSelection | null; selectFolder: (selection: FolderSelection) => void;
-  reorder?: React.ReactNode; drop?: FolderDrop;
-  changing: boolean; changeFolder: (disconnect: boolean, root: string) => void;
+function LibraryFolder({ root, selected, selectFolder, actions, drop }: {
+  root: LibraryRoot; selected: FolderSelection | null; selectFolder: (selection: FolderSelection) => void;
+  actions?: React.ReactNode; drop?: FolderDrop;
 }) {
   const [expanded, setExpanded] = useState(false);
   const directories = useMemo(() => {
@@ -114,15 +117,11 @@ function SystemFolder({ root, selected, selectFolder, changing, changeFolder, re
   }
 
   return <nav aria-label={root.path}>
-    <div className="iris-action-row iris-root-row" data-root-id={root.id} data-drop={drop && (drop.after ? 'after' : 'before')}>
+    <div className="iris-action-row iris-root-row" data-root-id={actions ? root.id : undefined} data-drop={drop && (drop.after ? 'after' : 'before')}>
       {root.available && directories.has('') && <button type="button" className="iris-caret" aria-expanded={expanded}
         aria-label={`Subpastas de ${root.name}`} onClick={() => setExpanded(value => !value)}>▸</button>}
       <button className="iris-dir" title={root.path} aria-pressed={selected?.root === root.id && !selected.path} onClick={() => selectFolder({ root: root.id, path: '' })}>{root.name}</button>
-      <div className="iris-row-actions">
-        {reorder}
-        <button type="button" className="icon-button tip-end" data-tip="Trocar pasta" aria-label="Trocar pasta" disabled={changing} onClick={() => changeFolder(false, root.id)}><RefreshIcon size={15} /></button>
-        <button type="button" className="icon-button tip-end" data-tip="Desconectar" aria-label="Desconectar" disabled={changing} onClick={() => changeFolder(true, root.id)}><CloseIcon size={15} /></button>
-      </div>
+      {actions && <div className="iris-row-actions">{actions}</div>}
     </div>
     {root.available ? <div className="iris-dir-children" hidden={!expanded}>{directoryTree('')}</div> : <p role="status">Pasta indisponível</p>}
   </nav>;
@@ -131,7 +130,7 @@ function SystemFolder({ root, selected, selectFolder, changing, changeFolder, re
 /** Iris: as imagens, vídeos e PDFs da Ayla num lugar só — dos cofres e notas da Athena, os
  * anexos enviados no chat, as imagens que a Ayla gerou e os arquivos adicionados direto. */
 export default function Iris({ active }: { active: boolean }) {
-  const [library, setLibrary] = useState<{ items: Item[]; roots: SystemRoot[] } | null>(null);
+  const [library, setLibrary] = useState<{ items: Item[]; roots: LibraryRoot[]; athenaRoots: LibraryRoot[] } | null>(null);
   const items = library?.items ?? null;
   const [tileSize, setTileSize] = useState(() => {
     const saved = Number(localStorage.getItem('ayla-iris-zoom'));
@@ -176,8 +175,9 @@ export default function Iris({ active }: { active: boolean }) {
     return native<NonNullable<typeof library>>('iris_library').then(result => {
       if (request.current !== id) return;
       setSelection(selected => {
-        const root = result.roots.find(r => r.id === selected?.root);
-        if (!root || !selected) return null;
+        if (!selected) return null;
+        const root = result.roots.find(r => r.id === selected.root) ?? result.athenaRoots.find(r => r.id === selected.root);
+        if (!root?.hasMedia) return null;
         return selected.path && !root.folders.includes(selected.path) ? { root: root.id, path: '' } : selected;
       });
       setLibrary(result); setError('');
@@ -223,9 +223,9 @@ export default function Iris({ active }: { active: boolean }) {
     return () => { void stop.then(off => off()); };
   }, [active, load]);
 
-  const scopedItems = useMemo(() => (items ?? []).filter(item =>
-    (source === 'all' || item.source === source) &&
-    (source !== 'computer' || !selection || (item.root === selection.root && (!selection.path || item.path?.startsWith(selection.path + '/'))))
+  const scopedItems = useMemo(() => (items ?? []).filter(item => selection
+    ? item.root === selection.root && (!selection.path || item.path?.startsWith(selection.path + '/'))
+    : source === 'all' || item.source === source
   ), [items, source, selection]);
   const counts = useMemo(() => {
     const out: Record<Kind, number> = { image: 0, video: 0, pdf: 0 };
@@ -306,11 +306,17 @@ export default function Iris({ active }: { active: boolean }) {
   }
   const choose = (next: Kind) => { setKind(next); setShown(PAGE); };
 
-  function selectFolder(folder: FolderSelection) {
+  function selectFolder(next: 'athena' | 'computer', folder: FolderSelection) {
     setSelection(folder);
-    setSource('computer');
+    setSource(next);
     setShown(PAGE);
   }
+  const systemRoots = library?.roots.filter(root => root.hasMedia) ?? [];
+  const emptySystemRoots = library?.roots.filter(root => !root.hasMedia) ?? [];
+  const systemFolderActions = (root: LibraryRoot) => <>
+    <button type="button" className="icon-button tip-end" data-tip="Trocar pasta" aria-label="Trocar pasta" disabled={changing} onClick={() => changeFolder(false, root.id)}><RefreshIcon size={15} /></button>
+    <button type="button" className="icon-button tip-end" data-tip="Desconectar" aria-label="Desconectar" disabled={changing} onClick={() => changeFolder(true, root.id)}><CloseIcon size={15} /></button>
+  </>;
   // Mesmo esqueleto da Athena: barra lateral (marca, busca, origem) e, à direita, a barra
   // superior com os tipos de arquivo no lugar das abas.
   return <div className="chat-layout iris">
@@ -319,7 +325,17 @@ export default function Iris({ active }: { active: boolean }) {
       <input className="organ-search" type="search" value={query} placeholder="Buscar pelo nome ou lugar" aria-label="Buscar arquivos" onChange={e => { setQuery(e.target.value); setShown(PAGE); }} />
       <div className="iris-sources" role="group" aria-label="Origem">
         <p className="sidebar-label">Origem</p>
-        {sources.map(s => (s.id === 'all' || s.id === source || perSource[s.id]) ? <button key={s.id} className={source === s.id ? 'iris-source active' : 'iris-source'} aria-pressed={source === s.id} onClick={() => { setSource(s.id); setSelection(null); setShown(PAGE); }}><span>{s.label}</span><small>{perSource[s.id] ?? 0}</small></button> : null)}
+        {sources.map(s => {
+          const hasAthenaRoots = s.id === 'athena' && !!library?.athenaRoots.length;
+          if (s.id !== 'all' && s.id !== source && !perSource[s.id] && !hasAthenaRoots) return null;
+          const button = <button key={s.id} className={source === s.id ? 'iris-source active' : 'iris-source'} aria-pressed={source === s.id} onClick={() => { setSource(s.id); setSelection(null); setShown(PAGE); }}><span>{s.label}</span><small>{perSource[s.id] ?? 0}</small></button>;
+          if (s.id !== 'athena') return button;
+          return <section key={s.id} className="iris-folder" aria-label={s.label}>
+            {button}
+            {active && library?.athenaRoots.map(root => <LibraryFolder key={root.id} root={root} selected={selection}
+              selectFolder={folder => selectFolder('athena', folder)} />)}
+          </section>;
+        })}
         <section className="iris-folder" aria-label="Sistema">
           <div className="iris-action-row iris-system-row">
             <button className={source === 'computer' ? 'iris-source active' : 'iris-source'} aria-pressed={source === 'computer'}
@@ -330,31 +346,41 @@ export default function Iris({ active }: { active: boolean }) {
             </div>
             <small id="iris-system-count">{perSource.computer ?? 0}</small>
           </div>
-          {active && library?.roots.map((root, index, roots) => <SystemFolder key={root.id} root={root} selected={selection}
-            selectFolder={selectFolder} changing={changing} changeFolder={changeFolder} drop={drop?.target === root.id ? drop : undefined}
-            reorder={roots.length > 1 && <button type="button" className="icon-button iris-grip tip-end"
-              aria-label={`Reordenar ${root.name}`} data-tip="Arraste ou use as setas ↑ ↓" disabled={changing}
-              onKeyDown={event => {
-                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-                event.preventDefault();
-                const after = event.key === 'ArrowDown';
-                const neighbor = roots[index + (after ? 1 : -1)];
-                if (neighbor) void moveFolder(root.id, { target: neighbor.id, after });
-              }}
-              onPointerDown={event => {
-                if (event.button !== 0) return;
-                dragging.current = root.id;
-                event.currentTarget.setPointerCapture(event.pointerId);
-              }}
-              onPointerMove={event => { if (dragging.current === root.id) setDrop(dropAt(event)); }}
-              onPointerUp={event => {
-                if (dragging.current !== root.id) return;
-                const placement = dropAt(event);
-                dragging.current = null;
-                setDrop(undefined);
-                if (placement) void moveFolder(root.id, placement);
-              }}
-              onLostPointerCapture={() => { dragging.current = null; setDrop(undefined); }}><span aria-hidden="true">⠿</span></button>} />)}
+          {active && systemRoots.map((root, index, roots) => <LibraryFolder key={root.id} root={root} selected={selection}
+            selectFolder={folder => selectFolder('computer', folder)} drop={drop?.target === root.id ? drop : undefined}
+            actions={<>
+              {roots.length > 1 && <button type="button" className="icon-button iris-grip tip-end"
+                aria-label={`Reordenar ${root.name}`} data-tip="Arraste ou use as setas ↑ ↓" disabled={changing}
+                onKeyDown={event => {
+                  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+                  event.preventDefault();
+                  const after = event.key === 'ArrowDown';
+                  const neighbor = roots[index + (after ? 1 : -1)];
+                  if (neighbor) void moveFolder(root.id, { target: neighbor.id, after });
+                }}
+                onPointerDown={event => {
+                  if (event.button !== 0) return;
+                  dragging.current = root.id;
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }}
+                onPointerMove={event => { if (dragging.current === root.id) setDrop(dropAt(event)); }}
+                onPointerUp={event => {
+                  if (dragging.current !== root.id) return;
+                  const placement = dropAt(event);
+                  dragging.current = null;
+                  setDrop(undefined);
+                  if (placement) void moveFolder(root.id, placement);
+                }}
+                onLostPointerCapture={() => { dragging.current = null; setDrop(undefined); }}><span aria-hidden="true">⠿</span></button>}
+              {systemFolderActions(root)}
+            </>} />)}
+          {active && emptySystemRoots.length > 0 && <details className="iris-empty-roots">
+            <summary>Gerenciar outras pastas</summary>
+            {emptySystemRoots.map(root => <div key={root.id} className="iris-action-row">
+              <span className="iris-dir" title={root.path}>{root.name}</span>
+              <div className="iris-row-actions">{systemFolderActions(root)}</div>
+            </div>)}
+          </details>}
         </section>
       </div>
     </aside>}
@@ -379,9 +405,9 @@ export default function Iris({ active }: { active: boolean }) {
             {groups.map(group => <section key={group.label} className="iris-month" aria-label={group.label}>
               {group.label && <h2>{group.label}</h2>}
               <div className="iris-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${tileSize}px), 1fr))` }}>
-                {group.items.map(item => <button key={item.key} className={`iris-card ${item.kind}`} title={`${item.name}\n${sourceLabel[item.source]} · ${item.place}`} onClick={() => setOpen(item.key)}>
+                {group.items.map(item => <button key={item.key} className={`iris-card ${item.kind}`} title={`${item.name}\n${itemLocation(item)}`} onClick={() => setOpen(item.key)}>
                   <span className="iris-thumb"><Thumb key={`${item.date}-${item.bytes}`} item={item} /></span>
-                  <span className="iris-caption"><b>{item.name}</b><small>{sourceLabel[item.source]} · {item.place}</small></span>
+                  <span className="iris-caption"><b>{item.name}</b><small>{itemLocation(item)}</small></span>
                 </button>)}
               </div>
             </section>)}
@@ -391,7 +417,7 @@ export default function Iris({ active }: { active: boolean }) {
     </section>
     {current && <div className="iris-viewer" role="dialog" aria-modal="true" aria-label={current.name} onClick={() => { if (!confirmTrash) closeViewer(); }}>
       <header className="iris-viewer-bar" onClick={e => e.stopPropagation()}>
-        <span className="iris-viewer-title"><b>{current.name}</b><small>{sourceLabel[current.source]} · {current.place} · {day(current.date)} · {size(current.bytes)}</small></span>
+        <span className="iris-viewer-title"><b>{current.name}</b><small>{itemLocation(current)} · {day(current.date)} · {size(current.bytes)}</small></span>
         <span className="iris-viewer-count">{index + 1} de {visible.length}</span>
         <button className="icon-button" data-tip="Abrir no visualizador do sistema" aria-label="Abrir no visualizador do sistema" onClick={() => system(current)}><ExpandIcon size={17} /></button>
         {current.kind === 'image' && <button className="icon-button tip-end" data-tip="Excluir imagem" aria-label="Excluir imagem"

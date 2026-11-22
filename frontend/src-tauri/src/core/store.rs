@@ -473,15 +473,21 @@ impl Store {
     /// Iris: imagens, GIFs, vídeos e PDFs guardados (anexos enviados, imagens geradas pelo chat
     /// e arquivos adicionados direto), com a origem: quem enviou, a conversa e o projeto.
     /// Anexos ainda na caixa de mensagem (não enviados) ficam de fora.
-    pub fn media_files(&self) -> rusqlite::Result<Vec<(FileInfo, Option<String>, Option<String>, Option<String>)>> {
+    pub fn media_files(&self) -> rusqlite::Result<Vec<(FileInfo, Option<String>, Option<String>, Option<(String, String)>)>> {
         let columns = FILE_COLUMNS.split(',').map(|c| format!("f.{c}")).collect::<Vec<_>>().join(",");
         self.conn
-            .prepare(&format!("SELECT {columns}, m.role, c.title, p.name FROM files f
+            .prepare(&format!("SELECT {columns}, m.role, c.title, p.id, p.name FROM files f
                 LEFT JOIN messages m ON m.id=f.message_id LEFT JOIN conversations c ON c.id=f.conversation_id
-                LEFT JOIN projects p ON p.id=f.project_id
+                LEFT JOIN projects p ON p.id=CASE WHEN c.id IS NOT NULL THEN c.project_id ELSE f.project_id END
                 WHERE f.kind IN ('image','gif','video','pdf') AND (f.message_id IS NOT NULL OR f.kept=1)
                 ORDER BY f.created_at DESC, f.rowid DESC"))?
-            .query_map([], |r| Ok((Self::file_row(r)?, r.get(10)?, r.get(11)?, r.get(12)?)))?
+            .query_map([], |row| {
+                let project = match row.get::<_, Option<String>>(12)? {
+                    Some(id) => Some((id, row.get(13)?)),
+                    None => None,
+                };
+                Ok((Self::file_row(row)?, row.get(10)?, row.get(11)?, project))
+            })?
             .collect()
     }
     /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.

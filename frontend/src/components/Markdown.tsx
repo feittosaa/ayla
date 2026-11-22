@@ -1,11 +1,29 @@
 import { useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { native } from '../services/Desktop';
+import type { Parent } from 'unist';
+import { errorText, native } from '../services/Desktop';
 import MediaView from './MediaView';
 import ZoomImage from './ZoomImage';
-import { TAG, WIKI, isAttachment, wikiToMarkdown } from '../services/Wiki';
+import { TAG, WIKI, imageWidth, isAttachment, wikiToMarkdown } from '../services/Wiki';
 import { mediaKind, mediaUrl, type MediaRef } from '../services/Media';
+
+/** As quebras simples da nota também são visíveis no editor da Athena. */
+function noteLineBreaks() {
+  function splitLines(parent: Parent) {
+    parent.children = parent.children.flatMap(child => {
+      if ('children' in child && Array.isArray(child.children)) splitLines(child as Parent);
+      if (child.type !== 'text' || !('value' in child) || typeof child.value !== 'string') return [child];
+      const lines = child.value.split(/\r\n|\r|\n/);
+      if (lines.length === 1) return [child];
+      return lines.flatMap((value, index) => [
+        ...(index ? [{ type: 'break' }] : []),
+        ...(value ? [{ type: 'text', value }] : []),
+      ]);
+    });
+  }
+  return splitLines;
+}
 
 /** Anexo de uma nota (imagem, vídeo ou PDF), pelo serviço de mídia comum à Iris. Imagens ficam
  * no texto (com o tamanho de `![[x|300]]`); vídeo e PDF usam o leitor de mídia. */
@@ -29,21 +47,25 @@ type Props = {
   media?: (target: string) => MediaRef;
   /** Abre um anexo numa aba (clique na imagem ou em [[arquivo.pdf]]). */
   onAttachment?: (target: string) => void;
+  onWebError?: (message: string) => void;
 };
 
 /** Links da web abrem no navegador do sistema (só http/https). Imagens remotas nunca são carregadas
  * (evita rastreamento), só o texto alternativo; imagens anexadas às notas vêm da pasta da nota. */
-export default function Markdown({ text, onNoteLink, onTag, media, onAttachment }: Props) {
+export default function Markdown({ text, onNoteLink, onTag, media, onAttachment, onWebError }: Props) {
+  const source = onNoteLink ? wikiToMarkdown(text) : text;
   const relative = (src: string) => !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('//') && !src.startsWith('#');
   const components: Components = {
     a: ({ href, children }) => {
       const internal = href?.startsWith(WIKI) || href?.startsWith(TAG);
-      return <a href={href} title={href?.startsWith(WIKI) ? decodeURIComponent(href.slice(WIKI.length)) : href} className={href?.startsWith(TAG) ? 'note-tag' : internal ? 'note-link' : undefined} onClick={event => {
+      const web = href && (/^https?:\/\//i.test(href) ? href : href.startsWith('//') ? `https:${href}` : undefined);
+      const openWeb = () => { if (web) void native('open_web', { url: web }).catch(e => onWebError?.(errorText(e))); };
+      return <a href={web || href} title={href?.startsWith(WIKI) ? decodeURIComponent(href.slice(WIKI.length)) : web || href} className={href?.startsWith(TAG) ? 'note-tag' : internal ? 'note-link' : undefined} onAuxClick={web ? event => { if (event.button === 1) { event.preventDefault(); openWeb(); } } : undefined} onClick={event => {
         event.preventDefault();
         if (!href) return;
         if (href.startsWith(WIKI)) { const target = decodeURIComponent(href.slice(WIKI.length)); if (onAttachment && isAttachment(target)) onAttachment(target); else onNoteLink?.(target); }
         else if (href.startsWith(TAG)) onTag?.(decodeURIComponent(href.slice(TAG.length)));
-        else if (/^https?:\/\//i.test(href)) void native('open_web', { url: href }).catch(() => {});
+        else if (web) openWeb();
         else if (onAttachment && relative(href) && isAttachment(href)) onAttachment(decodeURIComponent(href.split('#')[0]));
         else if (onNoteLink && /\.md$/i.test(href.split('#')[0])) onNoteLink(decodeURIComponent(href.split('#')[0]));
       }}>{children}</a>;
@@ -51,10 +73,9 @@ export default function Markdown({ text, onNoteLink, onTag, media, onAttachment 
     img: ({ src, alt, title }) => {
       if (typeof src !== 'string') return null;
       const target = src.startsWith(WIKI) ? decodeURIComponent(src.slice(WIKI.length)) : media && relative(src) ? decodeURIComponent(src.split('#')[0]) : null;
-      if (target && media) return <Attachment target={target} alt={alt || ''} size={title || undefined} media={media(target)} onOpen={onAttachment} />;
+      if (target && media) return <Attachment target={target} alt={alt || ''} size={imageWidth(title)} media={media(target)} onOpen={onAttachment} />;
       return alt ? <span className="md-image-alt">[imagem: {alt}]</span> : null;
     },
   };
-  const source = onNoteLink ? wikiToMarkdown(text) : text;
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components} skipHtml urlTransform={url => url.startsWith(WIKI) || url.startsWith(TAG) ? url : defaultUrlTransform(url)}>{source}</ReactMarkdown></div>;
+  return <div className="markdown"><ReactMarkdown remarkPlugins={onNoteLink ? [remarkGfm, noteLineBreaks] : [remarkGfm]} components={components} skipHtml urlTransform={url => url.startsWith(WIKI) || url.startsWith(TAG) ? url : defaultUrlTransform(url)}>{source}</ReactMarkdown></div>;
 }

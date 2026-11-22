@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TAG, WIKI, attachmentUrl, frontmatter, isAttachment, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
+import { TAG, WIKI, attachmentUrl, changeBanner, frontmatter, imageWidth, isAttachment, resizedImage, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
 
 test('links do Obsidian viram links internos, com apelido e seção', () => {
   assert.equal(wikiToMarkdown('Ver [[Personagens]].'), `Ver [Personagens](${WIKI}Personagens).`);
@@ -53,4 +53,18 @@ test('vídeos são anexos e arquivos guardados têm endereço próprio, com mini
   assert.equal(storedUrl('18ea-0'), 'iris-file://localhost/18ea-0');
   assert.equal(storedUrl('18ea-0', true), 'iris-file://localhost/18ea-0?miniatura');
   assert.equal(attachmentUrl('ayla', 'a.png', true), 'athena-file://localhost/ayla/a.png?miniatura');
+});
+
+test('largura da imagem é salva na sintaxe do anexo ou no título Markdown', () => {
+  assert.equal(resizedImage('![[mapa.png|200]]', 'mapa.png', 'mapa.png', '200', 320), '![[mapa.png|320]]');
+  const plain = '![Vista](fotos/vista.png "Serra")';
+  assert.equal(resizedImage(plain, 'fotos/vista.png', 'Vista', 'Serra', 310), '![Vista](<fotos/vista.png> "Serra [largura=310]")');
+  assert.equal(imageWidth('Serra [largura=310]'), '310');
+});
+
+test('ajustes do banner preservam o corpo e as outras propriedades do cofre', () => {
+  const text = '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: "45"\r\ntags: [fera]\r\n---\r\n[[Feras|Fera]]';
+  const resized = changeBanner(changeBanner(text, 'banner_height', 320), 'banner_y', 1);
+  assert.equal(resized, '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: 0.01\r\ntags: [fera]\r\nbanner_height: 320\r\n---\r\n[[Feras|Fera]]');
+  assert.deepEqual(frontmatter(resized), { banner: { target: 'Imagens/Coruja.jpg', y: 1, height: 320 }, properties: [{ key: 'tags', values: ['fera'] }], body: '[[Feras|Fera]]' });
 });
