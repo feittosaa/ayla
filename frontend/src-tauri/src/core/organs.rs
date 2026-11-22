@@ -21,18 +21,51 @@ const COMPOSE_OVERRIDE: &str = include_str!("../../../../organs/moneta/compose.a
 const AYLA_THEME: &str = include_str!("../../../src/styles/ayla-theme.css");
 /// Como as variáveis do órgão seguem as da Ayla: fundos, superfícies, texto e fontes.
 const ORGAN_THEME: &str = include_str!("../../../../organs/moneta/tema.css");
-/// Caminho reservado à Ayla dentro do protocolo do órgão.
+/// Script da camada de compatibilidade: claro ou escuro do órgão seguem a Ayla, e a aparência
+/// nova chega por mensagem, sem recarregar a página.
+const ORGAN_SCRIPT: &str = include_str!("../../../../organs/moneta/tema.js");
+/// Caminhos reservados à Ayla dentro do protocolo do órgão.
 pub const THEME_PATH: &str = "/__ayla/tema.css";
+pub const SCRIPT_PATH: &str = "/__ayla/tema.js";
 
-/// Folha servida em `THEME_PATH`: tema da Ayla e, depois, o mapeamento do órgão.
-pub fn theme_css() -> String {
-    format!("{AYLA_THEME}\n{ORGAN_THEME}")
+/// Aparência atual da Ayla (variáveis `--ayla-*` e modo), enviada pela interface.
+#[derive(Default)]
+pub struct Look {
+    vars: Vec<(String, String)>,
+    light: bool,
+}
+
+/// Folha servida em `THEME_PATH`: tema padrão da Ayla, a aparência atual por cima e, depois, o
+/// mapeamento do órgão.
+pub fn theme_css(look: &Look) -> String {
+    let current: String = look.vars.iter().map(|(name, value)| format!("  {name}: {value};\n")).collect();
+    format!("{AYLA_THEME}\n:root {{\n{current}}}\n{ORGAN_THEME}")
+}
+
+pub fn theme_script(look: &Look) -> String {
+    format!("document.documentElement.dataset.aylaMode = '{}';\n{ORGAN_SCRIPT}", if look.light { "light" } else { "dark" })
+}
+
+/// Só variáveis da Ayla com valores de cor, número ou fonte simples (nada que feche o bloco CSS).
+pub fn clean_look(vars: std::collections::HashMap<String, String>, light: bool) -> Result<Look, String> {
+    let mut out = Vec::new();
+    for (name, value) in vars {
+        let name_ok = name.len() <= 40 && name.strip_prefix("--ayla-").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
+        let value_ok = !value.is_empty() && value.len() <= 64
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b" #(),.%-".contains(&b));
+        if !name_ok || !value_ok {
+            return Err("Aparência inválida".into());
+        }
+        out.push((name, value));
+    }
+    out.sort();
+    Ok(Look { vars: out, light })
 }
 
 /// Inclui o tema da Ayla no fim do `<head>` de uma página do órgão, depois das folhas dele, para
 /// que fundos e fontes sigam a Ayla. Páginas sem `<head>` recebem a folha no início.
 pub fn with_theme(html: &str) -> String {
-    let link = format!("<link rel=\"stylesheet\" href=\"{THEME_PATH}\">");
+    let link = format!("<link rel=\"stylesheet\" href=\"{THEME_PATH}\"><script src=\"{SCRIPT_PATH}\"></script>");
     match html.to_ascii_lowercase().rfind("</head>") {
         Some(at) => format!("{}{link}{}", &html[..at], &html[at..]),
         None => format!("{link}{html}"),
@@ -121,6 +154,7 @@ pub struct Organ {
     repository: String,
     state: Mutex<State>,
     client: reqwest::Client,
+    look: Mutex<Look>,
 }
 
 fn home() -> PathBuf {
@@ -187,6 +221,7 @@ impl Organ {
             port,
             repository,
             state: Mutex::new(State::default()),
+            look: Mutex::new(Look::default()),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(120))
@@ -571,11 +606,15 @@ impl Organ {
         let Some(path) = request.uri().path_and_query().map(|p| p.as_str()).and_then(safe_path) else {
             return reply(StatusCode::FORBIDDEN, "Endereço inválido.");
         };
-        if path == THEME_PATH {
+        if path == THEME_PATH || path == SCRIPT_PATH {
+            let look = self.look.lock();
+            let empty = Look::default();
+            let look = look.as_deref().unwrap_or(&empty);
+            let (kind, body) = if path == THEME_PATH { ("text/css", theme_css(look)) } else { ("text/javascript", theme_script(look)) };
             return Response::builder()
-                .header(header::CONTENT_TYPE, "text/css; charset=utf-8")
+                .header(header::CONTENT_TYPE, format!("{kind}; charset=utf-8"))
                 .header(header::CACHE_CONTROL, "no-store")
-                .body(theme_css().into_bytes())
+                .body(body.into_bytes())
                 .unwrap_or_default();
         }
         let method = request.method().clone();
@@ -674,8 +713,19 @@ mod tests {
         let link = page.find(THEME_PATH).unwrap();
         assert!(link > page.find("/style.css").unwrap(), "depois das folhas do órgão");
         assert!(link < page.to_ascii_lowercase().find("</head>").unwrap());
-        let css = theme_css();
+        assert!(page.find(SCRIPT_PATH).unwrap() > link, "o script vem depois da folha");
+        let css = theme_css(&Look::default());
         assert!(css.find("--ayla-bg").unwrap() < css.find("--canvas: var(--ayla-bg)").unwrap());
+        // A aparência atual vale por cima do padrão e antes do mapeamento do órgão.
+        let purple = clean_look([("--ayla-bg".to_string(), "#2a1840".to_string()), ("--ayla-text".to_string(), "#1b1c1f".to_string())].into(), true).unwrap();
+        let css = theme_css(&purple);
+        let current = css.find("--ayla-bg: #2a1840").unwrap();
+        assert!(current > css.find("--ayla-bg: #111214").unwrap() && current < css.find("--canvas: var(--ayla-bg)").unwrap());
+        assert!(theme_script(&purple).starts_with("document.documentElement.dataset.aylaMode = 'light';"));
+        assert!(theme_script(&Look::default()).contains("'dark'"));
+        for (name, value) in [("--ayla-bg", "red;} body{x:url(a)"), ("color", "#fff"), ("--ayla-bg", "</style>"), ("--ayla-X", "#fff")] {
+            assert!(clean_look([(name.to_string(), value.to_string())].into(), false).is_err(), "{name}: {value}");
+        }
         for token in ["--ayla-bg", "--ayla-font-main", "--ayla-text"] {
             assert!(ORGAN_THEME.contains(&format!("var({token})")), "{token}");
         }
@@ -817,6 +867,14 @@ pub async fn organ_install(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || app.state::<Organ>().install(&|_| {}))
         .await
         .map_err(|_| "A instalação da Moneta foi interrompida".to_string())?
+}
+
+/// Aparência atual da Ayla para as páginas do órgão (fundo, superfícies, texto e modo).
+#[tauri::command]
+pub fn organ_theme(organ: tauri::State<'_, Organ>, vars: std::collections::HashMap<String, String>, light: bool) -> Result<(), String> {
+    let look = clean_look(vars, light)?;
+    *organ.look.lock().map_err(|_| "Aparência ocupada")? = look;
+    Ok(())
 }
 
 #[tauri::command]

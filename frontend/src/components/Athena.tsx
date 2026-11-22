@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
 import { IMAGE, VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
 import BrandMark from './BrandMark';
+import { LockDialog, LockedView, UNLOCK_GRACE_MS, type LockMode } from './AthenaLock';
 import AthenaGraph, { type NoteGraph } from './AthenaGraph';
 
-type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[] };
+type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[]; bannerHeight?: number | null; protected?: Lock[] };
+/** Pasta protegida da raiz: aberta nesta execução (desde `since`, em segundos) ou bloqueada. */
+type Lock = { folder: string; unlocked: boolean; since: number | null };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
 type Hit = { root: string; rootName: string; path: string; title: string; snippet: string };
 type Outcome = { committed: number; pulled: boolean; pushed: boolean; message: string };
@@ -145,6 +148,9 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   /** Nota a apagar pela lixeira da barra lateral, à espera da confirmação no modal. */
   const [trashing, setTrashing] = useState<{ root: string; path: string; title: string } | null>(null);
   const [revision, setRevision] = useState(0); const [saved, setSaved] = useState(0);
+  /** Diálogo de senha de uma pasta protegida. */
+  const [lockDialog, setLockDialog] = useState<{ mode: LockMode; root: string; folder: string } | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const [git, setGit] = useState<GitInfo | null>(null); const [syncing, setSyncing] = useState(false);
   const flushers = useRef<((() => Promise<void>) | null)[]>([null, null]);
   const [drag, setDrag] = useState<{ item: DragItem; x: number; y: number; drop: Drop | null } | null>(null);
@@ -179,6 +185,8 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     }, error => { if (request === overviewRequest.current) setGraphError(errorText(error)); });
   }, []);
   const rootOf = useCallback((id: string) => tree?.roots.find(r => r.id === id) ?? null, [tree]);
+  /** Pasta protegida que contém o caminho (ou é ele), se houver. */
+  const lockOf = useCallback((root: string, path: string) => rootOf(root)?.protected?.find(l => path === l.folder || path.startsWith(`${l.folder}/`)), [rootOf]);
   const expand = useCallback((root: string, path: string) => {
     setExpanded(prev => [...new Set([...prev, ...ancestors(root, path)])]);
   }, []);
@@ -194,6 +202,18 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   // Cofre fechado ou indisponível fora da Ayla: volta para a Athena.
   useEffect(() => { if (tree && !tree.roots.some(r => r.id === focus && r.available)) setFocus('ayla'); }, [tree, focus]);
   const graph = overview?.graph;
+  // Pastas protegidas: livres por 10 min depois da senha; depois disso, bloqueiam assim que nenhuma
+  // nota ou arquivo delas estiver à vista (outra nota, aba fechada, outro espaço da Ayla).
+  useEffect(() => { const id = setInterval(() => setClock(Date.now()), 15_000); return () => clearInterval(id); }, []);
+  const shownTabs = useMemo(() => active ? workspace.panes.map(p => p.tabs[p.active]).filter((t): t is Tab => Boolean(t)) : [], [active, workspace.panes]);
+  useEffect(() => {
+    if (!tree) return;
+    for (const root of tree.roots) for (const lock of root.protected ?? []) {
+      if (!lock.unlocked || clock - (lock.since ?? 0) * 1000 < UNLOCK_GRACE_MS) continue;
+      const inside = shownTabs.some(t => t.root === root.id && (t.path === lock.folder || t.path.startsWith(`${lock.folder}/`)));
+      if (!inside) void lockFolder(root.id, lock.folder);
+    }
+  }, [tree, shownTabs, clock]); // eslint-disable-line react-hooks/exhaustive-deps
   const focusedGraph = useMemo(() => graph ? graphOf(graph, focus) : null, [graph, focus]);
 
   /** Abre a nota na tela em foco: na aba atual (se não estiver fixada) ou numa aba nova. */
@@ -479,6 +499,47 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       drop(t => t.root === root && t.path.startsWith(`${folder}/`)); load(); loadOverview();
     } catch (e) { setError(errorText(e)); }
   }
+  /** Bloqueia de novo: salva o que estiver pendente, tira a chave da memória e fecha a pasta na árvore. */
+  async function lockFolder(root: string, folder: string) {
+    await flushAll();
+    try { await native('athena_lock', { root, folder }); } catch (e) { setError(errorText(e)); }
+    setExpanded(prev => prev.filter(key => key !== `${root}|${folder}` && !key.startsWith(`${root}|${folder}/`)));
+    load(); setRevision(r => r + 1);
+  }
+  async function submitLock(password: string, next: string) {
+    if (!lockDialog) return;
+    const { mode, root, folder } = lockDialog;
+    if (mode === 'protect') {
+      await flushAll();
+      await native('athena_protect', { root, folder, password });
+      // Abas da pasta continuam abertas, agora pedindo a senha.
+      setExpanded(prev => prev.filter(key => key !== `${root}|${folder}` && !key.startsWith(`${root}|${folder}/`)));
+    } else if (mode === 'unlock') {
+      await unlockFolder(root, folder, password);
+    } else if (mode === 'password') {
+      await native('athena_change_password', { root, folder, current: password, password: next });
+    } else {
+      await flushAll();
+      await native('athena_unprotect', { root, folder, password });
+    }
+    setLockDialog(null); load(); loadOverview(); setRevision(r => r + 1);
+  }
+  async function unlockFolder(root: string, folder: string, password: string) {
+    await native('athena_unlock', { root, folder, password });
+    setFocus(root); setClock(Date.now());
+    setExpanded(prev => [...new Set([...prev, `${root}|`, `${root}|${folder}`])]);
+    load(); setRevision(r => r + 1);
+  }
+  function lockTools(root: string, folder: string, lock: Lock | undefined): ReactNode {
+    const stop = (action: () => void) => (e: { stopPropagation: () => void }) => { e.stopPropagation(); action(); };
+    if (!lock) return <button className="icon-button tiny" title="Proteger com senha" aria-label={`Proteger a pasta ${folder} com senha`} onClick={stop(() => setLockDialog({ mode: 'protect', root, folder }))}><LockIcon size={13} /></button>;
+    if (lock.folder !== folder || !lock.unlocked) return null;
+    return <>
+      <button className="icon-button tiny" title="Bloquear agora" aria-label={`Bloquear a pasta ${folder}`} onClick={stop(() => void lockFolder(root, folder))}><LockIcon size={13} /></button>
+      <button className="icon-button tiny" title="Trocar a senha" aria-label={`Trocar a senha da pasta ${folder}`} onClick={stop(() => setLockDialog({ mode: 'password', root, folder }))}>✱</button>
+      <button className="icon-button tiny" title="Tirar a proteção" aria-label={`Tirar a proteção da pasta ${folder}`} onClick={stop(() => setLockDialog({ mode: 'unprotect', root, folder }))}><UnlockIcon size={13} /></button>
+    </>;
+  }
   function tools(root: string, folder: string): ReactNode {
     const start = (kind: Adding['kind']) => (e: { stopPropagation: () => void }) => { e.stopPropagation(); setFocus(root); setAdding({ root, folder, kind }); setName(''); setExpanded(prev => [...new Set([...prev, `${root}|${folder}`])]); };
     return <span className="tree-tools">
@@ -486,10 +547,21 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       <button className="icon-button tiny" title="Nova pasta aqui" aria-label="Nova pasta aqui" onClick={start('folder')}>⊞</button>
       {folder && <Confirm className="icon-button tiny" title="Apagar a pasta (vai para a lixeira do cofre)" ariaLabel={`Apagar a pasta ${folder}`} question={`Apagar a pasta "${folder.slice(folder.lastIndexOf('/') + 1)}" e tudo o que tem dentro? Ela vai para a lixeira (.trash) da raiz.`} confirm="Apagar" onConfirm={() => void removeFolder(root, folder)}><TrashIcon size={13} /></Confirm>}
       {folder && <button className="icon-button tiny" title="Renomear ou mover a pasta" aria-label="Renomear ou mover a pasta" onClick={e => { e.stopPropagation(); setFolderEdit({ root, path: folder, name: folder.slice(folder.lastIndexOf('/') + 1) }); }}>✎</button>}
+      {folder && lockTools(root, folder, lockOf(root, folder))}
     </span>;
   }
   function folderNode(root: Root, folder: Folder, depth: number): ReactNode {
     const key = `${root.id}|${folder.path}`;
+    const lock = folder.path ? root.protected?.find(l => l.folder === folder.path) : undefined;
+    // Bloqueada: sempre fechada; o clique pede a senha.
+    if (lock && !lock.unlocked) {
+      return <div key={key} role="group" className="tree-drop">
+        <div className="tree-row folder locked" style={{ paddingLeft: 4 + depth * 14 }} role="treeitem" aria-expanded={false} title="Pasta protegida: clique para digitar a senha"
+          onClick={() => { setFocus(root.id); setLockDialog({ mode: 'unlock', root: root.id, folder: folder.path }); }}>
+          <span className="tree-caret"><LockIcon size={13} /></span><span className="tree-name">{folder.name}</span>
+        </div>
+      </div>;
+    }
     const shown = !folder.path || expanded.includes(key);
     const inner = folder.path ? depth + 1 : depth;
     return <div key={key} role="group" className={folder.path && dropping(root.id, folder.path) ? 'tree-drop drop-target' : 'tree-drop'} data-drop={folder.path ? 'folder' : undefined} data-root={root.id} data-path={folder.path}>
@@ -498,7 +570,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
             <input autoFocus value={folderEdit.name} maxLength={200} title="Novo nome, ou caminho (ex.: Jogos/RPG) para mover" onChange={e => setFolderEdit({ ...folderEdit, name: e.target.value })} onKeyDown={e => { if (e.key === 'Escape') setFolderEdit(null); }} />
           </form>
         : <div className="tree-row folder" style={{ paddingLeft: 4 + depth * 14 }} onPointerDown={startDrag({ kind: 'folder', root: root.id, path: folder.path, label: folder.name })} onClick={() => { setFocus(root.id); toggle(key); }} role="treeitem" aria-expanded={shown}>
-            <span className={shown ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span><span className="tree-name">{folder.name}</span>{tools(root.id, folder.path)}
+            <span className={shown ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span><span className="tree-name">{folder.name}</span>{lock && <span className="tree-lock" title="Pasta protegida, aberta"><UnlockIcon size={12} /></span>}{tools(root.id, folder.path)}
           </div>)}
       {shown && <>
         {addForm(root.id, folder.path, inner)}
@@ -534,6 +606,8 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     const tab = pane.tabs[pane.active] as Tab | undefined;
     const root = tab ? rootOf(tab.root) : null;
     const last = index === panes.length - 1;
+    const tabLock = tab ? lockOf(tab.root, tab.path) : undefined;
+    const lockedTab = tabLock && !tabLock.unlocked ? tabLock : undefined;
     const zone = drag?.drop?.kind === 'pane' && drag.drop.pane === index ? drag.drop.side : null;
     return <section key={index} data-drop="pane" data-pane={index} className={panes.length > 1 && index === focused ? 'note-pane focused' : 'note-pane'} onMouseDownCapture={() => { if (index !== focused) { setWorkspace(ws => ({ ...ws, focused: index })); if (tab) setFocus(tab.root); } }} aria-label={panes.length > 1 ? (index ? 'Tela da direita' : 'Tela da esquerda') : 'Nota'}>
       {zone && <div className={`drop-zone ${zone}`} aria-hidden="true"><span>{zone === 'center' ? 'Abrir nesta tela' : 'Abrir ao lado'}</span></div>}
@@ -548,12 +622,12 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
           </div>)}
         </div>
         <span className="athena-status" role="status">{statuses[index]}</span>
-        {tab && !isAttachment(tab.path) && <div className="note-actions">
+        {tab && !isAttachment(tab.path) && !lockedTab && <div className="note-actions">
           <div className="note-mode" role="group" aria-label="Modo da nota">
             <button className={tab.editing ? 'icon-button' : 'icon-button active'} aria-pressed={!tab.editing} aria-label="Ver" data-tip="Ver" onClick={() => setTab(index, pane.active, { editing: false })}><EyeIcon size={18} /></button>
             <button className={tab.editing ? 'icon-button active' : 'icon-button'} aria-pressed={tab.editing} aria-label="Editar" data-tip="Editar" onClick={() => setTab(index, pane.active, { editing: true })}><PencilIcon size={17} /></button>
           </div>
-          {root?.obsidian && <button className="icon-button" data-tip="Abrir no Obsidian" aria-label="Abrir no Obsidian, com os plugins do cofre" onClick={() => void (flushers.current[index]?.() ?? Promise.resolve()).then(() => native('athena_open_obsidian', { root: tab.root, path: tab.path })).catch(e => setError(errorText(e)))}><ExpandIcon size={17} /></button>}
+          {root?.obsidian && !tabLock && <button className="icon-button" data-tip="Abrir no Obsidian" aria-label="Abrir no Obsidian, com os plugins do cofre" onClick={() => void (flushers.current[index]?.() ?? Promise.resolve()).then(() => native('athena_open_obsidian', { root: tab.root, path: tab.path })).catch(e => setError(errorText(e)))}><ExpandIcon size={17} /></button>}
           {confirming === index
             ? <span className="row-actions"><button onClick={() => void remove(index)}>Mover para a lixeira</button><button className="ghost-button" onClick={() => setConfirming(null)}>Cancelar</button></span>
             : <button className="icon-button" aria-label="Apagar nota" data-tip="Apagar nota" onClick={() => setConfirming(index)}><TrashIcon size={17} /></button>}
@@ -561,10 +635,14 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
         <button className={panes.length > 1 ? 'icon-button active' : 'icon-button'} data-tip={panes.length > 1 ? 'Fechar esta tela' : 'Dividir a tela'} aria-label={panes.length > 1 ? 'Fechar esta tela' : 'Dividir a tela'} onClick={() => panes.length > 1 ? setWorkspace(ws => ({ ...ws, panes: ws.panes.filter((_, k) => k !== index), focused: 0 })) : split()}>{panes.length > 1 ? <CloseIcon size={17} /> : <ColumnsIcon size={17} />}</button>
         {last && <button className={workspace.panel ? 'icon-button tip-end active' : 'icon-button tip-end'} data-tip={workspace.panel ? 'Fechar o painel do Git' : 'Painel do Git'} aria-label={workspace.panel ? 'Fechar o painel do Git' : 'Abrir o painel do Git'} aria-pressed={workspace.panel} onClick={() => setWorkspace(ws => ({ ...ws, panel: !ws.panel }))}><GitIcon size={18} /></button>}
       </header>
-      {tab && isAttachment(tab.path)
+      {tab && !tree
+        ? <div className="note-scroll" aria-busy="true" />
+        : tab && lockedTab
+        ? <LockedView key={`${tab.root}|${lockedTab.folder}`} folder={lockedTab.folder} onUnlock={password => unlockFolder(tab.root, lockedTab.folder, password)} />
+        : tab && isAttachment(tab.path)
         ? <AttachmentView key={`${tab.root}|${tab.path}`} root={tab.root} target={tab.path} onError={setError} />
         : tab
-        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} images={(root?.files ?? []).filter(file => IMAGE.test(file.path))} rootName={root?.name ?? 'Athena'} revision={revision}
+        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} images={(root?.files ?? []).filter(file => IMAGE.test(file.path) && lockOf(tab.root, file.path)?.folder === tabLock?.folder)} rootName={root?.name ?? 'Athena'} bannerHeight={root?.bannerHeight ?? undefined} revision={revision}
             onEditing={editing => setTab(index, pane.active, { editing })}
             onFollow={target => void follow(tab, target)}
             onOpen={path => open(tab.root, path)}
@@ -668,6 +746,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       {workspace.panel && gitPanel()}
       <AthenaGraph graph={focusedGraph} scope={rootOf(focus)?.name} activeNote={activeTab} onOpen={open} onRefresh={loadOverview} error={graphError} />
     </aside>
+    {lockDialog && <LockDialog mode={lockDialog.mode} folder={lockDialog.folder} git={rootOf(lockDialog.root)?.git} onSubmit={submitLock} onClose={() => setLockDialog(null)} />}
     {trashing && <div className="dialog-backdrop" onClick={() => setTrashing(null)}>
       <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="athena-trash-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') setTrashing(null); }}>
         <h2 id="athena-trash-title">Apagar “{trashing.title}”?</h2>

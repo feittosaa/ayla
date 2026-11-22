@@ -62,7 +62,7 @@ export default function AppearanceSettings({ saved, onPreview, onSaved }: {
           {[1, 2, 3].map(n => <button key={n} type="button" className="icon-choice" aria-label={`Ícone ${n} da Ayla`} aria-pressed={value.icon_ayla === n} onClick={() => change({ icon_ayla: n })}><BrandMark name="ayla" variant={n} size={40} /></button>)}
         </div>
         <div className="icon-choices" role="group" aria-label="Ícone da Athena"><span className="icon-choices-label">Athena</span>
-          {[1, 2, 3, 4].map(n => <button key={n} type="button" className="icon-choice" aria-label={`Ícone ${n} da Athena`} aria-pressed={value.icon_athena === n} onClick={() => change({ icon_athena: n })}><BrandMark name="athena" variant={n} size={40} /></button>)}
+          {[3, 4].map((n, i) => <button key={n} type="button" className="icon-choice" aria-label={`Ícone ${i + 1} da Athena`} aria-pressed={value.icon_athena === n} onClick={() => change({ icon_athena: n })}><BrandMark name="athena" variant={n} size={40} /></button>)}
         </div>
         <div className="icon-choices" role="group" aria-label="Outros ícones"><span className="icon-choices-label">Iris</span>
           <span className="icon-choice" aria-pressed="true"><BrandMark name="iris" size={40} /></span>

@@ -102,6 +102,8 @@ type Props = {
   /** Imagens da mesma raiz (cofre, projeto ou Athena): as únicas que podem virar banner. */
   images: Note[];
   rootName: string;
+  /** Altura padrão dos banners no make-md do cofre, para ficar igual ao Obsidian. */
+  bannerHeight?: number;
   /** Muda quando a nota pode ter mudado fora daqui (conversa, Git): recarrega se não houver edição pendente. */
   revision: number;
   onEditing: (editing: boolean) => void;
@@ -314,7 +316,7 @@ export default function AthenaNote(props: Props) {
   if (failed) return <div className="note-scroll"><article className="note-page"><h1 className="note-title">{title}</h1><p role="alert" className="app-error">{failed}</p></article></div>;
   if (content === null) return <div className="note-scroll" aria-busy="true" />;
   return <div className="note-scroll" onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
-    {note.banner ? <Banner key={note.banner.target} url={attachmentUrl(tab.root, note.banner.target)} settings={note.banner}
+    {note.banner ? <Banner key={note.banner.target} url={attachmentUrl(tab.root, note.banner.target)} settings={note.banner.height || !props.bannerHeight ? note.banner : { ...note.banner, height: props.bannerHeight }}
       onChange={tab.editing && !pasting ? (key, value) => change(changeBanner(latest.current, key, value)) : undefined} />
       : <div className="note-banner-margin">
         <button type="button" className="ghost-button" disabled={pasting} aria-haspopup="dialog" onClick={() => setChoosingBanner(true)}>Adicionar banner</button>

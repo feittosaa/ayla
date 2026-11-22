@@ -722,10 +722,30 @@ pub fn set_banner(root: &Path, note: &str, content: &str, expected: i64, image: 
     Ok((updated, modified))
 }
 
-fn with_banner(content: &str, target: &str) -> String {
+/// Altura dos banners no make-md do cofre ("Cover Height"; 200 px quando não configurada).
+pub fn make_md_banner_height(root: &Path) -> Option<u32> {
+    let file = root.join(".obsidian/plugins/make-md/data.json");
+    let settings: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    let height = settings.get("bannerHeight").and_then(|h| h.as_f64().or_else(|| h.as_str()?.trim().parse().ok())).unwrap_or(200.0);
+    (height.is_finite() && height > 0.0).then(|| height.round().clamp(80.0, 600.0) as u32)
+}
+
+/// Texto em YAML como o make-md grava (`Imagens/capa.png`, sem aspas); com aspas só quando o
+/// valor seria lido de outro jeito.
+fn yaml_text(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.trim() == value
+        && !value.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
+        && !value.contains(": ") && !value.contains(" #") && !value.ends_with(':')
+        && !value.chars().any(char::is_control)
+        && !matches!(value.to_ascii_lowercase().as_str(), "true" | "false" | "null" | "yes" | "no" | "~")
+        && value.parse::<f64>().is_err();
+    if plain { value.to_string() } else { format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")) }
+}
+
+pub fn with_banner(content: &str, target: &str) -> String {
     let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
-    let target = if target.contains('"') { target.rsplit('/').next().unwrap_or(target) } else { target };
-    let banner = format!("banner: \"[[{target}]]\"{newline}");
+    let banner = format!("banner: {}{newline}", yaml_text(target));
     let mut lines = content.split_inclusive('\n');
     if let Some(opening) = lines.next().filter(|line| line.trim_end() == "---") {
         let mut updated = String::with_capacity(content.len() + banner.len());
@@ -744,19 +764,24 @@ fn with_banner(content: &str, target: &str) -> String {
     format!("---{newline}{banner}---{newline}{newline}{content}")
 }
 
-fn save_note_image(root: &Path, note: &str, expected: i64, bytes: &[u8], content: impl FnOnce(&str) -> String) -> Result<(String, String, i64), String> {
-    if bytes.len() as u64 > MAX_ATTACHMENT {
-        return Err("A imagem passa de 15 MB".into());
-    }
-    let extension = match bytes {
+/// Extensão de uma imagem colada, pelo conteúdo (não pelo nome).
+pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    Some(match bytes {
         [137, 80, 78, 71, 13, 10, 26, 10, ..] => "png",
         [255, 216, 255, ..] => "jpg",
         [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => "gif",
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
         [b'B', b'M', ..] => "bmp",
         [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f' | b's', ..] => "avif",
-        _ => return Err("Formato de imagem incompatível".into()),
-    };
+        _ => return None,
+    })
+}
+
+fn save_note_image(root: &Path, note: &str, expected: i64, bytes: &[u8], content: impl FnOnce(&str) -> String) -> Result<(String, String, i64), String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT {
+        return Err("A imagem passa de 15 MB".into());
+    }
+    let extension = image_extension(bytes).ok_or("Formato de imagem incompatível")?;
     let relative = safe_relative(note).ok_or("Nota inválida")?;
     let root = root.canonicalize().map_err(|_| "Pasta da nota indisponível")?;
     let path = root.join(&relative);
@@ -996,10 +1021,21 @@ mod tests {
         assert_eq!(read(&root, &note).unwrap().0, source, "recusas não alteram a nota");
         let before = attachments(&root).len();
         let (updated, _) = set_banner(&root, &note, source, modified, "Mapas/Norte.png").unwrap();
-        assert_eq!(updated, "---\r\ntags: [mapa]\r\nbanner: \"[[Mapas/Norte.png]]\"\r\n---\r\nTexto com [[Link]].");
+        assert_eq!(updated, "---\r\ntags: [mapa]\r\nbanner: Mapas/Norte.png\r\n---\r\nTexto com [[Link]].", "mesmo formato do make-md");
         assert_eq!(read(&root, &note).unwrap().0, updated);
         assert_eq!(attachments(&root).len(), before, "nada foi copiado");
-        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: \"[[mapa.png]]\"\n---\n\nTexto");
+        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: mapa.png\n---\n\nTexto");
+        assert_eq!(yaml_text("Imagens/Personagens/As 6 Faces/Tauri.png"), "Imagens/Personagens/As 6 Faces/Tauri.png");
+        assert_eq!(yaml_text("Ganchos/G5/_358c1d1b.jpg"), "Ganchos/G5/_358c1d1b.jpg");
+        assert_eq!(yaml_text("#capa: a.png"), "\"#capa: a.png\"");
+        assert_eq!(yaml_text("[x] \"a\".png"), "\"[x] \\\"a\\\".png\"");
+        assert_eq!(yaml_text("2024"), "\"2024\"");
+        assert_eq!(make_md_banner_height(&root), None, "sem make-md");
+        fs::create_dir_all(root.join(".obsidian/plugins/make-md")).unwrap();
+        fs::write(root.join(".obsidian/plugins/make-md/data.json"), "{}").unwrap();
+        assert_eq!(make_md_banner_height(&root), Some(200));
+        fs::write(root.join(".obsidian/plugins/make-md/data.json"), r#"{"bannerHeight": "260"}"#).unwrap();
+        assert_eq!(make_md_banner_height(&root), Some(260));
         assert!(set_banner(&root, &note, &updated, i64::MIN, "Mapas/Norte.png").is_err());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);

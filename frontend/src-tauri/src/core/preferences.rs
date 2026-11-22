@@ -75,7 +75,7 @@ pub struct Appearance {
     pub roundness: u8,
     /// Opacidade do fundo da janela, em %: 100 é opaco.
     pub opacity: u8,
-    /// Variante do ícone de cada espaço.
+    /// Variante do ícone de cada espaço (a Athena tem só as variantes 3 e 4).
     pub icon_ayla: u8,
     pub icon_athena: u8,
 }
@@ -84,7 +84,7 @@ impl Default for Appearance {
         Self {
             mode: "escuro".into(), accent: "#ff9f43".into(),
             dark_background: "#111214".into(), light_background: "#f6f6f4".into(),
-            roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 1,
+            roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 3,
         }
     }
 }
@@ -93,7 +93,7 @@ impl Appearance {
         ["escuro", "claro", "sistema"].contains(&self.mode.as_str())
             && hex_color(&self.accent) && hex_color(&self.dark_background) && hex_color(&self.light_background)
             && self.roundness <= 150 && (40..=100).contains(&self.opacity)
-            && (1..=3).contains(&self.icon_ayla) && (1..=4).contains(&self.icon_athena)
+            && (1..=3).contains(&self.icon_ayla) && (3..=4).contains(&self.icon_athena)
     }
 }
 
@@ -316,6 +316,10 @@ impl PreferenceStore {
                     }
                     value.version = VERSION;
                 }
+                // Os ícones 1 e 2 da Athena saíram (22/11/2026): quem os usava passa ao 3, o padrão.
+                if matches!(value.appearance.icon_athena, 1 | 2) {
+                    value.appearance.icon_athena = 3;
+                }
                 value.validate()?;
                 Ok(value)
             }
@@ -405,10 +409,14 @@ mod tests {
             Appearance { opacity: 39, ..Appearance::default() },
             Appearance { icon_ayla: 4, ..Appearance::default() },
             Appearance { icon_athena: 0, ..Appearance::default() },
+            Appearance { icon_athena: 2, ..Appearance::default() },
         ] {
             prefs.appearance = broken;
             assert!(store.save(&prefs).is_err());
         }
+        let saved = fs::read_to_string(root.join("preferences.json")).unwrap();
+        fs::write(root.join("preferences.json"), saved.replace("\"icon_athena\": 4", "\"icon_athena\": 1").replace("\"icon_athena\":4", "\"icon_athena\":1")).unwrap();
+        assert_eq!(store.load().unwrap().appearance.icon_athena, 3, "ícones removidos voltam ao padrão");
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

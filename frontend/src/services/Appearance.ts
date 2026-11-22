@@ -4,16 +4,16 @@ import { DEFAULT_APPEARANCE, isHex, palette, safeBackground, type Appearance, ty
 import ayla1 from '../assets/marcas/ayla_1.svg?raw';
 import ayla2 from '../assets/marcas/ayla_2.svg?raw';
 import ayla3 from '../assets/marcas/ayla_3.svg?raw';
-import athena1 from '../assets/marcas/athena_1.svg?raw';
-import athena2 from '../assets/marcas/athena_2.svg?raw';
 import athena3 from '../assets/marcas/athena_3.svg?raw';
 import athena4 from '../assets/marcas/athena_4.svg?raw';
 import iris from '../assets/marcas/iris.svg?raw';
 import hand from '../assets/marcas/hand.svg?raw';
 
-/** Marcas (SVG monocromáticos, em `currentColor`). O Hand é do futuro órgão. */
+/** Marcas (SVG monocromáticos, em `currentColor`). O Hand é do futuro órgão. As da Athena são as
+ * variantes 3 e 4 (as 1 e 2 saíram). */
+export const FIRST_VARIANT: Partial<Record<'ayla' | 'athena' | 'iris' | 'hand', number>> = { athena: 3 };
 export const MARKS = {
-  ayla: [ayla1, ayla2, ayla3], athena: [athena1, athena2, athena3, athena4], iris: [iris], hand: [hand],
+  ayla: [ayla1, ayla2, ayla3], athena: [athena3, athena4], iris: [iris], hand: [hand],
 } as const;
 export type MarkName = keyof typeof MARKS;
 export const markUrl = (svg: string) => `data:image/svg+xml,${encodeURIComponent(svg)}`;

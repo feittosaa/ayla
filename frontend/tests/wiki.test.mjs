@@ -32,8 +32,11 @@ test('frontmatter vira propriedades e banner, fora do corpo da nota', () => {
   assert.equal(note.body, '\n# Floresta\n');
 });
 
-test('banner aceita [[imagem]] e posição de 0 a 1; endereço da web e nota sem frontmatter não viram banner', () => {
+test('banner aceita [[imagem]], posição em porcentagem como o make-md e a fração antiga da Ayla; endereço da web e nota sem frontmatter não viram banner', () => {
   assert.deepEqual(frontmatter('---\nbanner: "![[capa.jpg|300]]"\nbanner_y: 0.25\n---\nx').banner, { target: 'capa.jpg', y: 25 });
+  assert.deepEqual(frontmatter('---\nbanner: capa.jpg\nbanner_y: "0.5"\n---\nx').banner, { target: 'capa.jpg', y: 0.5 }, 'make-md: "0.5" é 0,5%');
+  assert.deepEqual(frontmatter('---\nbanner: capa.jpg\nbanner_y: "1"\n---\nx').banner, { target: 'capa.jpg', y: 1 });
+  assert.deepEqual(frontmatter('---\nbanner: capa.jpg\nbanner_y: 1\n---\nx').banner, { target: 'capa.jpg', y: 1 });
   assert.equal(frontmatter('---\nbanner: https://exemplo.com/a.png\n---\nx').banner, null);
   assert.deepEqual(frontmatter('# Só texto\n---\nbanner: a.png\n---'), { properties: [], banner: null, body: '# Só texto\n---\nbanner: a.png\n---' });
 });
@@ -65,6 +68,7 @@ test('largura da imagem é salva na sintaxe do anexo ou no título Markdown', ()
 test('ajustes do banner preservam o corpo e as outras propriedades do cofre', () => {
   const text = '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: "45"\r\ntags: [fera]\r\n---\r\n[[Feras|Fera]]';
   const resized = changeBanner(changeBanner(text, 'banner_height', 320), 'banner_y', 1);
-  assert.equal(resized, '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: 0.01\r\ntags: [fera]\r\nbanner_height: 320\r\n---\r\n[[Feras|Fera]]');
+  assert.equal(resized, '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: "1"\r\ntags: [fera]\r\nbanner_height: 320\r\n---\r\n[[Feras|Fera]]');
+  assert.equal(changeBanner(text, 'banner_y', 37.25).split('\r\n')[2], 'banner_y: "37.3"');
   assert.deepEqual(frontmatter(resized), { banner: { target: 'Imagens/Coruja.jpg', y: 1, height: 320 }, properties: [{ key: 'tags', values: ['fera'] }], body: '[[Feras|Fera]]' });
 });

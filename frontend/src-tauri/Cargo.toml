@@ -47,6 +47,11 @@ keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust",
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Data em que a foto foi tirada (EXIF), para a Iris comparar fotos ao longo do tempo (BSD-2, Rust puro).
 kamadak-exif = "0.6"
+# Pastas protegidas da Athena: chave derivada da senha (Argon2id) e arquivos cifrados
+# (XChaCha20-Poly1305). RustCrypto, MIT/Apache, Rust puro.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = "1"
 
 # Mesma versão usada pelo Tauri (wry): libera o microfone na janela da Ayla no Linux.
 [target.'cfg(target_os = "linux")'.dependencies]

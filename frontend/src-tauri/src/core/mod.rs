@@ -1,6 +1,7 @@
 //! Serviços nativos compartilhados pelo desktop e, posteriormente, pelos adaptadores.
 pub mod athena;
 pub mod athena_git;
+pub mod athena_lock;
 pub mod cloud;
 pub mod files;
 pub mod hardware;
