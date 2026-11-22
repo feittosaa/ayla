@@ -113,6 +113,8 @@ O **Iris** concentra capacidades relacionadas a imagens, documentos e contexto v
 
 A **Moneta** é o órgão financeiro da Ayla e um dos candidatos mais fortes a funcionar como produto independente.
 
+Repositório da Moneta: [github.com/feittosaa/moneta](https://github.com/feittosaa/moneta)
+
 Responsabilidades:
 
 - Contas
