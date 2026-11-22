@@ -4,6 +4,7 @@ use super::{
     athena, athena_git,
     hardware,
     iris,
+    media,
     reminders,
     memory::{self, Fact, Privacy},
     models::{self, Capability, Model},
@@ -201,10 +202,33 @@ impl Core {
         }
         if let Ok(projects) = self.store.lock().map(|db| db.projects().unwrap_or_default()) {
             for project in projects {
-                out.push(AthenaRoot { id: format!("project:{}", project.id), kind: "project", name: project.name, path: self.root.join("projetos-notas").join(&project.id), available: true });
+                out.push(AthenaRoot { id: project_root_id(&project.id), kind: "project", name: project.name, path: self.root.join("projetos-notas").join(&project.id), available: true });
             }
         }
         out
+    }
+    /// Iris: imagens, vídeos e PDFs guardados na Ayla, com a origem (anexo enviado no chat,
+    /// imagem gerada pelo chat ou adicionado direto em Arquivos) e a data em que entraram.
+    fn iris_stored(&self) -> Result<Vec<(i64, Value)>, String> {
+        let stored = self.store.lock().map_err(|_| "Dados ocupados")?.media_files().map_err(|_| "Falha ao consultar os arquivos")?;
+        let mut items: Vec<(i64, Value)> = Vec::new();
+        for (file, role, conversation, project) in stored {
+            let Some(mime) = stored_mime(&file) else { continue };
+            let root = project.as_ref().map(|(id, _)| project_root_id(id));
+            let project = project.map(|(_, name)| name);
+            let (source, place) = match role.as_deref() {
+                Some("assistant") => ("gerada", conversation.clone().unwrap_or_else(|| "Conversa".into())),
+                Some(_) => ("chat", conversation.clone().unwrap_or_else(|| "Conversa".into())),
+                None => ("arquivos", project.clone().unwrap_or_else(|| "Geral".into())),
+            };
+            let modified = fs::metadata(self.root.join(&file.path)).and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(file.created_at, |d| d.as_secs() as i64);
+            items.push((modified, json!({
+                "key": format!("arquivo:{}", file.id), "kind": kind_of_mime(mime), "name": file.name, "source": source, "place": place,
+                "project": project, "root": root, "added": file.created_at, "date": modified, "bytes": file.bytes, "file": file.id, "conversation": file.conversation_id,
+            })));
+        }
+        Ok(items)
     }
     /// Pasta de uma raiz, criada se for da Ayla (notas ou projeto); cofres precisam existir.
     fn athena_path(&self, prefs: &Preferences, id: &str) -> Result<PathBuf, String> {
@@ -547,6 +571,16 @@ pub fn save_preferences(
         .map_err(|_| {
             "Não foi possível salvar: verifique os limites e a URL HTTPS do provedor".into()
         })
+}
+/// Guarda só a aparência (salva enquanto a pessoa ajusta cores e controles), sem sobrescrever
+/// outras preferências salvas no meio-tempo.
+#[tauri::command]
+pub fn save_appearance(state: tauri::State<'_, Core>, appearance: super::preferences::Appearance) -> Result<(), String> {
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler as configurações")?;
+    if prefs.appearance == appearance { return Ok(()); }
+    prefs.appearance = appearance;
+    store.save(&prefs).map_err(|_| "Aparência fora dos limites suportados".into())
 }
 /// Guarda só o modo de resposta, sem sobrescrever outras preferências salvas no meio-tempo.
 #[tauri::command]
@@ -1125,6 +1159,10 @@ pub struct AthenaRoot {
     pub available: bool,
 }
 
+fn project_root_id(id: &str) -> String {
+    format!("project:{id}")
+}
+
 /// Árvore da Athena: cada raiz com as pastas e as notas, e os cofres do Obsidian ainda não abertos.
 #[tauri::command]
 pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String> {
@@ -1198,12 +1236,54 @@ pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: Str
     athena::write(&dir, &path, &content, expected)
 }
 
+#[tauri::command]
+pub async fn athena_paste_image(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, before: String, after: String, expected: i64, data: String) -> Result<Value, String> {
+    use tauri::Emitter;
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        if data.len() > (athena::MAX_ATTACHMENT as usize).div_ceil(3) * 4 {
+            return Err("A imagem passa de 15 MB".into());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Imagem inválida")?;
+        athena::paste_image(&dir, &path, &before, &after, expected, &bytes)
+    }).await.map_err(|_| "Falha ao colar a imagem")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(json!({"embed": result.0, "modified": result.1}))
+}
+
+#[tauri::command]
+pub async fn athena_add_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64) -> Result<Option<Value>, String> {
+    use std::io::Read;
+    use tauri::Emitter;
+    use tauri_plugin_dialog::DialogExt;
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let picker = app.clone();
+    let selected = crate::desktop::panel_dialog(&app, move || {
+        picker.dialog().file().add_filter("Imagens", &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "avif"])
+            .blocking_pick_file().and_then(|file| file.into_path().ok())
+    }).await?;
+    let Some(selected) = selected else { return Ok(None) };
+    let (content, modified) = tauri::async_runtime::spawn_blocking(move || {
+        let file = fs::File::open(selected).map_err(|_| "Não foi possível abrir a imagem")?;
+        if !file.metadata().map_err(|_| "Não foi possível ler a imagem")?.is_file() {
+            return Err("Selecione um arquivo de imagem".to_string());
+        }
+        let mut bytes = Vec::new();
+        file.take(athena::MAX_ATTACHMENT + 1).read_to_end(&mut bytes).map_err(|_| "Não foi possível ler a imagem")?;
+        athena::add_banner(&dir, &path, &content, expected, &bytes)
+    }).await.map_err(|_| "Falha ao adicionar o banner")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(Some(json!({"content": content, "modified": modified})))
+}
+
 /// Nota nova numa pasta da raiz (vazia = raiz).
 #[tauri::command]
-pub async fn athena_create(state: tauri::State<'_, Core>, root: String, folder: Option<String>, title: String) -> Result<String, String> {
+pub async fn athena_create(state: tauri::State<'_, Core>, root: String, folder: Option<String>, title: String, empty: Option<bool>) -> Result<String, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
     let title = athena::file_name(&title);
-    athena::create_in(&dir, folder.as_deref().unwrap_or(""), &title, &format!("# {title}\n\n"))
+    // Nota nova pelo botão: vazia, como no Obsidian (o título é o nome do arquivo).
+    let content = if empty.unwrap_or(false) { String::new() } else { format!("# {title}\n\n") };
+    athena::create_in(&dir, folder.as_deref().unwrap_or(""), &title, &content)
 }
 
 #[tauri::command]
@@ -1402,7 +1482,7 @@ pub fn athena_trash_folder(state: tauri::State<'_, Core>, root: String, path: St
     athena::trash_folder(&dir, &path)
 }
 
-/// Anexo (imagem ou PDF) de uma raiz pelo nome ou caminho, como nos links do Obsidian.
+/// Anexo (imagem, vídeo ou PDF) de uma raiz pelo nome ou caminho, como nos links do Obsidian.
 fn athena_attachment_path(state: &Core, root: &str, target: &str) -> Result<PathBuf, String> {
     let dir = state.athena_path(&state.prefs()?, root)?;
     let path = athena::find_attachment(&dir, target).ok_or("Anexo não encontrado")?;
@@ -1410,25 +1490,207 @@ fn athena_attachment_path(state: &Core, root: &str, target: &str) -> Result<Path
     Ok(path)
 }
 
-/// `athena-file://localhost/<raiz>/<anexo>`: imagens e PDFs das notas, lidos direto da pasta.
-pub fn athena_file(state: &Core, uri_path: &str) -> tauri::http::Response<Vec<u8>> {
-    use tauri::http::{header, Response, StatusCode};
-    let fail = |status: StatusCode| Response::builder().status(status).body(Vec::new()).unwrap_or_default();
-    let trimmed = uri_path.trim_start_matches('/');
-    let Some((root, target)) = trimmed.split_once('/') else { return fail(StatusCode::BAD_REQUEST) };
-    let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return fail(StatusCode::BAD_REQUEST) };
-    let Ok(path) = athena_attachment_path(state, &root, &target) else { return fail(StatusCode::NOT_FOUND) };
+/// Identifica o vínculo também nos endereços que já estão abertos quando a pasta muda.
+fn iris_root_id(dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    format!("iris:{:x}", Sha256::digest(dir.as_os_str().as_encoded_bytes()))
+}
+
+fn has_hidden_component(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    path.components().any(|component| matches!(component, Component::Normal(name) if name.as_encoded_bytes().starts_with(b".")))
+}
+
+fn linked_media_path(dir: &std::path::Path, requested_root: &str, target: &str) -> Option<PathBuf> {
+    use std::path::{Component, Path};
+    if iris_root_id(dir) != requested_root || has_hidden_component(dir)
+        || has_hidden_component(Path::new(target))
+        || !Path::new(target).components().all(|p| matches!(p, Component::Normal(_))) {
+        return None;
+    }
+    let path = dir.join(target);
+    if path.canonicalize().ok()? != path || !path.is_file() {
+        return None;
+    }
+    athena::attachment_mime(&path)?;
+    Some(path)
+}
+
+fn readable_media_path(state: &Core, root: &str, target: &str) -> Result<PathBuf, String> {
+    if root.starts_with("iris:") {
+        return state.prefs()?.system_folders().iter().find_map(|dir| linked_media_path(dir, root, target))
+            .ok_or_else(|| "Arquivo indisponível na pasta conectada".into());
+    }
+    athena_attachment_path(state, root, target)
+}
+
+#[tauri::command]
+pub async fn iris_change_folder(app: tauri::AppHandle, state: tauri::State<'_, Core>, disconnect: bool, root: Option<String>) -> Result<(), String> {
+    let folder = if disconnect { None } else {
+        let Some(chosen) = athena_pick_folder(app).await? else { return Ok(()) };
+        if has_hidden_component(std::path::Path::new(&chosen)) {
+            return Err("A Iris ignora pastas ocultas".into());
+        }
+        let dir = fs::canonicalize(chosen).map_err(|_| "Pasta indisponível")?;
+        if has_hidden_component(&dir) {
+            return Err("A Iris ignora pastas ocultas".into());
+        }
+        fs::read_dir(&dir).map_err(|_| "Não foi possível ler a pasta")?;
+        Some(dir)
+    };
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler a configuração")?;
+    let mut folders = prefs.system_folders();
+    if let Some(root) = root {
+        let index = folders.iter().position(|dir| iris_root_id(dir) == root).ok_or("Pasta já desconectada")?;
+        folders.remove(index);
+        if let Some(folder) = folder {
+            if !folders.contains(&folder) { folders.insert(index, folder); }
+        }
+    } else if let Some(folder) = folder {
+        if !folders.contains(&folder) { folders.push(folder); }
+    } else {
+        return Err("Selecione a pasta para desconectar".into());
+    }
+    prefs.iris_folder = None;
+    prefs.iris_folders = folders;
+    store.save(&prefs).map_err(|_| "Não foi possível salvar a pasta".into())
+}
+
+#[tauri::command]
+pub fn iris_move_folder(state: tauri::State<'_, Core>, root: String, target: String, after: bool) -> Result<(), String> {
+    if root == target {
+        return Ok(());
+    }
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler a configuração")?;
+    let mut folders = prefs.system_folders();
+    let index = folders.iter().position(|dir| iris_root_id(dir) == root).ok_or("Pasta já desconectada")?;
+    let folder = folders.remove(index);
+    let destination = folders.iter().position(|dir| iris_root_id(dir) == target).ok_or("Pasta de destino já desconectada")?;
+    folders.insert(destination + usize::from(after), folder);
+    prefs.iris_folder = None;
+    prefs.iris_folders = folders;
+    store.save(&prefs).map_err(|_| "Não foi possível salvar a ordem das pastas".into())
+}
+
+/// Miniaturas da Athena e da Iris, guardadas nos dados da Ayla (só neste computador).
+fn thumbnails(state: &Core) -> PathBuf {
+    state.root.join("cache").join("miniaturas")
+}
+
+/// Entrega o arquivo (ou a miniatura, com `?miniatura`, se for imagem), aceitando trechos.
+fn media_response(state: &Core, request: &tauri::http::Request<Vec<u8>>, path: &std::path::Path, mime: &str) -> tauri::http::Response<Vec<u8>> {
+    let range = request.headers().get(tauri::http::header::RANGE).and_then(|v| v.to_str().ok());
+    let wants_thumb = request.uri().query().is_some_and(|q| q.split('&').any(|p| p == "miniatura"));
+    if wants_thumb && mime.starts_with("video/") {
+        let binary = state.runtime.tool("ffmpeg", "ffmpeg").unwrap_or_else(|| PathBuf::from("ffmpeg"));
+        return media::video_thumbnail(&thumbnails(state), path, &binary)
+            .map(|thumb| media::serve(&thumb, "image/jpeg", range)).unwrap_or_else(not_found);
+    }
+    if wants_thumb && mime.starts_with("image/") {
+        return media::thumbnail(&thumbnails(state), path, false)
+            .map(|thumb| media::serve(&thumb, "image/jpeg", range)).unwrap_or_else(not_found);
+    }
+    // Prévia do PDF (primeira página); sem ela, a interface mostra o ícone, sem baixar o PDF inteiro.
+    if wants_thumb && mime == "application/pdf" {
+        return media::thumbnail(&thumbnails(state), path, true).map(|thumb| media::serve(&thumb, "image/jpeg", range)).unwrap_or_else(not_found);
+    }
+    media::serve(path, mime, range)
+}
+
+fn not_found() -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder().status(tauri::http::StatusCode::NOT_FOUND).body(Vec::new()).unwrap_or_default()
+}
+
+/// `athena-file://localhost/<raiz>/<anexo>`: imagens, vídeos e PDFs das notas, lidos direto da pasta.
+pub fn athena_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let trimmed = request.uri().path().trim_start_matches('/');
+    let Some((root, target)) = trimmed.split_once('/') else { return not_found() };
+    let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return not_found() };
+    let Ok(path) = readable_media_path(state, &root, &target) else { return not_found() };
     let mime = athena::attachment_mime(&path).unwrap_or("application/octet-stream");
-    let limit = if mime == "application/pdf" { athena::MAX_PDF } else { athena::MAX_ATTACHMENT };
-    if fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > limit {
-        return fail(StatusCode::PAYLOAD_TOO_LARGE);
+    media_response(state, request, &path, mime)
+}
+
+/// Tipo de um arquivo guardado (anexo ou imagem gerada) para mostrar na Iris.
+fn stored_mime(file: &FileInfo) -> Option<&'static str> {
+    match file.kind {
+        Kind::Image | Kind::Gif | Kind::Video | Kind::Pdf => athena::attachment_mime(std::path::Path::new(&file.name)).or(match file.kind {
+            Kind::Gif => Some("image/gif"),
+            Kind::Pdf => Some("application/pdf"),
+            Kind::Video => Some("video/mp4"),
+            _ => Some("image/png"),
+        }),
+        _ => None,
     }
-    match fs::read(&path) {
-        Ok(bytes) => Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE, mime)
-            .header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'")
-            .header(header::CACHE_CONTROL, "no-cache").body(bytes).unwrap_or_default(),
-        Err(_) => fail(StatusCode::NOT_FOUND),
+}
+
+/// `iris-file://localhost/<id>`: imagem, vídeo ou PDF guardado nos dados da Ayla.
+pub fn iris_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let Some(id) = athena::percent_decode(request.uri().path().trim_start_matches('/')) else { return not_found() };
+    let Ok(Some(file)) = state.store.lock().map(|db| db.file(&id).ok().flatten()) else { return not_found() };
+    let Some(mime) = stored_mime(&file) else { return not_found() };
+    media_response(state, request, &state.root.join(&file.path), mime)
+}
+
+/// Iris: todas as imagens, vídeos e PDFs — das raízes da Athena (cofres, notas, projetos), os
+/// anexos enviados no chat, as imagens que o chat gerou e os arquivos adicionados direto —,
+/// do mais recente ao mais antigo, com o tipo e a origem de cada um.
+#[tauri::command]
+pub async fn iris_library(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    iris_library_for(&state).await
+}
+
+async fn iris_library_for(state: &Core) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let mut roots: Vec<AthenaRoot> = state.athena_roots(&prefs).into_iter().filter(|r| r.available).collect();
+    for dir in prefs.system_folders() {
+        if has_hidden_component(&dir) {
+            continue;
+        }
+        let available = dir.canonicalize().ok().as_ref() == Some(&dir) && fs::read_dir(&dir).is_ok();
+        roots.push(AthenaRoot { id: iris_root_id(&dir), kind: "computer", available,
+            name: dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy().into_owned(), path: dir });
     }
+    let mut items = state.iris_stored()?;
+    let projects_with_media: std::collections::HashSet<String> = items.iter()
+        .filter_map(|(_, item)| item["root"].as_str().map(str::to_owned))
+        .collect();
+    let (scanned, folders, athena_roots) = tauri::async_runtime::spawn_blocking(move || {
+        let mut folders = Vec::new();
+        let mut athena_roots = Vec::new();
+        let mut out = Vec::new();
+        for root in roots {
+            let computer = root.kind == "computer";
+            let limit = (!computer).then_some(athena::MAX_NOTES);
+            let (entries, dirs) = if root.available { athena::scan_attachments(&root.path, limit) } else { Default::default() };
+            let has_media = !entries.is_empty() || projects_with_media.contains(&root.id);
+            let tree = json!({"id": root.id, "path": root.path, "name": root.name, "available": root.available, "folders": dirs, "hasMedia": has_media});
+            if computer {
+                folders.push(tree);
+            } else if has_media {
+                athena_roots.push(tree);
+            }
+            for found in entries {
+                let Some(mime) = athena::attachment_mime(std::path::Path::new(&found.path)) else { continue };
+                let folder = found.path.rsplit_once('/').map(|(f, _)| f.to_string()).unwrap_or_default();
+                let place = if folder.is_empty() { root.name.clone() } else { format!("{} / {folder}", root.name) };
+                out.push((found.modified, json!({
+                    "key": format!("{}|{}", root.id, found.path), "kind": kind_of_mime(mime), "name": found.title, "source": if computer { "computer" } else { "athena" }, "place": place,
+                    "date": found.modified, "bytes": found.bytes, "root": root.id, "path": found.path,
+                })));
+            }
+        }
+        (out, folders, athena_roots)
+    }).await.map_err(|_| "Falha ao ler os cofres")?;
+    items.extend(scanned);
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(json!({"items": items.into_iter().map(|(_, item)| item).collect::<Vec<_>>(), "roots": folders, "athenaRoots": athena_roots}))
+}
+
+fn kind_of_mime(mime: &str) -> &'static str {
+    if mime == "application/pdf" { "pdf" } else if mime.starts_with("video/") { "video" } else { "image" }
 }
 
 /// Move um anexo (imagem ou PDF) para outra pasta da mesma raiz.
@@ -1438,11 +1700,64 @@ pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: Strin
     athena::move_attachment(&dir, &path, &folder)
 }
 
-/// Abre o anexo no aplicativo padrão do sistema (visualizador de PDF ou de imagens).
+/// Serviço único da Athena e da Iris para abrir uma mídia (imagem, vídeo ou PDF) no aplicativo
+/// do sistema: um arquivo guardado na Ayla (`file`) ou um arquivo de uma raiz da Athena (`root` + `path`).
 #[tauri::command]
-pub fn athena_open_attachment(state: tauri::State<'_, Core>, root: String, target: String) -> Result<(), String> {
-    let path = athena_attachment_path(&state, &root, &target)?;
-    std::process::Command::new("xdg-open").arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o arquivo".into())
+pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<(), String> {
+    let target = match (file, root, path) {
+        (Some(id), _, _) => {
+            let file = state.store.lock().map_err(|_| "Dados ocupados")?.file(&id).ok().flatten().ok_or("Arquivo não encontrado")?;
+            stored_mime(&file).ok_or("Este tipo de arquivo não é uma mídia da Ayla")?;
+            state.root.join(&file.path)
+        }
+        (None, Some(root), Some(path)) => readable_media_path(&state, &root, &path)?,
+        _ => return Err("Arquivo não informado".into()),
+    };
+    media::open_in_system(&target)
+}
+
+fn trash_image(path: &std::path::Path) -> Result<(), String> {
+    use webkit2gtk::gio::{self, prelude::FileExt};
+    gio::File::for_path(path).trash(gio::Cancellable::NONE)
+        .map_err(|_| "Não foi possível mover a imagem para a lixeira do sistema.".into())
+}
+
+#[tauri::command]
+pub async fn iris_trash_image(app: tauri::AppHandle, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<(), String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Core>();
+        match (file, root, path) {
+            (Some(id), None, None) => {
+                let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+                let file = db.file(&id).map_err(|_| "Falha ao localizar a imagem")?.ok_or("Imagem não encontrada")?;
+                if !matches!(file.kind, Kind::Image | Kind::Gif) {
+                    return Err("Selecione uma imagem".into());
+                }
+                trash_image(&state.root.join(file.path))?;
+                db.delete_file(&id).map_err(|_| "A imagem foi para a lixeira, mas a Ayla não conseguiu atualizar o registro.".to_string())?;
+                Ok(())
+            }
+            (None, Some(root), Some(path)) => {
+                let target = if root.starts_with("iris:") {
+                    readable_media_path(&state, &root, &path)?
+                } else {
+                    let dir = state.athena_path(&state.prefs()?, &root)?.canonicalize().map_err(|_| "Pasta indisponível")?;
+                    let relative = athena::safe_folder(&path).ok_or("Caminho inválido")?;
+                    let target = dir.join(relative);
+                    if target.canonicalize().ok().as_ref() != Some(&target) || !target.is_file() {
+                        return Err("Imagem não encontrada".into());
+                    }
+                    target
+                };
+                if !athena::attachment_mime(&target).is_some_and(|mime| mime.starts_with("image/")) {
+                    return Err("Selecione uma imagem".into());
+                }
+                trash_image(&target)
+            }
+            _ => Err("Selecione uma imagem".into()),
+        }
+    }).await.map_err(|_| "Falha ao enviar a imagem para a lixeira")?
 }
 
 /// Abre a nota no Obsidian (onde os plugins do cofre rodam).
@@ -1695,13 +2010,17 @@ pub async fn chat(
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
-            let preferred = if request.automatic { prefs.cloud_model.as_str() }
-                else { request.cloud_model.as_deref().map(str::trim).filter(|m| !m.is_empty() && m.len() <= 200).unwrap_or(&prefs.cloud_model) };
-            let cloud_model = if !preferred.is_empty() { preferred.to_string() }
-                else if request.automatic {
+            // Modelo automático por padrão (decisão do usuário, 21/11/2026): o escolhido nos ajustes
+            // desta resposta; senão o do provedor próprio (Opções avançadas) ou o padrão da plataforma;
+            // senão o primeiro modelo de conversa que a conta oferece.
+            let picked = if request.automatic { None } else { request.cloud_model.as_deref().map(str::trim).filter(|m| !m.is_empty() && m.len() <= 200) };
+            let preferred = picked.map(str::to_owned).unwrap_or_else(|| if platform == "custom" { prefs.cloud_model.clone() }
+                else { cloud::provider(&platform).and_then(|p| p.default_model).unwrap_or("").to_owned() });
+            let cloud_model = if !preferred.is_empty() { preferred }
+                else {
                     let catalog = tokio::select! { _ = token.cancelled() => return Err("Resposta interrompida".into()), list = cloud::models(api,&base,&secret,false) => list? };
                     cloud::automatic_model(&platform,&catalog)?.to_owned()
-                } else { return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into()); };
+                };
             metric_model = cloud_model.clone();
             // Referências: só memórias públicas, iguais ao revisado e do escopo desta conversa.
             let mut instructions=if request.automatic { include_str!("persona.txt").trim() } else { prefs.system_prompt() }.to_owned();
@@ -2906,12 +3225,128 @@ mod tests {
         assert_eq!(clean_title(r#"{"titulo":""}"#), None);
         assert_eq!(clean_title("não é json"), None);
         assert_eq!(clean_title(r#"{"titulo":"um dois três quatro cinco seis sete oito nove dez onze"}"#), None);
-        let db = Store::open(&std::env::temp_dir().join(format!("ayla-title-{}.db", store::id()))).unwrap();
+        let path = std::env::temp_dir().join(format!("ayla-title-{}.db", store::id()));
+        let db = Store::open(&path).unwrap();
         let c = db.create_conversation(DEFAULT_TITLE, None).unwrap();
         assert!(db.retitle(&c.id, DEFAULT_TITLE, "Jantar").unwrap());
         assert!(!db.retitle(&c.id, DEFAULT_TITLE, "Outro").unwrap(), "não sobrescreve um título já trocado");
         assert_eq!(db.conversation_title(&c.id).unwrap(), "Jantar");
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
+    #[test]
+    fn iris_reads_linked_subfolders_in_place_and_revokes_access() {
+        let tmp = std::env::temp_dir().join(format!("ayla-iris-folder-{}", store::id()));
+        let core = Core::open(tmp.join("ayla")).unwrap();
+        let dir = tmp.join("Imagens");
+        fs::create_dir_all(dir.join("férias/2026")).unwrap();
+        fs::create_dir_all(dir.join("férias/2026/Notas")).unwrap();
+        fs::create_dir_all(dir.join("cofre/Mapas")).unwrap();
+        for name in ["foto.JPG", "férias/video.mp4", "férias/2026/doc.pdf", "férias/2026/Notas/Resumo.md", "cofre/Mapas/mapa.png", "notas.txt"] {
+            fs::write(dir.join(name), b"original").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&core.root, dir.join("fora")).unwrap();
+        let hidden = dir.join(".oculta").join("album");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("foto.jpg"), b"oculto").unwrap();
+        assert!(linked_media_path(&hidden, &iris_root_id(&hidden), "foto.jpg").is_none());
+        assert!(linked_media_path(&dir, &iris_root_id(&dir), ".oculta/album/foto.jpg").is_none());
+        let (listed, folders) = athena::scan_attachments(&dir, None);
+        assert_eq!(folders, ["cofre", "cofre/Mapas", "férias", "férias/2026"]);
+        assert_eq!(listed.len(), 4);
+        let id = iris_root_id(&dir);
+        let relative = "férias/2026/doc.pdf";
+        let mut prefs = core.prefs().unwrap();
+        prefs.iris_folder = Some(dir.clone());
+        core.preferences.lock().unwrap().save(&prefs).unwrap();
+        let request = tauri::http::Request::builder()
+            .uri(format!("athena-file://localhost/{id}/f%C3%A9rias%2F2026%2Fdoc.pdf"))
+            .body(Vec::new()).unwrap();
+        assert_eq!(athena_file(&core, &request).body(), b"original");
+        fs::write(dir.join(relative), b"alterado").unwrap();
+        assert_eq!(athena_file(&core, &request).body(), b"alterado");
+        assert!(linked_media_path(&dir, &id, "../fora.pdf").is_none());
+        assert!(linked_media_path(&dir, &id, "notas.txt").is_none());
+        #[cfg(unix)] {
+            fs::write(core.root.join("outro.pdf"), b"externo").unwrap();
+            assert!(linked_media_path(&dir, &id, "fora/outro.pdf").is_none());
+        }
+        prefs.iris_folder = None;
+        core.preferences.lock().unwrap().save(&prefs).unwrap();
+        assert_eq!(athena_file(&core, &request).status(), 404);
+        assert_eq!(fs::read(dir.join(relative)).unwrap(), b"alterado");
+        assert!(core.iris_stored().unwrap().is_empty());
+        drop(core);
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn iris_lists_sent_generated_and_kept_media_with_their_origin() {
+        let root = std::env::temp_dir().join(format!("ayla-iris-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let png = b"\x89PNG\r\n\x1a\n0000000000";
+        let add = |name: &str, bytes: &'static [u8], kept: bool| core.store_file(name, |dest| fs::write(dest, bytes).map(|_| bytes.len() as u64).map_err(|e| e.to_string()), None, kept).unwrap();
+        let sent = add("foto.png", png, false);
+        let generated = add("imagem-1.png", png, false);
+        let manual = add("contrato.pdf", b"%PDF-1.4 x", true);
+        let pending = add("rascunho.png", png, false);
+        let text = add("notas.md", b"# x", true);
+        let chat = core.store.lock().unwrap().create_conversation("Viagem", None).unwrap();
+        core.store.lock().unwrap().save_turn(&chat.id, "olha", "pronto", true, &[sent.id.clone()], &[generated.id.clone()], None).unwrap();
+        let items: Vec<Value> = core.iris_stored().unwrap().into_iter().map(|(_, v)| v).collect();
+        let find = |id: &str| items.iter().find(|v| v["file"] == id).cloned();
+        assert_eq!((find(&sent.id).unwrap()["source"].clone(), find(&sent.id).unwrap()["place"].clone(), find(&sent.id).unwrap()["kind"].clone()), (json!("chat"), json!("Viagem"), json!("image")));
+        assert_eq!(find(&generated.id).unwrap()["source"], "gerada");
+        assert_eq!((find(&manual.id).unwrap()["source"].clone(), find(&manual.id).unwrap()["place"].clone(), find(&manual.id).unwrap()["kind"].clone()), (json!("arquivos"), json!("Geral"), json!("pdf")));
+        assert!(find(&pending.id).is_none(), "anexo não enviado fica de fora");
+        assert!(find(&text.id).is_none(), "texto não é mídia");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn iris_groups_project_conversations_and_athena_media_in_the_same_root() {
+        let root = std::env::temp_dir().join(format!("ayla-iris-project-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let (first, second, empty, chat) = {
+            let db = core.store.lock().unwrap();
+            let first = db.create_project("Campanha", "").unwrap();
+            let second = db.create_project("Campanha", "").unwrap();
+            let empty = db.create_project("Sem mídias", "").unwrap();
+            let chat = db.create_conversation("Conversa do projeto", Some(&first.id)).unwrap();
+            (first, second, empty, chat)
+        };
+        let first_root = project_root_id(&first.id);
+        let second_root = project_root_id(&second.id);
+        let empty_root = project_root_id(&empty.id);
+        let prefs = core.prefs().unwrap();
+        let project_dir = core.athena_path(&prefs, &first_root).unwrap();
+        let folder = athena::mkdir(&project_dir, "", "Mapas").unwrap();
+        let png = b"\x89PNG\r\n\x1a\n0000000000";
+        fs::write(project_dir.join(&folder).join("mapa.png"), png).unwrap();
+        let add = |name: &str, project, kept| core.store_file(name, |dest|
+            fs::write(dest, png).map(|_| png.len() as u64).map_err(|e| e.to_string()), project, kept).unwrap();
+        // A conversa define o projeto mesmo quando o anexo foi preparado sem essa associação.
+        let sent = add("chat.png", None, false);
+        let second_file = add("outro.png", Some(second.id.clone()), true);
+        core.store.lock().unwrap().save_turn(&chat.id, "olha", "pronto", true, &[sent.id], &[], None).unwrap();
+
+        let library = tauri::async_runtime::block_on(iris_library_for(&core)).unwrap();
+        let roots = library["athenaRoots"].as_array().unwrap();
+        let get_root = |id: &str| roots.iter().find(|root| root["id"] == id);
+        assert_eq!(get_root(&first_root).unwrap()["folders"], json!(["Mapas"]));
+        assert_eq!(get_root(&second_root).unwrap()["folders"], json!([]));
+        assert!(get_root(&empty_root).is_none());
+        let items = library["items"].as_array().unwrap();
+        let in_project: Vec<_> = items.iter().filter(|item| item["root"] == first_root).collect();
+        assert_eq!(in_project.len(), 2);
+        assert!(in_project.iter().any(|item| item["source"] == "chat" && item["name"] == "chat.png"));
+        assert!(in_project.iter().any(|item| item["source"] == "athena" && item["path"] == "Mapas/mapa.png"));
+        assert!(items.iter().any(|item| item["file"] == second_file.id && item["root"] == second_root));
+        drop(core);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn files_are_copied_classified_linked_and_cleaned() {
         let root = std::env::temp_dir().join(format!("ayla-files-core-{}", store::id()));

@@ -427,7 +427,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
           {routing && <p role="status">Última resposta: {routing}</p>}
           <label>Modo<select value={destination} disabled={busy || mode === 'local_only' || mode === 'cloud_only'} onChange={e => chooseSource(e.target.value as ResponseSource)}><option value="local">Neste computador</option><option value="auto">Automático</option><option value="cloud">Na nuvem{provider ? '' : ' · conecte uma conta'}</option></select></label>
           {destination !== 'auto' && (cloud
-            ? <label>Modelo da nuvem<select value={cloudModel} onFocus={loadCloudModels} disabled={busy || !provider} onChange={e => setCloudModel(e.target.value)}><option value="">{snapshot.preferences.cloud_model ? `Padrão · ${snapshot.preferences.cloud_model}` : 'Escolha em Configurações › Nuvem'}</option>{cloudModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+            ? <label>Modelo da nuvem<select value={cloudModel} onFocus={loadCloudModels} disabled={busy || !provider} onChange={e => setCloudModel(e.target.value)}><option value="">Automático</option>{cloudModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
             : <label>Modelo<select value={model} disabled={busy} onChange={e => setModel(e.target.value)}><option value="">Escolha automática</option>{snapshot.models.filter(m => visual ? supports(m, 'vision') : kind === 'auto' ? (['text', 'reasoning', 'vision'] as Capability[]).some(k => supports(m, k)) : supports(m, kind)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>)}
           <label>Esforço<select value={effort} disabled={busy} onChange={e => { setEffort(e.target.value as Effort); if (!cloud) setModel(''); }}>
             <option value="">Automático</option><option value="low">{cloud ? 'Leve' : 'Leve · resposta direta'}</option><option value="medium">Médio</option><option value="high">{cloud ? 'Alto' : 'Alto · raciocínio'}</option>
@@ -448,14 +448,12 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         {cloud && !image && (!research || searchAvailable) && <div className="cloud-review">
           {mode === 'per_conversation' && <label className="check"><input type="checkbox" checked={conversation?.cloud_consent ?? false} disabled={busy} onChange={e => void consent(e.target.checked)} />Permitir nuvem nesta conversa</label>}
           {research && <p>Ayla vai pesquisar na web com {provider === 'chatgpt' ? 'seu plano do ChatGPT' : 'a API da OpenAI'}. A pesquisa usa a franquia ou os créditos da conta.</p>}
-          <label>Privacidade do pedido<select value={sensitivity} disabled={busy} onChange={e => { setSensitivity(e.target.value as Sensitivity); setReviewed(false); }}><option value="uncertain">Ainda não verificada</option><option value="sensitive">Sensível · somente local</option><option value="public">Pública</option></select></label>
-          <b>Personalidade que será enviada</b><pre>{snapshot.system_prompt}</pre><b>Seu pedido</b><pre>{input || 'Digite o pedido para revisar.'}</pre>
           {shownReferences.length > 0 && <fieldset className="cloud-references"><legend>Referências que podem ir junto</legend>
             {shownReferences.map(r => <label key={r.id} className="check"><input type="checkbox" checked={!dropped.includes(r.id)} disabled={busy} onChange={e => { setDropped(prev => e.target.checked ? prev.filter(id => id !== r.id) : [...prev, r.id]); setReviewed(false); }} />{r.content}</label>)}
             <small>Só memórias marcadas como públicas e relacionadas ao pedido aparecem aqui.</small>
           </fieldset>}
-          <p>{kept.length ? 'Somente a personalidade, este pedido e as referências marcadas acima.' : 'Somente a personalidade acima e este pedido.'} Histórico, outras memórias e anexos ficam neste computador.</p>
-          <label className="check"><input type="checkbox" checked={reviewed} disabled={busy || pendingRoute || sensitivity !== 'public'} onChange={e => setReviewed(e.target.checked)} />Revisei a personalidade e o pedido e confirmo que são públicos.</label>
+          {/* Só a confirmação (decisão do usuário, 21/11/2026): marcar a caixa declara o pedido público. */}
+          <label className="check"><input type="checkbox" checked={reviewed} disabled={busy || pendingRoute} onChange={e => { setSensitivity(e.target.checked ? 'public' : 'uncertain'); setReviewed(e.target.checked); }} />Confirmo que este pedido não tem dados pessoais e pode ir para a nuvem.</label>
         </div>}
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>
           {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}` : 'Transcrevendo…'}</p>}

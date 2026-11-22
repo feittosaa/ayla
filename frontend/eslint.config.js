@@ -16,7 +16,7 @@ const browser = {
 }
 
 export default defineConfig([
-  globalIgnores(['dist', 'src-tauri/target']),
+  globalIgnores(['dist', 'src-tauri/target', 'public/pdfjs']),
   {
     files: ['**/*.{js,jsx,mjs}'],
     extends: [

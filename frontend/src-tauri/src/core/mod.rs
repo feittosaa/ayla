@@ -5,6 +5,7 @@ pub mod cloud;
 pub mod files;
 pub mod hardware;
 pub mod iris;
+pub mod media;
 pub mod memory;
 pub mod policy;
 pub mod research;

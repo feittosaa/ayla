@@ -6,7 +6,6 @@ function Icon({ size = 20, children }: { size?: number; children: ReactNode }) {
 }
 type Props = { size?: number };
 
-export const BookIcon = ({ size }: Props) => <Icon size={size}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z" /><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" /><path d="M9 7h7M9 11h5" /></Icon>;
 export const PlusIcon = ({ size }: Props) => <Icon size={size}><path d="M12 5v14M5 12h14" /></Icon>;
 export const SidebarIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></Icon>;
 export const ComputerIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M2 20h20" /></Icon>;
@@ -15,6 +14,7 @@ export const PaperclipIcon = ({ size }: Props) => <Icon size={size}><path d="M21
 export const SlidersIcon = ({ size }: Props) => <Icon size={size}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></Icon>;
 export const MicIcon = ({ size }: Props) => <Icon size={size}><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" /></Icon>;
 export const ExpandIcon = ({ size }: Props) => <Icon size={size}><path d="M5 19 19 5M8 5h11v11" /></Icon>;
+export const FullscreenIcon = ({ size }: Props) => <Icon size={size}><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></Icon>;
 export const ArrowUpIcon = ({ size }: Props) => <Icon size={size}><path d="M12 19V5M5 12l7-7 7 7" /></Icon>;
 export const CopyIcon = ({ size }: Props) => <Icon size={size}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Icon>;
 export const ChevronRightIcon = ({ size }: Props) => <Icon size={size}><path d="M9 18l6-6-6-6" /></Icon>;
@@ -33,3 +33,8 @@ export const PinIcon = ({ size }: Props) => <Icon size={size}><path d="M12 17v5M
 export const ColumnsIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M12 4v16" /></Icon>;
 export const GitIcon = ({ size }: Props) => <Icon size={size}><circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="8" r="2.2" /><path d="M6 8.2v7.6M18 10.2c0 4-4 4.5-10.2 6.6" /></Icon>;
 export const RefreshIcon = ({ size }: Props) => <Icon size={size}><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4" /></Icon>;
+export const VideoIcon = ({ size }: Props) => <Icon size={size}><rect x="2" y="5" width="15" height="14" rx="2" /><path d="M17 10l5-3v10l-5-3z" /></Icon>;
+export const HandIcon = ({ size }: Props) => <Icon size={size}><path d="M18 11V6a2 2 0 0 0-4 0v5M14 10V4a2 2 0 0 0-4 0v6M10 10.5V6a2 2 0 0 0-4 0v8" /><path d="M18 8a2 2 0 0 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15" /></Icon>;
+export const CursorTextIcon = ({ size }: Props) => <Icon size={size}><path d="M9 4h6M9 20h6M12 4v16" /></Icon>;
+export const FitWidthIcon = ({ size }: Props) => <Icon size={size}><path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" /></Icon>;
+export const FitPageIcon = ({ size }: Props) => <Icon size={size}><rect x="6" y="3" width="12" height="18" rx="1.5" /><path d="M12 7v10M10 9l2-2 2 2M10 15l2 2 2-2" /></Icon>;

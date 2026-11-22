@@ -83,6 +83,11 @@ pub fn list(root: &Path) -> Vec<Note> {
 
 /// Anexos que a Athena mostra (imagens e PDF), para a árvore, como o explorador do Obsidian.
 pub fn attachments(root: &Path) -> Vec<Note> {
+    scan_attachments(root, Some(MAX_NOTES)).0
+}
+
+pub fn scan_attachments(root: &Path, limit: Option<usize>) -> (Vec<Note>, Vec<String>) {
+    let mut folders = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     let mut pending = vec![PathBuf::new()];
     while let Some(dir) = pending.pop() {
@@ -98,8 +103,13 @@ pub fn attachments(root: &Path) -> Vec<Note> {
                 pending.push(relative);
             } else if kind.is_file() && attachment_mime(&relative).is_some() {
                 let Ok(meta) = entry.metadata() else { continue };
+                if !dir.as_os_str().is_empty() && folders.insert(relative_string(&dir)) {
+                    for parent in dir.ancestors().skip(1).take_while(|parent| !parent.as_os_str().is_empty()) {
+                        if !folders.insert(relative_string(parent)) { break; }
+                    }
+                }
                 out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
-                if out.len() >= MAX_NOTES {
+                if limit.is_some_and(|max| out.len() >= max) {
                     pending.clear();
                     break;
                 }
@@ -107,7 +117,7 @@ pub fn attachments(root: &Path) -> Vec<Note> {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
+    (out, folders.into_iter().collect())
 }
 
 /// Move um anexo para outra pasta da mesma raiz (sem sobrescrever). Links pelo nome continuam
@@ -633,10 +643,8 @@ pub fn tags(text: &str) -> Vec<String> {
 
 pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "svg", "avif"];
 pub const MAX_ATTACHMENT: u64 = 15 * 1024 * 1024;
-/// PDFs aparecem na nota (![[arquivo.pdf]]) e abrem numa aba, até este tamanho.
-pub const MAX_PDF: u64 = 80 * 1024 * 1024;
 
-/// Tipo do anexo que a Athena mostra (imagens e PDF); outros arquivos não são servidos.
+/// Tipo do anexo que a Athena e a Iris mostram (imagens, vídeos e PDF); outros arquivos não são servidos.
 pub fn attachment_mime(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
     Some(match extension.as_str() {
@@ -648,8 +656,100 @@ pub fn attachment_mime(path: &Path) -> Option<&'static str> {
         "svg" => "image/svg+xml",
         "avif" => "image/avif",
         "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        "mkv" => "video/x-matroska",
         _ => return None,
     })
+}
+
+/// Guarda uma imagem colada e grava a referência na nota na mesma operação.
+pub fn paste_image(root: &Path, note: &str, before: &str, after: &str, expected: i64, bytes: &[u8]) -> Result<(String, i64), String> {
+    let (target, _, modified) = save_note_image(root, note, expected, bytes, |target| format!("{before}![[{target}]]{after}"))?;
+    Ok((format!("![[{target}]]"), modified))
+}
+
+pub fn add_banner(root: &Path, note: &str, content: &str, expected: i64, bytes: &[u8]) -> Result<(String, i64), String> {
+    let (_, updated, modified) = save_note_image(root, note, expected, bytes, |target| with_banner(content, target))?;
+    Ok((updated, modified))
+}
+
+fn with_banner(content: &str, target: &str) -> String {
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let target = if target.contains('"') { target.rsplit('/').next().unwrap_or(target) } else { target };
+    let banner = format!("banner: \"[[{target}]]\"{newline}");
+    let mut lines = content.split_inclusive('\n');
+    if let Some(opening) = lines.next().filter(|line| line.trim_end() == "---") {
+        let mut updated = String::with_capacity(content.len() + banner.len());
+        updated.push_str(opening);
+        let mut offset = opening.len();
+        for line in lines {
+            if line.trim_end() == "---" {
+                updated.push_str(&banner);
+                updated.push_str(&content[offset..]);
+                return updated;
+            }
+            if !line.starts_with("banner:") { updated.push_str(line); }
+            offset += line.len();
+        }
+    }
+    format!("---{newline}{banner}---{newline}{newline}{content}")
+}
+
+fn save_note_image(root: &Path, note: &str, expected: i64, bytes: &[u8], content: impl FnOnce(&str) -> String) -> Result<(String, String, i64), String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT {
+        return Err("A imagem passa de 15 MB".into());
+    }
+    let extension = match bytes {
+        [137, 80, 78, 71, 13, 10, 26, 10, ..] => "png",
+        [255, 216, 255, ..] => "jpg",
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => "gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
+        [b'B', b'M', ..] => "bmp",
+        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f' | b's', ..] => "avif",
+        _ => return Err("Formato de imagem incompatível".into()),
+    };
+    let relative = safe_relative(note).ok_or("Nota inválida")?;
+    let root = root.canonicalize().map_err(|_| "Pasta da nota indisponível")?;
+    let path = root.join(&relative);
+    if path.canonicalize().ok().as_ref() != Some(&path) || !path.is_file() {
+        return Err("Nota não encontrada na pasta da Athena".into());
+    }
+    let title = relative.file_stem().ok_or("Nota inválida")?;
+    let images = root.join("Imagens");
+    let folder = images.join(title);
+    for dir in [&images, &folder] {
+        match fs::create_dir(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) => {}
+            Err(_) => return Err("Não foi possível criar a pasta de imagens da nota".into()),
+        }
+    }
+
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| "Não foi possível gerar o nome da imagem")?;
+    let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = format!("Imagem-{id}.{extension}");
+    let image = folder.join(&name);
+    let title = title.to_string_lossy();
+    // Referências por caminho abrem direto. Títulos com sintaxe wiki usam o nome único.
+    let target = if title.contains(['[', ']', '#', '|', '\n', '\r', '\\']) {
+        name
+    } else {
+        format!("Imagens/{title}/{name}")
+    };
+    let mut file = fs::File::create_new(&image).map_err(|_| "Não foi possível criar a imagem")?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let content = content(&target);
+    let result = written.map_err(|_| "Não foi possível salvar a imagem".to_string())
+        .and_then(|_| write(&root, note, &content, Some(expected)));
+    if result.is_err() {
+        let _ = fs::remove_file(&image);
+    }
+    result.map(|modified| (target, content, modified))
 }
 
 /// Decodifica `%XX` de um trecho de URL (nomes com espaço e acentos).
@@ -807,6 +907,62 @@ mod tests {
     }
 
     #[test]
+    fn colar_imagem_grava_na_pasta_da_nota_e_preserva_o_texto() {
+        let root = temp();
+        let note = create_in(&root, "Sessões", "Mapa da região", "Antes depois").unwrap();
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let (_, stamp) = read(&root, &note).unwrap();
+        let (embed, stamp) = paste_image(&root, &note, "Antes ", " depois", stamp, png).unwrap();
+        let target = &embed[3..embed.len() - 2];
+        assert!(target.starts_with("Imagens/Mapa da região/"));
+        assert_eq!(fs::read(root.join(target)).unwrap(), png);
+        assert_eq!(read(&root, &note).unwrap().0, format!("Antes {embed} depois"));
+        assert_eq!(find_attachment(&root, target), Some(root.join(target)));
+
+        let (another, stamp) = paste_image(&root, &note, &embed, "", stamp, png).unwrap();
+        assert_ne!(another, embed);
+        assert!(paste_image(&root, &note, "fora", "", stamp - 10, png).is_err());
+        assert!(paste_image(&root, &note, "fora", "", stamp, b"texto").is_err());
+        assert_eq!(read(&root, &note).unwrap().0, format!("{embed}{another}"));
+        assert_eq!(attachments(&root).len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn banner_preserva_nota_e_copia_imagem_para_a_raiz() {
+        let root = temp();
+        let source = "---\r\nbanner: \"\"\r\ntags: [mapa]\r\n---\r\nTexto com [[Link]].";
+        let note = create_in(&root, "", "Nota", source).unwrap();
+        let (_, modified) = read(&root, &note).unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let (updated, _) = add_banner(&root, &note, source, modified, bytes).unwrap();
+        let banner = updated.lines().find_map(|line| line.strip_prefix("banner: \"[[").and_then(|value| value.strip_suffix("]]\""))).unwrap();
+        assert!(banner.starts_with("Imagens/Nota/"));
+        assert_eq!(fs::read(root.join(banner)).unwrap(), bytes);
+        assert_eq!(updated, format!("---\r\ntags: [mapa]\r\nbanner: \"[[{banner}]]\"\r\n---\r\nTexto com [[Link]]."));
+        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: \"[[mapa.png]]\"\n---\n\nTexto");
+        assert!(add_banner(&root, &note, source, i64::MIN, bytes).is_err());
+        assert_eq!(fs::read_dir(root.join("Imagens/Nota")).unwrap().count(), 1);
+        assert_eq!(read(&root, &note).unwrap().0, updated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn colar_imagem_recusa_pasta_com_link_simbolico() {
+        let root = temp();
+        let outside = temp();
+        let note = create(&root, "Mapa", "").unwrap();
+        let (_, stamp) = read(&root, &note).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Imagens")).unwrap();
+        assert!(paste_image(&root, &note, "", "", stamp, b"\x89PNG\r\n\x1a\nfixture").is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(read(&root, &note).unwrap().0, "");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
     fn pastas_e_links() {
         let root = temp();
         assert_eq!(mkdir(&root, "", "RPG").unwrap(), "RPG");
@@ -856,12 +1012,17 @@ mod tests {
         fs::write(root.join("Livros/script.sh"), "x").unwrap();
         let found: Vec<String> = attachments(&root).into_iter().map(|n| n.path).collect();
         assert_eq!(found, vec!["Livros/Regras.pdf".to_string()]);
+        fs::create_dir_all(root.join("Livros/Acervo/Vazio")).unwrap();
+        let (media, folders) = scan_attachments(&root, Some(MAX_NOTES));
+        assert_eq!(media.len(), 1);
+        assert_eq!(folders, ["Livros"]);
         assert_eq!(move_attachment(&root, "Livros/Regras.pdf", "").unwrap(), "Regras.pdf");
         assert!(root.join("Regras.pdf").is_file());
         assert!(move_attachment(&root, "Livros/script.sh", "").is_err() && move_attachment(&root, "../x.pdf", "").is_err());
         assert_eq!(attachment_mime(Path::new("a/Foto.JFIF")), Some("image/jpeg"));
         assert_eq!(attachment_mime(Path::new("livro.pdf")), Some("application/pdf"));
         assert_eq!(attachment_mime(Path::new("script.sh")), None);
+        assert_eq!(attachment_mime(Path::new("Sessão 1.MP4")), Some("video/mp4"));
         assert_eq!(percent_decode("Minha%20foto%C3%A9.png").as_deref(), Some("Minha fotoé.png"));
         assert_eq!(percent_decode("quebrado%2"), None);
         let _ = fs::remove_dir_all(&root);

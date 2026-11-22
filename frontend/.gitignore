@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Arquivos do pdf.js copiados pelo vite.config.js
+public/pdfjs

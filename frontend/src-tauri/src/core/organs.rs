@@ -40,7 +40,8 @@ pub fn with_theme(html: &str) -> String {
 }
 const MANIFEST: &str = include_str!("../../../../organs/moneta/organ.json");
 /// Ícone da Moneta (o mesmo do repositório dela), para o trilho mostrar o órgão antes do download.
-const ICON: &[u8] = include_bytes!("../../../../organs/moneta/icon.png");
+/// Logo da Moneta: SVG monocromático (`currentColor`), pintado na cor do texto da Ayla.
+const ICON: &[u8] = include_bytes!("../../../../organs/moneta/icon.svg");
 /// Projeto do Docker Compose da Moneta dentro da Ayla, separado de qualquer outro.
 const PROJECT: &str = "ayla-moneta";
 
@@ -342,7 +343,7 @@ impl Organ {
 
     fn icon(&self) -> String {
         use base64::Engine;
-        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(ICON))
+        format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(ICON))
     }
 
     pub async fn status(&self) -> Status {
