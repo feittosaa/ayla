@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 import tempfile
@@ -59,12 +60,14 @@ if args.quickshell:
         sys.exit("A opção --quickshell requer a barra horizontal do illogical-impulse e hyprland.conf. Para os outros desktops use ./install.sh.")
     old = bar.read_text()
     marker = "            id: leftSectionRowLayout"
-    if "// Ayla Quick View" not in old:
+    button_marker = "// Ayla Quick View"
+    margin = "Appearance.rounding.screenRounding"
+    if button_marker not in old:
         if old.count(marker) != 1:
             sys.exit("O layout da barra é diferente do esperado. Nenhuma configuração foi editada.")
         button = """
             RippleButton { // Ayla Quick View
-                Layout.leftMargin: Appearance.sizes.hyprlandGapsOut
+                Layout.leftMargin: MARGIN
                 implicitWidth: 36
                 implicitHeight: 36
                 buttonRadius: Appearance.rounding.normal
@@ -74,13 +77,20 @@ if args.quickshell:
                     text: "chat_bubble"
                     color: Appearance.colors.colOnLayer0
                 }
-            }""".replace("BIN", json.dumps(str(exe), ensure_ascii=False))
+            }""".replace("MARGIN", margin).replace("BIN", json.dumps(str(exe), ensure_ascii=False))
         patches.append((bar, old.replace(marker, marker + "\n" + button)))
+    else:
+        legacy_margin = button_marker + "\n                Layout.leftMargin: Appearance.sizes.hyprlandGapsOut"
+        if old.count(legacy_margin) == 1:
+            updated_margin = button_marker + "\n                Layout.leftMargin: " + margin
+            patches.append((bar, old.replace(legacy_margin, updated_margin, 1)))
     old = hypr.read_text()
     # gtk-launch trata argumentos como URIs. A entrada privativa já inclui --background.
     hook = "exec-once = gtk-launch dev.feit.ayla-login"
-    if hook not in old.splitlines():
-        patches.append((hypr, old.rstrip("\n") + "\n\n# Ayla Quick View\n" + hook + "\n"))
+    shortcut = f"bindd = SUPER, A, Visão rápida da Ayla, exec, {shlex.quote(str(exe))} --quick"
+    missing = [line for line in (hook, shortcut) if line not in old.splitlines()]
+    if missing:
+        patches.append((hypr, old.rstrip("\n") + "\n\n# Ayla Quick View\n" + "\n".join(missing) + "\n"))
 
 write(exe, args.binary, 0o755)
 write(icon, args.icon, 0o644)

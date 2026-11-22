@@ -45,6 +45,15 @@ pub struct Preferences {
     /// Notificações do sistema; arquivos anteriores recebem o padrão (todas ligadas).
     pub notifications: Notifications,
     pub desktop: DesktopPreferences,
+    /// Versões anteriores: uma pasta de notas escolhida. Agora vale como um cofre a mais.
+    pub athena_folder: String,
+    /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
+    pub athena_vaults: Vec<String>,
+    /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
+    pub athena_git: bool,
+    /// Modo de resposta escolhido na conversa ("local", "auto" ou "cloud"); vale para as
+    /// próximas conversas até ser trocado. Vazio: segue o modo de uso.
+    pub response_source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -114,6 +123,10 @@ impl Default for Preferences {
             voice: Some(true),
             notifications: Notifications::default(),
             desktop: DesktopPreferences::default(),
+            athena_folder: String::new(),
+            athena_vaults: Vec::new(),
+            athena_git: true,
+            response_source: String::new(),
         }
     }
 }
@@ -158,11 +171,31 @@ impl Preferences {
             75
         }
     }
+    /// Campos que têm comando próprio (cofres da Athena e modo de resposta): uma tela que salva
+    /// as preferências a partir de uma cópia antiga não pode desfazê-los.
+    pub fn keep_managed(&mut self, saved: &Preferences) {
+        self.athena_vaults = saved.athena_vaults.clone();
+        self.athena_folder = saved.athena_folder.clone();
+        self.response_source = saved.response_source.clone();
+    }
+    /// Cofres da Athena, incluindo a pasta escolhida em versões anteriores.
+    pub fn vaults(&self) -> Vec<String> {
+        let mut out = self.athena_vaults.clone();
+        if !self.athena_folder.is_empty() && !out.contains(&self.athena_folder) {
+            out.insert(0, self.athena_folder.clone());
+        }
+        out
+    }
     pub fn validate(&self) -> io::Result<()> {
         if !hex_color(&self.desktop.panel_color) || !hex_color(&self.desktop.panel_accent)
             || self.desktop.panel_radius > 48 || self.desktop.panel_font.chars().count() > 100
             || self.desktop.panel_font.chars().any(char::is_control)
             || self.personality.chars().count() > 4000
+            || self.athena_folder.chars().count() > 4096
+            || self.athena_folder.chars().any(char::is_control)
+            || (!self.athena_folder.is_empty() && !std::path::Path::new(&self.athena_folder).is_absolute())
+            || self.athena_vaults.len() > 50
+            || self.athena_vaults.iter().any(|v| v.is_empty() || v.chars().count() > 4096 || v.chars().any(char::is_control) || !std::path::Path::new(v).is_absolute())
             || self.version != VERSION
             || self.percent() < 5
             || self.percent() > 90
@@ -173,6 +206,7 @@ impl Preferences {
             || self.context_tokens < 512
             || self.context_tokens > 32768
             || self.idle_seconds > 3600
+            || !["", "local", "auto", "cloud"].contains(&self.response_source.as_str())
         {
             return Err(io::Error::other("Configuração fora dos limites suportados"));
         }
@@ -251,6 +285,32 @@ impl PreferenceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn response_source_is_kept_and_validated() {
+        let mut prefs = Preferences::default();
+        for source in ["", "local", "auto", "cloud"] {
+            prefs.response_source = source.into();
+            assert!(prefs.validate().is_ok(), "{source}");
+        }
+        prefs.response_source = "nuvem".into();
+        assert!(prefs.validate().is_err());
+        let old: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.response_source, "");
+    }
+
+    #[test]
+    fn saving_an_old_copy_keeps_vaults_and_response_source() {
+        let mut saved = Preferences::default();
+        saved.athena_vaults = vec!["/home/teste/cofre".into()];
+        saved.response_source = "auto".into();
+        let mut stale = Preferences::default();
+        stale.memory_auto = !saved.memory_auto;
+        stale.keep_managed(&saved);
+        assert_eq!(stale.athena_vaults, saved.athena_vaults);
+        assert_eq!(stale.response_source, "auto");
+        assert_ne!(stale.memory_auto, saved.memory_auto);
+    }
+
     #[test]
     fn desktop_defaults_and_opt_out_survive_reopening() {
         let root = std::env::temp_dir().join(format!("ayla-desktop-prefs-{}", super::super::store::id()));

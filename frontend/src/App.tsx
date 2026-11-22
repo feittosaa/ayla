@@ -6,8 +6,11 @@ import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
 import CloudSettings from './components/CloudSettings';
 import Reminders from './components/Reminders';
+import Confirm from './components/Confirm';
+import Athena from './components/Athena';
+import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
-import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
+import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
@@ -18,12 +21,12 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'nuvem', label: 'Nuvem' },
+  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
-type SpaceId = 'ayla' | 'settings' | 'moneta';
+type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena';
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -36,17 +39,18 @@ export default function App() {
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const [desktopError, setDesktopError] = useState('');
-  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
+  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
   const organInstalled = Boolean(organ.status?.installed);
   useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
-  const view = useDesktopView(onQuick, setDesktopError);
+  const { view, markShown } = useDesktopView(onQuick, setDesktopError);
   const panelReady = Boolean((snapshot && draft) || error);
   useLayoutEffect(() => {
-    if (panelReady && view.quick && view.pending != null) {
-      void native('quick_ready', { generation: view.pending }).catch(e => setDesktopError(errorText(e)));
+    const generation = view.pending;
+    if (panelReady && view.quick && generation != null) {
+      void native('quick_ready', { generation }).then(() => markShown(generation)).catch(e => setDesktopError(errorText(e)));
     }
-  }, [panelReady, view.quick, view.pending]);
+  }, [panelReady, view.quick, view.pending, markShown]);
   function desktopAction(action: string) {
     void native('desktop_action', {action}).catch(e => setDesktopError(errorText(e)));
   }
@@ -71,6 +75,7 @@ export default function App() {
   function openSpace(id: SpaceId) {
     setSpace(id); setNotice(''); setError('');
     if (id === 'moneta') setOrganVisited(true);
+    if (id === 'athena') setAthenaVisited(true);
   }
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
@@ -121,6 +126,8 @@ export default function App() {
     {desktopError && <div className="desktop-error" role="alert">{desktopError} <button onClick={()=>setDesktopError('')}>Fechar</button></div>}
     <nav className="rail" aria-label="Espaços">
       <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
+      {/* Athena: parte da própria Ayla (notas). */}
+      <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BookIcon size={22} /></button>
       {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
       <div className="rail-projects">
         {organ.status && <>
@@ -134,17 +141,20 @@ export default function App() {
 
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
-        <Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
+        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
           projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
+      {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
+        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} />
+      </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
       </div>}
@@ -212,10 +222,13 @@ export default function App() {
                   <input type="checkbox" role="switch" className="switch" checked={prefs.notifications.setup} disabled={saving} onChange={e => void quickSave({ notifications: { ...prefs.notifications, setup: e.target.checked } })} />
                 </label>
               </div>
+              <div className="row-actions"><button className="ghost-button" onClick={() => { void native('notify_test').then(() => setNotice('Notificação enviada. Se não apareceu, confira as notificações do sistema.')).catch(e => setError(errorText(e))); }}>Testar notificação</button></div>
               <p className="group-note">As notificações nunca mostram o conteúdo das conversas; os lembretes mostram só o texto do próprio lembrete.</p>
             </section>
 
             <Reminders />
+
+            <AthenaSettings prefs={prefs} saving={saving} save={quickSave} />
 
             <CloudSettings snapshot={snapshot} saving={saving} save={quickSave} />
 
@@ -246,7 +259,7 @@ export default function App() {
                   <button className="primary-action" disabled={saving} onClick={() => void apply('Limites salvos.')}>Salvar limites</button>
                 </div>
                 <div className="advanced-block"><h3>Outro provedor compatível</h3>
-                  <p>Para um serviço compatível com a API da OpenAI que não está na lista de Nuvem. A nuvem recebe só o pedido e a personalidade, revisados e declarados públicos.</p>
+                  <p>Para um serviço compatível com a API da OpenAI que não está na lista de Nuvem. O modo Automático classifica a privacidade do pedido neste computador antes de usar a nuvem.</p>
                   <label>Endereço HTTPS<input type="url" value={draft.cloud_endpoint} onChange={e => update({ cloud_endpoint: e.target.value })} placeholder="https://seu-provedor/v1" /></label>
                   <label>Modelo<input value={draft.cloud_model} onChange={e => update({ cloud_model: e.target.value })} /></label>
                   <button className="primary-action" disabled={saving || !draft.cloud_endpoint} onClick={() => { const value = { ...draft, cloud_provider: 'custom', onboarding_complete: true }; setDraft(value); void savePreferences(value).then(() => refresh()).then(() => setNotice('Provedor próprio salvo e em uso.')).catch(e => setError(errorText(e))); }}>Usar este provedor</button>
@@ -254,7 +267,7 @@ export default function App() {
                   <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar no cofre do sistema</label>
                   <div className="row-actions">
                     <button disabled={saving || !key || !providerSaved} onClick={() => void saveKey()}>{remember ? 'Guardar chave no cofre' : 'Usar chave nesta sessão'}</button>
-                    <button disabled={saving || !providerSaved} onClick={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</button>
+                    <Confirm disabled={saving || !providerSaved} question="Esquecer a chave deste provedor neste computador?" confirm="Esquecer" onConfirm={() => { void native('cloud_key', { key: '', remember: false, endpoint: draft.cloud_endpoint }).then(() => setNotice('Chave removida.')).catch(e => setError(errorText(e))); }}>Esquecer chave deste provedor</Confirm>
                   </div>
                 </div>
                 <div className="advanced-block"><h3>Dados</h3>

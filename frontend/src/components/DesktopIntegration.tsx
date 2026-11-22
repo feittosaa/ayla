@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { native, type Preferences } from '../services/Desktop';
 
@@ -7,6 +7,9 @@ type Theme = { colors: Record<string,string>; font: string | null; radius: numbe
 type View = { quick: boolean; pending: number | null; theme: Theme | null };
 export function useDesktopView(onQuick: () => void, onError: (reason: string) => void) {
   const [view, setView] = useState<View>({ quick: false, pending: null, theme: null });
+  const markShown = useCallback((generation: number) => {
+    setView(current => current.pending === generation ? { ...current, pending: null } : current);
+  }, []);
   useEffect(() => {
     let alive = true; let generation = 0;
     const read = async () => {
@@ -29,7 +32,7 @@ export function useDesktopView(onQuick: () => void, onError: (reason: string) =>
     window.addEventListener('keydown',key);
     return () => window.removeEventListener('keydown',key);
   }, [view.quick,onError]);
-  return view;
+  return { view, markShown };
 }
 
 // Só a janela compacta recebe estas variáveis. Os controles usam a mesma paleta do painel.

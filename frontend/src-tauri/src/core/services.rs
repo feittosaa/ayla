@@ -1,6 +1,7 @@
 use super::{
     cloud::{self, Api, Login, Secret},
     files::{self, Kind},
+    athena, athena_git,
     hardware,
     iris,
     reminders,
@@ -13,7 +14,7 @@ use super::{
     store::{self, FileInfo, Scope, Store},
 };
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -75,7 +76,7 @@ impl Core {
             .load()
             .map_err(|_| "Configuração inválida; arquivo preservado".into())
     }
-    fn budget(&self, prefs: &Preferences) -> u64 {
+    pub(super) fn budget(&self, prefs: &Preferences) -> u64 {
         let mut hw = hardware::detect();
         hw.ram_available_bytes = hw
             .ram_available_bytes
@@ -83,7 +84,7 @@ impl Core {
             .min(hw.ram_total_bytes);
         models::memory_budget(&hw, prefs)
     }
-    fn models(&self) -> Result<Vec<Model>, String> {
+    pub(super) fn models(&self) -> Result<Vec<Model>, String> {
         self.store
             .lock()
             .map_err(|_| "Dados ocupados")?
@@ -92,6 +93,16 @@ impl Core {
             .into_iter()
             .map(|raw| serde_json::from_str(&raw).map_err(|_| "Registro de modelo inválido".into()))
             .collect()
+    }
+    /// A extração em segundo plano cede a vez; outra resposta em andamento é aguardada.
+    pub(crate) async fn take_gate(&self, token: &CancellationToken, waiting: impl FnOnce()) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let background = self.background.lock().ok().and_then(|mut b| b.take());
+        if let Ok(gate) = self.runtime.gate.try_lock() { return Ok(gate); }
+        match background { Some(task) => task.cancel(), None => waiting() }
+        tokio::select! {
+            _ = token.cancelled() => Err("Resposta interrompida".into()),
+            gate = self.runtime.gate.lock() => Ok(gate),
+        }
     }
     fn job(&self, id: &str) -> Result<CancellationToken, String> {
         if id.is_empty() || id.len() > 100 {
@@ -178,6 +189,151 @@ impl Core {
         }
         .await;
         result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
+    }
+    /// Raízes da Athena: as notas da própria Athena, os cofres (ex.: do Obsidian) e os projetos da Ayla,
+    /// cada projeto com a própria pasta de notas.
+    fn athena_roots(&self, prefs: &Preferences) -> Vec<AthenaRoot> {
+        let mut out = vec![AthenaRoot { id: "ayla".into(), kind: "ayla", name: "Athena".into(), path: self.root.join("athena"), available: true }];
+        for vault in prefs.vaults() {
+            let path = PathBuf::from(&vault);
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| vault.clone());
+            out.push(AthenaRoot { id: format!("vault:{vault}"), kind: "vault", available: path.is_dir(), name, path });
+        }
+        if let Ok(projects) = self.store.lock().map(|db| db.projects().unwrap_or_default()) {
+            for project in projects {
+                out.push(AthenaRoot { id: format!("project:{}", project.id), kind: "project", name: project.name, path: self.root.join("projetos-notas").join(&project.id), available: true });
+            }
+        }
+        out
+    }
+    /// Pasta de uma raiz, criada se for da Ayla (notas ou projeto); cofres precisam existir.
+    fn athena_path(&self, prefs: &Preferences, id: &str) -> Result<PathBuf, String> {
+        let root = self.athena_roots(prefs).into_iter().find(|r| r.id == id).ok_or("Esta pasta de notas não está mais na Athena")?;
+        if root.kind != "vault" {
+            fs::create_dir_all(&root.path).map_err(|_| "Não foi possível criar a pasta de notas")?;
+        }
+        if !root.path.is_dir() {
+            return Err(format!("O cofre {} não está disponível neste computador.", root.name));
+        }
+        Ok(root.path)
+    }
+    /// Reindexa as notas que mudaram (pela data e pelo tamanho) e esquece as que saíram.
+    /// Devolve a chave da pasta ("/caminho/") usada no índice.
+    async fn sync_notes(&self, root: &std::path::Path) -> Result<String, String> {
+        let key = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
+        let stamps = self.store.lock().map_err(|_| "Dados ocupados")?.note_stamps().map_err(|_| "Falha ao consultar notas")?;
+        let (dir, prefix) = (root.to_path_buf(), key.clone());
+        let (changed, gone) = tauri::async_runtime::spawn_blocking(move || {
+            let notes = athena::list(&dir);
+            let mut seen = std::collections::HashSet::new();
+            let mut changed = Vec::new();
+            for note in notes {
+                let full = format!("{prefix}{}", note.path);
+                seen.insert(full.clone());
+                if stamps.get(&full) == Some(&(note.modified, note.bytes as i64)) {
+                    continue;
+                }
+                let text = athena::read(&dir, &note.path).map(|(t, _)| t).unwrap_or_default();
+                let chunks = iris::split(&format!("{}\n\n{text}", note.title));
+                changed.push((full, note.modified, note.bytes as i64, chunks));
+            }
+            let gone: Vec<String> = stamps.keys().filter(|k| k.starts_with(&prefix) && !seen.contains(*k)).cloned().collect();
+            (changed, gone)
+        }).await.map_err(|_| "Falha ao ler as notas")?;
+        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+        for (note, modified, bytes, chunks) in changed {
+            db.index_note(&note, modified, bytes, &chunks).map_err(|_| "Falha ao indexar notas")?;
+        }
+        for note in gone {
+            let _ = db.forget_note(&note);
+        }
+        Ok(key)
+    }
+    /// Athena na conversa: trechos das notas relevantes ao pedido, como (título, texto). Entram as
+    /// notas da Athena, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
+    /// projetos ficam de fora, como a memória). Uma pasta que corresponde ao pedido fornece
+    /// trechos de notas distintas. Para os demais pedidos, vale a busca por significado ou palavras.
+    async fn notes_context(&self, prefs: &Preferences, message: &str, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String)> {
+        let result: Result<Vec<(String, String)>, String> = async {
+            let mut roots = Vec::new();
+            for root in self.athena_roots(prefs) {
+                let visible = match root.kind { "project" => project.is_some_and(|p| root.id == format!("project:{p}")), _ => true };
+                if !visible || (root.kind == "vault" && !root.available) {
+                    continue;
+                }
+                if root.kind != "vault" && !root.path.is_dir() {
+                    continue;
+                }
+                if let Ok(key) = self.sync_notes(&root.path).await {
+                    roots.push((key, root.name));
+                }
+            }
+            let query = memory::fts_query(message);
+            let excerpt = |(note, text): (String, String)| {
+                let filename = note.rsplit('/').next().unwrap_or(&note);
+                let title = filename.rsplit_once('.').map_or(filename, |(title, _)| title);
+                (title.to_string(), text)
+            };
+            if athena::collection_question(message) {
+                let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+                let paths = roots.iter().flat_map(|(key, name)| {
+                    db.indexed_note_paths(key).unwrap_or_default().into_iter()
+                        .map(move |path| (key.clone(), name.clone(), path))
+                });
+                if let Some(folder) = athena::matching_folder(&memory::search_terms(message), paths) {
+                    const LIMIT: usize = 4;
+                    let mut ids = query.as_ref()
+                        .and_then(|q| db.search_note_chunks(q, &folder, 32).ok())
+                        .unwrap_or_default();
+                    ids.extend(db.note_openings(&folder, LIMIT).unwrap_or_default());
+                    let mut seen = std::collections::HashSet::new();
+                    let notes: Vec<_> = db.note_chunks_by_ids(&ids).unwrap_or_default().into_iter()
+                        .filter(|(note, _)| seen.insert(note.clone()))
+                        .take(LIMIT)
+                        .map(excerpt)
+                        .collect();
+                    if !notes.is_empty() {
+                        return Ok(notes);
+                    }
+                }
+            }
+            let chosen: Vec<i64> = match self.memory_model(prefs) {
+                Some(model) => {
+                    for (key, _) in &roots {
+                        let pending = self.store.lock().map_err(|_| "Dados ocupados")?.note_chunks_without_vector(&model.id, key, 64).unwrap_or_default();
+                        if pending.is_empty() {
+                            continue;
+                        }
+                        let texts: Vec<String> = pending.iter().map(|(_, t)| memory::document_text(t)).collect();
+                        if let Ok(vectors) = self.runtime.embed_many(&model, prefs, &texts, cancel).await {
+                            let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+                            for ((id, _), vector) in pending.iter().zip(vectors) {
+                                let _ = db.set_note_vector(*id, &model.id, &vector);
+                            }
+                        }
+                    }
+                    let query = self.runtime.embed(&model, prefs, &memory::query_text(message), cancel).await?;
+                    let mut hits: Vec<(i64, f64)> = Vec::new();
+                    for (key, _) in &roots {
+                        hits.extend(self.store.lock().map_err(|_| "Dados ocupados")?.note_vectors(&model.id, key).unwrap_or_default().into_iter()
+                            .filter_map(|(id, v)| memory::cosine(&query, &v).filter(|s| *s >= 0.42).map(|s| (id, s))));
+                    }
+                    hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    hits.into_iter().take(4).map(|(id, _)| id).collect()
+                }
+                None => match query {
+                    Some(query) => {
+                        let db = self.store.lock().map_err(|_| "Dados ocupados")?;
+                        roots.iter().flat_map(|(key, _)| db.search_note_chunks(&query, key, 3).unwrap_or_default()).take(3).collect()
+                    }
+                    None => Vec::new(),
+                },
+            };
+            let rows = self.store.lock().map_err(|_| "Dados ocupados")?.note_chunks_by_ids(&chosen).unwrap_or_default();
+            Ok(rows.into_iter().map(excerpt).collect())
+        }
+        .await;
+        result.unwrap_or_default()
     }
     /// Memórias públicas relevantes ao pedido, para a revisão de envio à nuvem (até 5).
     async fn references(&self, prefs: &Preferences, project: Option<&str>, message: &str, cancel: &CancellationToken) -> Vec<Fact> {
@@ -375,19 +531,31 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
         json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null),"projects":projects}),
     )
 }
+/// Instrução padrão da Ayla (não faz parte da personalidade editável).
+pub const OPTIONS_GUIDE: &str = "\n\nQuando o pedido aceitar mais de uma boa resposta (receitas, recomendações, ideias, soluções, caminhos, produtos), ofereça de 3 a 4 opções distintas, ordenadas da melhor para a pior segundo o seu próprio julgamento, e diga em uma frase por que cada uma funciona melhor ou pior. Se a pessoa pedir uma quantidade, respeite-a. Para perguntas com uma única resposta correta, responda direto.";
 #[tauri::command]
 pub fn save_preferences(
     state: tauri::State<'_, Core>,
-    preferences: Preferences,
+    mut preferences: Preferences,
 ) -> Result<(), String> {
-    state
-        .preferences
-        .lock()
-        .map_err(|_| "Configuração ocupada")?
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    if let Ok(saved) = store.load() {
+        preferences.keep_managed(&saved);
+    }
+    store
         .save(&preferences)
         .map_err(|_| {
             "Não foi possível salvar: verifique os limites e a URL HTTPS do provedor".into()
         })
+}
+/// Guarda só o modo de resposta, sem sobrescrever outras preferências salvas no meio-tempo.
+#[tauri::command]
+pub fn set_response_source(state: tauri::State<'_, Core>, source: String) -> Result<(), String> {
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler as configurações")?;
+    if prefs.response_source == source { return Ok(()); }
+    prefs.response_source = source;
+    store.save(&prefs).map_err(|_| "Modo de resposta inválido".into())
 }
 #[tauri::command]
 pub fn cloud_key(
@@ -793,10 +961,24 @@ pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, d
 pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
     let db = state.store.lock().map_err(|_| "Dados ocupados")?;
     let copies = db.project_file_paths(&id).unwrap_or_default();
+    let name = db.projects().unwrap_or_default().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_else(|| "Projeto".into());
     match db.delete_project(&id) {
         Ok(true) => {
             for path in copies {
                 remove_copy(&state.root, &path);
+            }
+            // Notas do projeto (Athena): vão para a lixeira das notas da Athena, não somem.
+            let notes = state.root.join("projetos-notas").join(&id);
+            if notes.is_dir() {
+                let bin = state.root.join("athena").join(".trash");
+                let _ = fs::create_dir_all(&bin);
+                let mut target = bin.join(format!("Projeto {}", athena::file_name(&name)));
+                let mut n = 2;
+                while target.exists() {
+                    target = bin.join(format!("Projeto {} {n}", athena::file_name(&name)));
+                    n += 1;
+                }
+                let _ = fs::rename(&notes, &target);
             }
             Ok(())
         }
@@ -837,6 +1019,14 @@ pub struct ChatRequest {
     pub sensitivity: Sensitivity,
     pub reviewed: bool,
     pub request_cloud: bool,
+    #[serde(default)]
+    pub web_search: bool,
+    #[serde(default)]
+    pub automatic: bool,
+    /// Automático: resposta da pessoa quando a Ayla perguntou ("cloud" ou "local"), ou a rota já
+    /// verificada antes do envio. Os bloqueios locais valem de novo aqui.
+    #[serde(default)]
+    pub auto_route: Option<String>,
     /// Arquivos anexados (ids devolvidos por `add_file`), no máximo 5.
     #[serde(default)]
     pub attachments: Vec<String>,
@@ -923,6 +1113,353 @@ fn project_block(project: &store::Project) -> String {
     block
 }
 
+// Athena: notas pessoais (comandos da interface). Toda nota é (raiz, caminho relativo).
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AthenaRoot {
+    /// "ayla", "vault:<pasta>" ou "project:<id>".
+    pub id: String,
+    pub kind: &'static str,
+    pub name: String,
+    pub path: PathBuf,
+    pub available: bool,
+}
+
+/// Árvore da Athena: cada raiz com as pastas e as notas, e os cofres do Obsidian ainda não abertos.
+#[tauri::command]
+pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let roots = state.athena_roots(&prefs);
+    let open: Vec<String> = prefs.vaults();
+    let listed = tauri::async_runtime::spawn_blocking(move || {
+        roots.into_iter().map(|root| {
+            let (folders, notes, files) = if root.path.is_dir() { (athena::folders(&root.path), athena::list(&root.path), athena::attachments(&root.path)) } else { (Vec::new(), Vec::new(), Vec::new()) };
+            json!({
+                "id": root.id, "kind": root.kind, "name": root.name, "path": root.path.to_string_lossy(), "available": root.available,
+                "obsidian": root.path.join(".obsidian").is_dir(), "git": athena_git::is_repo(&root.path),
+                "folders": folders, "notes": notes, "files": files,
+            })
+        }).collect::<Vec<_>>()
+    }).await.map_err(|_| "Falha ao ler as notas")?;
+    let suggested: Vec<String> = athena::obsidian_vaults().into_iter().filter(|v| !open.contains(v)).collect();
+    Ok(json!({"roots": listed, "suggested": suggested, "git_enabled": prefs.athena_git}))
+}
+
+/// Abre um cofre na Athena (pasta existente, ex.: do Obsidian).
+#[tauri::command]
+pub fn athena_add_vault(state: tauri::State<'_, Core>, path: String) -> Result<(), String> {
+    let folder = PathBuf::from(&path);
+    if !folder.is_absolute() || !folder.is_dir() {
+        return Err("Escolha uma pasta que exista neste computador".into());
+    }
+    if folder.starts_with(&state.root) {
+        return Err("Essa pasta já é da Ayla".into());
+    }
+    let mut prefs = state.prefs()?;
+    let mut vaults = prefs.vaults();
+    if !vaults.contains(&path) {
+        vaults.push(path);
+    }
+    prefs.athena_vaults = vaults;
+    prefs.athena_folder.clear();
+    state.preferences.lock().map_err(|_| "Configuração ocupada")?.save(&prefs).map_err(|_| "Não foi possível salvar o cofre".into())
+}
+
+/// Tira o cofre da Athena (os arquivos continuam onde estão).
+#[tauri::command]
+pub fn athena_remove_vault(state: tauri::State<'_, Core>, path: String) -> Result<(), String> {
+    let mut prefs = state.prefs()?;
+    prefs.athena_vaults = prefs.vaults().into_iter().filter(|v| *v != path).collect();
+    prefs.athena_folder.clear();
+    state.preferences.lock().map_err(|_| "Configuração ocupada")?.save(&prefs).map_err(|_| "Não foi possível salvar".into())
+}
+
+/// Escolher uma pasta (para abrir como cofre). Só devolve o caminho.
+#[tauri::command]
+pub async fn athena_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let handle = app.clone();
+    crate::desktop::panel_dialog(&handle, move || {
+        app.dialog().file().blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: String) -> Result<Value, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (content, modified) = athena::read(&dir, &path)?;
+    Ok(json!({"content": content, "modified": modified}))
+}
+
+/// Grava a nota; recusa se ela mudou fora da Ayla desde `expected`. Devolve a nova data.
+#[tauri::command]
+pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::write(&dir, &path, &content, expected)
+}
+
+/// Nota nova numa pasta da raiz (vazia = raiz).
+#[tauri::command]
+pub async fn athena_create(state: tauri::State<'_, Core>, root: String, folder: Option<String>, title: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let title = athena::file_name(&title);
+    athena::create_in(&dir, folder.as_deref().unwrap_or(""), &title, &format!("# {title}\n\n"))
+}
+
+#[tauri::command]
+pub async fn athena_mkdir(state: tauri::State<'_, Core>, root: String, parent: Option<String>, name: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::mkdir(&dir, parent.as_deref().unwrap_or(""), &name)
+}
+
+/// Nota de hoje (AAAA-MM-DD.md) na raiz indicada, criada se ainda não existir.
+#[tauri::command]
+pub async fn athena_daily(state: tauri::State<'_, Core>, root: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::daily(&dir, reminders::now_local().date())
+}
+
+/// Move a nota para a lixeira da raiz (`.trash`).
+#[tauri::command]
+pub async fn athena_trash(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::trash(&dir, &path)
+}
+
+/// Renomeia ou move a nota (caminho novo, com pastas) e atualiza os links das outras notas.
+#[tauri::command]
+pub async fn athena_rename(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_note(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+    Ok(json!({"path": new, "relinked": changed}))
+}
+
+/// Renomeia ou move uma pasta e atualiza os links das notas dela.
+#[tauri::command]
+pub async fn athena_rename_folder(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_folder(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+    Ok(json!({"path": new, "relinked": changed}))
+}
+
+/// Tags de todas as raízes, com as notas de cada uma.
+#[tauri::command]
+pub async fn athena_tags(state: tauri::State<'_, Core>) -> Result<Vec<Value>, String> {
+    let roots: Vec<AthenaRoot> = state.athena_roots(&state.prefs()?).into_iter().filter(|r| r.path.is_dir()).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut map: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
+        for root in roots {
+            for note in athena::list(&root.path) {
+                let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
+                for tag in athena::tags(&text) {
+                    map.entry(tag).or_default().push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+                }
+            }
+        }
+        map.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect()
+    }).await.map_err(|_| "Falha ao ler as tags".into())
+}
+
+/// Imagem anexada a uma nota (![[foto.png]]), procurada pelo nome na raiz, como data URL.
+#[tauri::command]
+pub async fn athena_attachment(state: tauri::State<'_, Core>, root: String, target: String) -> Result<Option<String>, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = athena::find_attachment(&dir, &target) else { return Ok(None) };
+        let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !athena::ATTACHMENT_IMAGES.contains(&extension.as_str()) {
+            return Ok(None);
+        }
+        if fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > athena::MAX_ATTACHMENT {
+            return Err("Imagem grande demais para mostrar".to_string());
+        }
+        let bytes = fs::read(&path).map_err(|_| "Não foi possível ler o anexo".to_string())?;
+        let mime = match extension.as_str() { "jpg" | "jpeg" | "jfif" => "image/jpeg", "svg" => "image/svg+xml", "gif" => "image/gif", "webp" => "image/webp", "bmp" => "image/bmp", "avif" => "image/avif", _ => "image/png" };
+        Ok(Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))))
+    }).await.map_err(|_| "Falha ao ler o anexo".to_string())?
+}
+
+/// Notas da mesma raiz que têm link `[[…]]` para esta (como os backlinks do Obsidian).
+#[tauri::command]
+pub async fn athena_backlinks(state: tauri::State<'_, Core>, root: String, path: String) -> Result<Vec<Value>, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let key = state.sync_notes(&dir).await?;
+    let rows = state.store.lock().map_err(|_| "Dados ocupados")?.notes_with_links(&key).map_err(|_| "Falha ao consultar notas")?;
+    let mut out: Vec<Value> = Vec::new();
+    for (note, text) in rows {
+        let relative = note.trim_start_matches(&key).to_string();
+        if relative == path || out.iter().any(|v| v["path"] == relative) {
+            continue;
+        }
+        if athena::wiki_targets(&text).iter().any(|t| athena::links_to(t, &path)) {
+            let title = relative.rsplit('/').next().unwrap_or(&relative).trim_end_matches(".md").to_string();
+            out.push(json!({"path": relative, "title": title}));
+        }
+    }
+    Ok(out)
+}
+
+/// Busca por palavras em todas as raízes: raiz, caminho, título e trecho com destaque.
+#[tauri::command]
+pub async fn athena_search(state: tauri::State<'_, Core>, query: String) -> Result<Vec<Value>, String> {
+    let prefs = state.prefs()?;
+    let lower = query.trim().to_lowercase();
+    let fts = memory::fts_query(&query).or_else(|| (lower.chars().count() >= 2).then(|| format!("\"{}\"*", lower.replace('"', ""))));
+    let mut out: Vec<Value> = Vec::new();
+    for root in state.athena_roots(&prefs).into_iter().filter(|r| r.path.is_dir()) {
+        let key = state.sync_notes(&root.path).await?;
+        let dir = root.path.clone();
+        let notes = tauri::async_runtime::spawn_blocking(move || athena::list(&dir)).await.unwrap_or_default();
+        for note in notes.iter().filter(|n| !lower.is_empty() && n.title.to_lowercase().contains(&lower)) {
+            out.push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title, "snippet": ""}));
+        }
+        if let Some(fts) = &fts {
+            for (note, snippet) in state.store.lock().map_err(|_| "Dados ocupados")?.search_notes(fts, &key, 20).unwrap_or_default() {
+                let path = note.trim_start_matches(&key).to_string();
+                if out.iter().any(|v| v["root"] == root.id && v["path"] == path) {
+                    continue;
+                }
+                let title = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".md").to_string();
+                out.push(json!({"root": root.id, "rootName": root.name, "path": path, "title": title, "snippet": snippet}));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Última sincronização com Git por raiz (segundos Unix e resultado), mostrada na Athena.
+static ATHENA_SYNC: Mutex<Option<HashMap<String, (i64, athena_git::Outcome)>>> = Mutex::new(None);
+fn last_sync(root: &str) -> Option<(i64, athena_git::Outcome)> {
+    ATHENA_SYNC.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(root).cloned()))
+}
+fn record_sync(root: &str, outcome: athena_git::Outcome) {
+    if let Ok(mut map) = ATHENA_SYNC.lock() {
+        map.get_or_insert_with(HashMap::new).insert(root.to_string(), (store::now(), outcome));
+    }
+}
+
+#[tauri::command]
+pub async fn athena_git_status(state: tauri::State<'_, Core>, root: String) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let dir = state.athena_path(&prefs, &root)?;
+    let status = tauri::async_runtime::spawn_blocking(move || athena_git::status(&dir)).await.map_err(|_| "Falha ao consultar o Git")?;
+    let last = last_sync(&root);
+    Ok(json!({"enabled": prefs.athena_git, "status": status, "obsidian": athena_git::obsidian_running(), "last": last.map(|(at, outcome)| json!({"at": at, "outcome": outcome}))}))
+}
+
+/// Sincronizar agora (commit, puxar e enviar, conforme o obsidian-git do cofre).
+#[tauri::command]
+pub async fn athena_git_sync(state: tauri::State<'_, Core>, root: String) -> Result<athena_git::Outcome, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let settings = athena_git::settings(&dir);
+        athena_git::sync(&dir, &settings, reminders::now_local())
+    }).await.map_err(|_| "Falha ao sincronizar")??;
+    record_sync(&root, outcome.clone());
+    Ok(outcome)
+}
+
+/// Sincronização automática no intervalo do obsidian-git (0: só manual) e "puxar ao abrir", para
+/// cada raiz que for repositório. Não roda com o Obsidian aberto: lá o próprio plugin cuida disso.
+pub async fn athena_git_tick(app: &tauri::AppHandle, boot: bool) {
+    use tauri::{Emitter, Manager};
+    let Some(state) = app.try_state::<Core>() else { return };
+    let Ok(prefs) = state.prefs() else { return };
+    if !prefs.athena_git || athena_git::obsidian_running() {
+        return;
+    }
+    for root in state.athena_roots(&prefs) {
+        if !athena_git::is_repo(&root.path) {
+            continue;
+        }
+        let settings = athena_git::settings(&root.path);
+        if boot && settings.pull_on_open {
+            let (dir, s) = (root.path.clone(), settings.clone());
+            let _ = tauri::async_runtime::spawn_blocking(move || athena_git::pull(&dir, &s)).await;
+            let _ = app.emit("notes-updated", json!({}));
+        }
+        if settings.interval == 0 {
+            continue;
+        }
+        match last_sync(&root.id) {
+            None => record_sync(&root.id, athena_git::Outcome { message: "Aguardando o intervalo do obsidian-git.".into(), ..Default::default() }),
+            Some((at, _)) if store::now() - at >= settings.interval as i64 * 60 => {
+                let dir = root.path.clone();
+                if let Ok(Ok(outcome)) = tauri::async_runtime::spawn_blocking(move || athena_git::sync(&dir, &settings, reminders::now_local())).await {
+                    record_sync(&root.id, outcome);
+                    let _ = app.emit("notes-updated", json!({}));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Apaga uma pasta da raiz: vai inteira para a lixeira (`.trash`), nada some de vez.
+#[tauri::command]
+pub fn athena_trash_folder(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::trash_folder(&dir, &path)
+}
+
+/// Anexo (imagem ou PDF) de uma raiz pelo nome ou caminho, como nos links do Obsidian.
+fn athena_attachment_path(state: &Core, root: &str, target: &str) -> Result<PathBuf, String> {
+    let dir = state.athena_path(&state.prefs()?, root)?;
+    let path = athena::find_attachment(&dir, target).ok_or("Anexo não encontrado")?;
+    athena::attachment_mime(&path).ok_or("Este tipo de arquivo não é mostrado na Athena")?;
+    Ok(path)
+}
+
+/// `athena-file://localhost/<raiz>/<anexo>`: imagens e PDFs das notas, lidos direto da pasta.
+pub fn athena_file(state: &Core, uri_path: &str) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::{header, Response, StatusCode};
+    let fail = |status: StatusCode| Response::builder().status(status).body(Vec::new()).unwrap_or_default();
+    let trimmed = uri_path.trim_start_matches('/');
+    let Some((root, target)) = trimmed.split_once('/') else { return fail(StatusCode::BAD_REQUEST) };
+    let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return fail(StatusCode::BAD_REQUEST) };
+    let Ok(path) = athena_attachment_path(state, &root, &target) else { return fail(StatusCode::NOT_FOUND) };
+    let mime = athena::attachment_mime(&path).unwrap_or("application/octet-stream");
+    let limit = if mime == "application/pdf" { athena::MAX_PDF } else { athena::MAX_ATTACHMENT };
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > limit {
+        return fail(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    match fs::read(&path) {
+        Ok(bytes) => Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE, mime)
+            .header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'")
+            .header(header::CACHE_CONTROL, "no-cache").body(bytes).unwrap_or_default(),
+        Err(_) => fail(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Move um anexo (imagem ou PDF) para outra pasta da mesma raiz.
+#[tauri::command]
+pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: String, folder: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::move_attachment(&dir, &path, &folder)
+}
+
+/// Abre o anexo no aplicativo padrão do sistema (visualizador de PDF ou de imagens).
+#[tauri::command]
+pub fn athena_open_attachment(state: tauri::State<'_, Core>, root: String, target: String) -> Result<(), String> {
+    let path = athena_attachment_path(&state, &root, &target)?;
+    std::process::Command::new("xdg-open").arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o arquivo".into())
+}
+
+/// Abre a nota no Obsidian (onde os plugins do cofre rodam).
+#[tauri::command]
+pub fn athena_open_obsidian(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let relative = athena::safe_relative(&path).ok_or("Nota inválida")?;
+    let link = athena_git::obsidian_link(&dir.join(relative));
+    std::process::Command::new("xdg-open").arg(link).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o Obsidian".into())
+}
+
+#[tauri::command]
+pub fn athena_open_folder(state: tauri::State<'_, Core>, root: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    std::process::Command::new("xdg-open").arg(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir a pasta".into())
+}
+
 /// Referências sugeridas para a revisão de envio à nuvem (memórias públicas relevantes).
 #[tauri::command]
 pub async fn cloud_references(state: tauri::State<'_, Core>, project: Option<String>, message: String) -> Result<Vec<memory::Reference>, String> {
@@ -950,26 +1487,18 @@ pub async fn chat(
     ) {
         return Err("Tipo de conversa inválido".into());
     }
-    // A extração em segundo plano cede a vez: cancela e espera liberar.
-    let background = state.background.lock().ok().and_then(|mut b| b.take());
-    let _gate = match state.runtime.gate.try_lock() {
-        Ok(gate) => gate,
-        Err(_) => match background {
-            Some(task) => {
-                task.cancel();
-                tokio::time::timeout(Duration::from_secs(10), state.runtime.gate.lock())
-                    .await
-                    .map_err(|_| "Já existe uma tarefa de IA em andamento")?
-            }
-            None => return Err("Já existe uma tarefa de IA em andamento".into()),
-        },
-    };
     let token = state.job(&request.id)?;
+    // Outra conversa respondendo: esta espera a vez (o modelo local atende um pedido por vez).
+    let _gate = match state.take_gate(&token, || { let _ = events.send(json!({"type":"status","text":"Esperando a outra resposta terminar…"})); }).await {
+        Ok(gate) => gate,
+        Err(error) => { state.finish(&request.id); return Err(error); }
+    };
     let start = Instant::now();
     let mut partial = String::new();
     let mut first = None;
     let mut chunks = 0;
     let mut metric_model = String::from("unresolved");
+    let mut origin = None;
     let mut recalled = 0usize;
     let mut result=async{
         let prefs=state.prefs()?;
@@ -981,6 +1510,16 @@ pub async fn chat(
                 if let Ok(model)=state.models().and_then(|m|models::choose(&m,Capability::Text,state.budget(&prefs),prefs.context_tokens,None)){
                     let _=events.send(json!({"type":"status","text":"Entendendo o lembrete…"}));
                     parsed=state.runtime.complete_json(&model,&prefs,reminders::model_request(&request.message,now),reminders::model_schema(),&token).await.ok().and_then(|raw|reminders::parse_model(&raw,now));
+                }
+            }
+            // Sem assunto no pedido ("configura o aviso daqui 10 segundos"): pela conversa recente.
+            if let Some(p)=parsed.as_mut().filter(|p|reminders::generic(&p.text)){
+                let recent=state.store.lock().map_err(|_|"Dados ocupados")?.context(&request.conversation,6,3000).unwrap_or_default().iter()
+                    .filter_map(|m|Some(format!("{}: {}",if m["role"]=="user"{"Pessoa"}else{"Ayla"},m["content"].as_str()?.chars().take(500).collect::<String>()))).collect::<Vec<_>>().join("\n");
+                if !recent.is_empty(){
+                    if let Ok(model)=state.models().and_then(|m|models::choose(&m,Capability::Text,state.budget(&prefs),prefs.context_tokens,None)){
+                        if let Some(subject)=state.runtime.complete_json(&model,&prefs,reminders::subject_request(&request.message,&recent),reminders::subject_schema(),&token).await.ok().and_then(|raw|reminders::parse_subject(&raw)){p.text=subject;}
+                    }
                 }
             }
             let reply=match parsed{
@@ -997,14 +1536,75 @@ pub async fn chat(
         }
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
         let referenced=request.references.iter().map(|r|r.content.as_str()).collect::<Vec<_>>().join("\n");
-        let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
-        let use_cloud=prefs.usage_mode==UsageMode::CloudOnly||request.request_cloud;
+        // Athena: "cria uma nota…" e "salva isso como nota" gravam a nota neste computador.
+        if athena::note_request(&request.message)&&request.attachments.is_empty(){
+            let note_root=match state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten(){Some(p)=>format!("project:{p}"),None=>"ayla".to_string()};
+            let root=state.athena_path(&prefs,&note_root)?;
+            let last_answer=context.iter().rev().find(|m|m["role"]=="assistant").and_then(|m|m["content"].as_str()).map(str::to_string);
+            let mut note=if athena::save_last_request(&request.message){
+                last_answer.map(|answer|(athena::file_name(&quick_title(answer.lines().find(|l|!l.trim().is_empty()).unwrap_or("Resposta da Ayla").trim_start_matches('#').trim())),answer))
+            }else{athena::explicit_note(&request.message)};
+            if note.is_none()&&!athena::save_last_request(&request.message){
+                if let Ok(model)=state.models().and_then(|m|models::choose(&m,Capability::Text,state.budget(&prefs),prefs.context_tokens,None)){
+                    let _=events.send(json!({"type":"status","text":"Escrevendo a nota…"}));
+                    let recent=context.iter().rev().take(6).rev().filter_map(|m|Some(format!("{}: {}",if m["role"]=="user"{"Pessoa"}else{"Ayla"},m["content"].as_str()?.chars().take(1500).collect::<String>()))).collect::<Vec<_>>().join("\n");
+                    note=state.runtime.complete_json(&model,&prefs,athena::model_request(&request.message,&recent),athena::model_schema(),&token).await.ok().and_then(|raw|athena::parse_model(&raw));
+                }
+            }
+            let reply=match note{
+                Some((title,content))=>{
+                    let path=athena::create(&root,&title,&format!("{}\n",content.trim_end()))?;
+                    use tauri::Emitter;let _=app.emit("notes-updated",json!({"root":note_root,"path":path}));
+                    format!("Criei a nota **{}** na Athena.",path.trim_end_matches(".md"))
+                }
+                None if athena::save_last_request(&request.message)=>"Ainda não há uma resposta nesta conversa para salvar como nota.".to_string(),
+                None=>{
+                    let title=athena::title_from(&request.message);
+                    let path=athena::create(&root,&title,&format!("# {title}\n\n"))?;
+                    use tauri::Emitter;let _=app.emit("notes-updated",json!({"root":note_root,"path":path}));
+                    format!("Criei a nota **{}** na Athena, ainda vazia. Abra a Athena na lateral para escrever, ou me diga o conteúdo depois de dois pontos (\"cria uma nota sobre X: …\").",path.trim_end_matches(".md"))
+                }
+            };
+            metric_model="athena".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+            let _=events.send(json!({"type":"token","text":reply}));
+            return Ok(());
+        }
+        use super::research::AutoRoute;
+        let auto_route = if request.automatic && prefs.usage_mode != UsageMode::LocalOnly
+            && (prefs.usage_mode != UsageMode::PerConversation || consent)
+            && prefs.cloud_platform().is_some() && request.sensitivity != Sensitivity::Sensitive
+            && request.attachments.is_empty() && request.references.is_empty() {
+            match request.auto_route.as_deref() {
+                Some(choice) => super::research::confirmed_route(&request.message, choice),
+                None => super::research::automatic_route(&state,&prefs,&request.message,&token).await,
+            }
+        } else { AutoRoute::Local };
+        // Sem a resposta da pessoa, a dúvida fica neste computador.
+        let auto_route = if auto_route == AutoRoute::Ask { AutoRoute::Local } else { auto_route };
+        if token.is_cancelled() { return Err("Resposta interrompida".into()); }
+        let use_cloud = if request.automatic { auto_route != AutoRoute::Local }
+            else { prefs.usage_mode==UsageMode::CloudOnly || request.request_cloud };
+        let web_search = if request.automatic { auto_route == AutoRoute::Search } else { request.web_search };
         // Finanças: a Ayla consulta o resumo da Moneta. Esses dados ficam neste computador em
         // qualquer modo, então a resposta é local (com modelo, ou direta, sem modelo).
         let finance={use tauri::Manager;let organ=app.state::<super::organs::Organ>();
             if organ.installed()&&super::organs::finance_question(&request.message){Some(organ.finance().await)}else{None}};
         let use_cloud=use_cloud&&finance.is_none();
         if let Some(data)=&finance{let _=events.send(json!({"type":"routing","text":match data{Ok(_)=>"Moneta consultada · resposta neste computador".to_string(),Err(e)=>format!("Moneta indisponível: {e}")}}));}
+        let public_search = super::research::suggests_web_search(&request.message);
+        if !request.automatic && web_search && (!use_cloud || !public_search || !request.references.is_empty()) {
+            return Err("O pedido de pesquisa mudou. Revise novamente o envio.".into());
+        }
+        if !request.automatic && !use_cloud && finance.is_none() && public_search && request.attachments.is_empty()
+            && super::research::wants_youtube(&request.message) && request.sensitivity != Sensitivity::Sensitive {
+            let reply = "Para pesquisar na internet e trazer fontes, escolha Automático ou Na nuvem nos ajustes desta resposta.";
+            metric_model = "local".into();
+            first = Some(start.elapsed().as_millis() as u64);
+            partial.push_str(reply);
+            chunks += 1;
+            let _ = events.send(json!({"type":"token","text":reply}));
+            return Ok(());
+        }
         // Anexos ficam neste computador: lidos, transcritos ou convertidos em quadros localmente.
         if use_cloud && !request.attachments.is_empty(){return Err("Arquivos anexados ficam neste computador. Responda localmente para usá-los.".into());}
         let attached=state.attachments(&request)?;
@@ -1056,12 +1656,25 @@ pub async fn chat(
         }
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
+        system.push_str(OPTIONS_GUIDE);
         if !use_cloud{
-            let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten().and_then(|id|state.store.lock().ok()?.project(&id).ok().flatten());
+            system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
+            let project = {
+                let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+                db.conversation_project(&request.conversation).ok().flatten()
+                    .and_then(|id| db.project(&id).ok().flatten())
+            };
             if let Some(p)=&project{system.push_str(&project_block(p));}
             let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
             let found=state.iris(&prefs,&request.conversation,&request.message,&request.attachments,&token).await;
             if let Some(block)=iris::context_block(&found){system.push_str(&block);let _=events.send(json!({"type":"sources","files":iris::sources(&found)}));}
+            let notes=state.notes_context(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;
+            if let Some(block)=athena::context_block(&notes){
+                system.push_str(&block);
+                let mut listed:Vec<Value>=Vec::new();
+                for (title,_) in &notes{if !listed.iter().any(|v|v["name"]==format!("{title} (nota)")){listed.push(json!({"id":format!("nota:{title}"),"name":format!("{title} (nota)"),"pages":[]}));}}
+                let _=events.send(json!({"type":"sources","files":listed}));
+            }
             match &finance{
                 Some(Ok(resumo))=>system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo))),
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
@@ -1073,17 +1686,26 @@ pub async fn chat(
         let mut report=|event:Value|{if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
         if use_cloud{
             metric_model = prefs.cloud_model.clone();
-            if !gate.allowed{return Err(gate.reason);}
-            if request.personality_preview.as_deref()!=Some(prefs.system_prompt()){return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into());}
-            let cloud_model=request.cloud_model.as_deref().map(str::trim).filter(|m|!m.is_empty()&&m.len()<=200).unwrap_or(&prefs.cloud_model).to_string();
-            if cloud_model.is_empty(){return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into());}
-            metric_model = cloud_model.clone();
+            if !request.automatic {
+                let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
+                if !gate.allowed { return Err(gate.reason); }
+                if request.personality_preview.as_deref()!=Some(prefs.system_prompt()) { return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into()); }
+            }
             let effort=match request.effort.as_deref(){None|Some("")=>None,Some(e@("low"|"medium"|"high"))=>Some(e),Some(_)=>return Err("Esforço inválido".into())};
             // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
+            let preferred = if request.automatic { prefs.cloud_model.as_str() }
+                else { request.cloud_model.as_deref().map(str::trim).filter(|m| !m.is_empty() && m.len() <= 200).unwrap_or(&prefs.cloud_model) };
+            let cloud_model = if !preferred.is_empty() { preferred.to_string() }
+                else if request.automatic {
+                    let catalog = tokio::select! { _ = token.cancelled() => return Err("Resposta interrompida".into()), list = cloud::models(api,&base,&secret,false) => list? };
+                    cloud::automatic_model(&platform,&catalog)?.to_owned()
+                } else { return Err("Escolha o modelo da nuvem em Configurações › Nuvem".into()); };
+            metric_model = cloud_model.clone();
             // Referências: só memórias públicas, iguais ao revisado e do escopo desta conversa.
-            let mut instructions=prefs.system_prompt().to_string();
+            let mut instructions=if request.automatic { include_str!("persona.txt").trim() } else { prefs.system_prompt() }.to_owned();
+            instructions.push_str(OPTIONS_GUIDE);
             if !request.references.is_empty(){
                 let db=state.store.lock().map_err(|_|"Dados ocupados")?;
                 let project=db.conversation_project(&request.conversation).map_err(|_|"Conversa não encontrada")?;
@@ -1092,8 +1714,15 @@ pub async fn chat(
                 memory::check_references(&request.references,&facts,project.as_deref())?;
                 if let Some(block)=memory::reference_block(&request.references){instructions.push_str(&block);}
             }
-            let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
-            cloud::stream(outgoing,api,&token,&mut report).await?;
+            origin = Some(if web_search { "cloud_search" } else { "cloud" });
+            if web_search {
+                let _ = events.send(json!({"type":"status","text":"Pesquisando fontes na web…"}));
+                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &request.message)?;
+                cloud::stream_search(outgoing, &token, super::research::wants_youtube(&request.message), &mut report).await?;
+            } else {
+                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
+                cloud::stream(outgoing,api,&token,&mut report).await?;
+            }
         }else{
             // Sem modelo local, a pergunta sobre finanças recebe os números da Moneta diretamente.
             if selection.is_err(){if let Some(data)=&finance{
@@ -1120,12 +1749,16 @@ pub async fn chat(
                         result.is_ok(),
                         &request.attachments,
                         &[],
+                        origin,
                     )
                     .is_err()
                 {
                     result = Err(
                         "A resposta foi recebida, mas não foi possível salvar esta conversa".into(),
                     );
+                }
+                if let Some(source) = origin {
+                    let _ = events.send(json!({"type":"origin","origin":source}));
                 }
                 let _ = db.metric(
                     &metric_model,
@@ -1607,7 +2240,7 @@ pub async fn generate_image(state: tauri::State<'_, Core>, request: ImageRequest
         let file = state.store_file(&format!("imagem-{}.{extension}", store::now()), |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a imagem".to_string()), project, false)?;
         let reply = format!("Imagem criada com {} ({}).", provider.name, prefs.image_model);
         let db = state.store.lock().map_err(|_| "Dados ocupados")?;
-        db.save_turn(&request.conversation, &prompt, &reply, true, &[], &[file.id.clone()]).map_err(|_| "A imagem foi criada, mas não foi possível salvar a conversa")?;
+        db.save_turn(&request.conversation, &prompt, &reply, true, &[], &[file.id.clone()], Some("cloud")).map_err(|_| "A imagem foi criada, mas não foi possível salvar a conversa")?;
         let saved = db.file(&file.id).ok().flatten().unwrap_or(file);
         Ok(json!({"content": reply, "attachments": [saved]}))
     }
@@ -2131,6 +2764,70 @@ pub async fn import_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_second_reply_waits_its_turn_and_can_be_cancelled_while_waiting() {
+        let root = std::env::temp_dir().join(format!("ayla-gate-{}", store::id()));
+        let core = std::sync::Arc::new(Core::open(root.clone()).unwrap());
+        let first = core.take_gate(&CancellationToken::new(), || panic!("livre: não espera")).await.unwrap();
+        let cancelled = CancellationToken::new();
+        let waiting = std::sync::atomic::AtomicBool::new(false);
+        let stop = cancelled.clone();
+        let (result, ()) = tokio::join!(core.take_gate(&cancelled, || waiting.store(true, std::sync::atomic::Ordering::SeqCst)), async { stop.cancel(); });
+        assert!(result.is_err() && waiting.load(std::sync::atomic::Ordering::SeqCst));
+        drop(result);
+        let queued = { let core = core.clone(); tokio::spawn(async move { core.take_gate(&CancellationToken::new(), || {}).await.map(|_| ()) }) };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!queued.is_finished());
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap().unwrap().unwrap();
+        drop(core);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn athena_compares_distinct_notes_from_the_matching_folder() {
+        let root = std::env::temp_dir().join(format!("ayla-athena-core-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let other_project = core.store.lock().unwrap().create_project("Outra mesa", "").unwrap();
+        let vault = root.join("wilderfeast");
+        let other_vault = root.join("Outra mesa");
+        let prefs = Preferences {
+            athena_vaults: vec![
+                other_vault.to_string_lossy().into_owned(),
+                vault.to_string_lossy().into_owned(),
+            ],
+            ..Preferences::default()
+        };
+        let write = |base: &std::path::Path, path: &str, content: &str| {
+            let file = base.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, content).unwrap();
+        };
+        write(&root.join("athena"), "NPCs Rápidos.md", "NPC legal para Wilderfeast: um mercador.");
+        write(&other_vault, "NPCs/Nera.md", "Uma cartógrafa de montanhas.");
+        write(&vault, "Locais/Porto.md", "Um porto movimentado.");
+        write(&vault, "NPCs/Vila/Lua.md", "Uma cozinheira que ouve as árvores.");
+        write(&vault, "NPCs/Aliados/Ivo.md", &"Um guardião do rio. ".repeat(60));
+        let project_notes = root.join("projetos-notas").join(&other_project.id);
+        write(&project_notes, "Wilderfeast/NPCs/Segredo.md", "Uma nota privada de outro projeto.");
+        core.sync_notes(&project_notes).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let notes = core.notes_context(&prefs, "qual NPC mais legal que eu criei no Wilderfeast?", None, &cancel).await;
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|(name, text)| name == "Lua" && text.contains("cozinheira")));
+        assert!(notes.iter().any(|(name, text)| name == "Ivo" && text.contains("guardião")));
+        let block = athena::context_block(&notes).unwrap();
+        assert!(block.contains("[nota: Lua]") && block.contains("[nota: Ivo]"));
+        assert!(!block.contains(vault.to_str().unwrap()));
+
+        let notes = core.notes_context(&prefs, "O que está escrito sobre cartógrafa?", None, &cancel).await;
+        assert_eq!(notes[0].0, "Nera");
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Rode com AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark: ffmpeg e Whisper vêm do cache (sem rede).
     #[tokio::test]
     #[ignore = "ffmpeg e Whisper reais via cache local; motor do Whisper de /tmp/ayla-p1-runtime-validation"]
@@ -2231,7 +2928,7 @@ mod tests {
         // Anexo pendente não aparece em Arquivos; depois de enviado, aparece e fica ligado à mensagem.
         assert!(core.store.lock().unwrap().project_files(Some(&project.id)).unwrap().is_empty());
         let chat = core.store.lock().unwrap().create_conversation("c", Some(&project.id)).unwrap();
-        core.store.lock().unwrap().save_turn(&chat.id, "resuma", "ok", true, &[note.id.clone()], &[]).unwrap();
+        core.store.lock().unwrap().save_turn(&chat.id, "resuma", "ok", true, &[note.id.clone()], &[], None).unwrap();
         let listed = core.store.lock().unwrap().project_files(Some(&project.id)).unwrap();
         assert_eq!(listed.len(), 1);
         let messages = core.store.lock().unwrap().messages(&chat.id).unwrap();

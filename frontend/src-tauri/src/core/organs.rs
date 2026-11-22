@@ -685,6 +685,10 @@ mod tests {
     fn financas_em_texto() {
         assert!(finance_question("Qual o valor da minha fatura em aberto?"));
         assert!(finance_question("quanto gastei este mês"));
+        assert!(finance_question("Qual foi a receita do mês?"));
+        assert!(finance_question("Qual foi o total de receitas?"));
+        assert!(!finance_question("Oi Ayla, me manda uma receita de frango do YouTube"));
+        assert!(!finance_question("Quero salvar minha receita de bolo"));
         assert!(!finance_question("me conta uma piada"));
         assert_eq!(money(17999, "BRL"), "R$ 179,99");
         assert_eq!(money(-123456789, "BRL"), "-R$ 1.234.567,89");
@@ -864,7 +868,10 @@ pub fn finance_question(message: &str) -> bool {
 
 /// Palavras que levam um pedido à Moneta; a interface usa a mesma lista (`organ_local_words`).
 pub const FINANCE_WORDS: &[&str] = &[
-        "fatura", "cartão", "cartao", "saldo", "gastei", "gasto", "despesa", "receita", "finança", "financa",
+        "fatura", "cartão", "cartao", "saldo", "gastei", "gasto", "despesa", "finança", "financa",
+        "receita do mês", "receita do mes", "receita deste mês", "receita deste mes",
+        "receita este mês", "receita este mes", "receita mensal", "receita anual", "receita total",
+        "receitas do mês", "receitas do mes", "total de receita", "quanto recebi",
         "financeir", "dinheiro", "patrimônio", "patrimonio", "extrato", "transaç", "transac", "lançamento",
         "lancamento", "moneta", "quanto devo", "limite do", "conta corrente", "minhas contas", "salário", "salario",
         "investimento",
@@ -875,6 +882,7 @@ pub const FINANCE_WORDS: &[&str] = &[
 pub fn organ_local_words(organ: tauri::State<'_, Organ>) -> Vec<&'static str> {
     // Lembretes também são criados neste computador, em qualquer modo.
     let mut words = super::reminders::WORDS.to_vec();
+    words.extend(super::athena::words());
     if organ.installed() {
         words.extend_from_slice(FINANCE_WORDS);
     }

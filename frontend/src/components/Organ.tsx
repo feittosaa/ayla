@@ -39,17 +39,22 @@ export function OrganSpace({ status, active, refresh, onOpenSettings }: { status
     try { await native('organ_start'); setReady(true); } catch (e) { setError(errorText(e)); } finally { setStarting(false); void refresh(); }
   }, [refresh]);
   useEffect(() => { if (active && !ready && !starting && !error) void start(); }, [active, ready, starting, error, start]);
-  // Uma vez carregada, a página continua montada: trocar de espaço não perde o que estava aberto.
-  if (ready) return <div className="organ-space">
-    <iframe className="organ-frame" title={status.name} src={monetaPage} />
-  </div>;
-  return <div className="organ-space organ-waiting">
+  // A página carrega invisível por baixo da espera e só aparece pronta, com a mesma entrada suave
+  // dos outros espaços (sem o quadro em branco da primeira abertura).
+  const [loaded, setLoaded] = useState(false);
+  const waiting = <div className="organ-space organ-waiting">
     <OrganIcon status={status} size={48} />
     <h1>{status.name}</h1>
     {error ? <>
       <p role="alert" className="app-error">{error}</p>
       <div className="row-actions"><button className="primary-action" onClick={() => void start()}>Tentar de novo</button><button className="ghost-button" onClick={onOpenSettings}>Ver em Configurações</button></div>
-    </> : <p role="status">{status.task ?? 'Iniciando a Moneta…'}</p>}
+    </> : <p role="status">{ready ? `Abrindo a ${status.name}…` : status.task ?? 'Iniciando a Moneta…'}</p>}
+  </div>;
+  // Uma vez carregada, a página continua montada: trocar de espaço não perde o que estava aberto.
+  if (!ready) return waiting;
+  return <div className="organ-space organ-stack">
+    <iframe className={loaded ? 'organ-frame shown' : 'organ-frame'} title={status.name} src={monetaPage} onLoad={() => requestAnimationFrame(() => requestAnimationFrame(() => setLoaded(true)))} />
+    {!loaded && waiting}
   </div>;
 }
 

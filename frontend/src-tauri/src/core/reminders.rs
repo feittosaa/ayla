@@ -42,7 +42,8 @@ pub struct Parsed {
 }
 
 const TRIGGERS: &[&str] = &[
-    "me lembra", "me lembre", "lembre-me", "lembra-me", "me lembrar", "me avisa", "me avise", "cria um lembrete",
+    "me lembra", "me lembre", "lembre-me", "lembra-me", "me lembrar", "me avisa", "me avise", "me notifica", "me notifique",
+    "manda um lembrete", "mande um lembrete", "manda um aviso", "mande um aviso", "cria um lembrete",
     "crie um lembrete", "criar lembrete", "novo lembrete", "lembrete para", "lembrete pra", "lembrete de",
 ];
 
@@ -50,6 +51,21 @@ const TRIGGERS: &[&str] = &[
 pub fn is_request(message: &str) -> bool {
     let text = message.to_lowercase();
     TRIGGERS.iter().any(|t| text.contains(t))
+        // "configura o aviso daqui 10 segundos", "notificação amanhã às 9": palavra de aviso + quando.
+        || (NOUNS.iter().any(|n| text.contains(n)) && parse(message, now_local()).is_some())
+}
+
+/// Palavras de aviso que, junto com uma data ou hora entendida, também pedem um lembrete.
+const NOUNS: &[&str] = &["lembrete", "aviso", "notificação", "notificacao", "alarme"];
+/// Palavras que não fazem parte do que lembrar.
+const FILLER: &[&str] = &[
+    "lembrete", "aviso", "notificação", "notificacao", "alarme", "automático", "automatico", "configura", "configure",
+    "configurar", "cria", "crie", "criar", "manda", "mande", "me", "um", "uma", "por", "favor", "ayla",
+];
+
+/// Texto genérico: a Ayla tenta descobrir o assunto pela conversa.
+pub fn generic(text: &str) -> bool {
+    text == "Lembrete"
 }
 
 /// Palavras que levam o pedido ao caminho local (a interface usa a mesma lista).
@@ -176,11 +192,12 @@ pub fn parse(message: &str, now: NaiveDateTime) -> Option<Parsed> {
                     used.extend([i - 2, i - 1]);
                 }
             }
-            "daqui" | "em" if next == Some("a") || word == "em" => {
-                // "daqui a 20 minutos", "em 2 horas", "daqui a meia hora".
-                let start = if word == "daqui" { i + 2 } else { i + 1 };
+            "daqui" | "em" if next == Some("a") || word == "em" || next.and_then(number).is_some() => {
+                // "daqui a 20 minutos", "daqui 10 seg", "em 2 horas", "daqui a meia hora".
+                let start = if word == "daqui" && next == Some("a") { i + 2 } else { i + 1 };
                 let (Some(amount), Some(unit)) = (words.get(start).and_then(|w| number(w)), words.get(start + 1)) else { continue };
                 let delta = match unit.as_str() {
+                    "segundo" | "segundos" | "seg" | "segs" | "s" => Duration::seconds(amount as i64),
                     "minuto" | "minutos" | "min" => Duration::minutes(amount as i64),
                     "hora" | "horas" | "h" => Duration::hours(amount as i64),
                     "dia" | "dias" => Duration::days(amount as i64),
@@ -269,6 +286,7 @@ fn text_of(message: &str, words: &[String], used: &[usize]) -> String {
         .enumerate()
         .filter(|(i, _)| *i >= start && !used.contains(i))
         .map(|(_, w)| w.as_str())
+        .filter(|w| !FILLER.contains(w))
         .collect();
     let mut kept: &[&str] = &kept;
     while let Some(first) = kept.first() {
@@ -279,7 +297,7 @@ fn text_of(message: &str, words: &[String], used: &[usize]) -> String {
         }
     }
     let text = kept.join(" ");
-    if text.is_empty() { "Lembrete".to_string() } else { text }
+    if text.is_empty() || matches!(text.as_str(), "o" | "a" | "de") { "Lembrete".to_string() } else { text }
 }
 
 /// Próxima ocorrência de um lembrete que se repete.
@@ -367,6 +385,22 @@ pub fn model_request(message: &str, now: NaiveDateTime) -> Vec<serde_json::Value
     );
     vec![serde_json::json!({"role":"system","content":system}), serde_json::json!({"role":"user","content":message})]
 }
+/// Assunto do lembrete pela conversa recente ("uma notificação pra beber água" antes de
+/// "configura o aviso daqui 10 segundos").
+pub fn subject_request(message: &str, recent: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"role":"system","content":"Diga em poucas palavras do que a pessoa quer ser lembrada, pela conversa. Devolva só JSON com texto (ex.: \"beber água\"). Se não houver assunto, use \"Lembrete\"."}),
+        serde_json::json!({"role":"user","content":format!("Conversa recente:\n{recent}\n\nPedido: {message}")}),
+    ]
+}
+pub fn subject_schema() -> serde_json::Value {
+    serde_json::json!({"type":"object","properties":{"texto":{"type":"string","minLength":1,"maxLength":120}},"required":["texto"]})
+}
+pub fn parse_subject(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    Some(value["texto"].as_str()?.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 pub fn model_schema() -> serde_json::Value {
     serde_json::json!({"type":"object","properties":{
         "quando":{"type":"string","minLength":16,"maxLength":16},
@@ -421,6 +455,19 @@ mod tests {
         assert_eq!(parsed("me lembra ao meio-dia de almoçar").when, at(2026, 11, 20, 12, 0));
         assert_eq!(parsed("me lembra amanhã às 9 da reunião").text, "reunião");
         assert!(parse("me lembra de comprar pão", now()).is_none(), "sem data: vai para o modelo");
+    }
+
+    #[test]
+    fn entende_segundos_e_avisos_sem_gatilho() {
+        let p = parsed("ayla, me manda um lembrete teste daqui 10 seg");
+        assert_eq!((p.when, p.text.as_str()), (at(2026, 11, 20, 10, 0) + Duration::seconds(10), "teste"));
+        let q = parsed("configura o aviso automatico daqui 10 segundos");
+        assert_eq!(q.when, at(2026, 11, 20, 10, 0) + Duration::seconds(10));
+        assert!(generic(&q.text), "{}", q.text);
+        assert!(is_request("ayla, me manda um lembrete teste daqui 10 seg"));
+        assert!(is_request("configura o aviso automatico daqui 10 segundos"));
+        assert!(!is_request("o aviso de privacidade é chato"), "sem data ou hora não é lembrete");
+        assert_eq!(parse_subject(r#"{"texto":"beber água"}"#).as_deref(), Some("beber água"));
     }
 
     #[test]

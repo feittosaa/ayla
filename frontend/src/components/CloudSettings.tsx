@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import Confirm from './Confirm';
 import { native, errorText, modeLabels, taskId, type CloudProvider, type Preferences, type Snapshot, type UsageMode } from '../services/Desktop';
 
 type Props = {
@@ -65,7 +66,7 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
   return <section id="nuvem" className="settings-group" aria-labelledby="cloud-title"><h2 id="cloud-title">Nuvem</h2>
     <div className="group-card">
       <label className="group-row">
-        <span className="row-text"><span className="row-title">Usar IA na nuvem</span><span className="row-hint">{enabled ? 'Conteúdo sensível ou não verificado continua neste computador. Cada envio mostra o que vai e pede a sua revisão.' : 'Desligado: a Ayla funciona 100% neste computador.'}</span></span>
+        <span className="row-text"><span className="row-title">Usar IA na nuvem</span><span className="row-hint">{enabled ? 'Conteúdo sensível ou não verificado continua neste computador. No modo Automático, pedidos classificados como públicos seguem direto para a conta conectada.' : 'Desligado: a Ayla funciona 100% neste computador.'}</span></span>
         <input type="checkbox" role="switch" className="switch" checked={enabled} disabled={saving} onChange={e => void save({ usage_mode: e.target.checked ? 'explicit_request' : 'local_only', cloud_asked: true }, e.target.checked ? 'Nuvem ligada. Conecte uma conta abaixo.' : 'A Ayla agora funciona 100% neste computador.')} />
       </label>
       {enabled && <label className="group-row">
@@ -89,7 +90,7 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
                 <span className="row-hint">{provider.connected ? (provider.account ? `Conectado como ${provider.account}` : 'Conectado') : provider.summary}</span></span>
               {provider.connected ? <span className="row-actions">
                 {!selected && <button disabled={saving || working} onClick={() => void use(provider)}>Usar</button>}
-                <button className="ghost-button" disabled={working} onClick={() => void act(provider.id, async () => { await native('cloud_disconnect', { provider: provider.id }); if (selected) await save({ cloud_provider: '', cloud_model: '' }); return `${provider.name} desconectado.`; })}>{provider.login === 'key' ? 'Remover chave' : 'Sair'}</button>
+                <Confirm className="ghost-button" disabled={working} question={provider.login === 'key' ? `Remover a chave de ${provider.name} deste computador?` : `Sair da conta ${provider.name}? O acesso é revogado.`} confirm={provider.login === 'key' ? 'Remover' : 'Sair'} onConfirm={() => void act(provider.id, async () => { await native('cloud_disconnect', { provider: provider.id }); if (selected) await save({ cloud_provider: '', cloud_model: '' }); return `${provider.name} desconectado.`; })}>{provider.login === 'key' ? 'Remover chave' : 'Sair'}</Confirm>
               </span> : provider.login !== 'key' && (working && busy?.request
                 ? <span className="row-actions"><span className="row-hint" role="status">Termine o login no navegador…</span><button className="ghost-button" onClick={() => void native('cancel_job', { requestId: busy.request })}>Cancelar</button></span>
                 : <button className={provider.login === 'chat_gpt' ? 'primary-action' : ''} disabled={!!busy} onClick={() => void login(provider)}>{provider.login === 'chat_gpt' ? 'Continuar com o ChatGPT' : 'Entrar com OpenRouter'}</button>)}

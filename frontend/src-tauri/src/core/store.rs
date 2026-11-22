@@ -88,7 +88,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 6;
+const SCHEMA: u32 = 8;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -100,6 +100,7 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub complete: bool,
+    pub origin: Option<String>,
     /// Arquivos enviados com esta mensagem.
     pub attachments: Vec<FileInfo>,
 }
@@ -176,7 +177,30 @@ impl Store {
         if version <= 5 {
             Self::migrate_v6(&mut conn)?;
         }
+        if version <= 6 {
+            Self::migrate_v7(&mut conn)?;
+        }
+        if version <= 7 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN origin TEXT; PRAGMA user_version=8;")?;
+            tx.commit()?;
+        }
         Ok(Self { conn })
+    }
+    /// v7 (Athena): índice das notas Markdown. O arquivo continua sendo a fonte de verdade; o
+    /// índice guarda trechos (FTS5 e vetores) e a data/tamanho para reindexar só o que mudou.
+    /// `note` é o caminho absoluto, então trocar de pasta não mistura notas.
+    fn migrate_v7(conn: &mut Connection) -> rusqlite::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch("CREATE TABLE note_index(note TEXT PRIMARY KEY, modified INTEGER NOT NULL, bytes INTEGER NOT NULL);
+            CREATE TABLE note_chunks(id INTEGER PRIMARY KEY, note TEXT NOT NULL REFERENCES note_index(note) ON DELETE CASCADE, ord INTEGER NOT NULL, text TEXT NOT NULL);
+            CREATE INDEX note_chunks_note ON note_chunks(note, ord);
+            CREATE VIRTUAL TABLE note_chunks_fts USING fts5(text, content='note_chunks', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+            CREATE TRIGGER note_chunks_ai AFTER INSERT ON note_chunks BEGIN INSERT INTO note_chunks_fts(rowid,text) VALUES(new.id,new.text); END;
+            CREATE TRIGGER note_chunks_ad AFTER DELETE ON note_chunks BEGIN INSERT INTO note_chunks_fts(note_chunks_fts,rowid,text) VALUES('delete',old.id,old.text); END;
+            CREATE TABLE note_vectors(chunk_id INTEGER NOT NULL REFERENCES note_chunks(id) ON DELETE CASCADE, model_id TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(chunk_id, model_id));
+            PRAGMA user_version=7;")?;
+        tx.commit()
     }
     /// v6: lembretes. `due` em segundos Unix; `repeat` none/daily/weekly/monthly. Um lembrete
     /// sem repetição sai da tabela depois de avisar; os repetidos avançam para a próxima vez.
@@ -360,8 +384,8 @@ impl Store {
         Ok(())
     }
     pub fn messages(&self, id: &str) -> rusqlite::Result<Vec<Message>> {
-        let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
-            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
+        let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete,origin FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
+            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, origin:r.get(4)?, attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
         rows.reverse();
         let attached = self.conversation_files(id)?;
         for message in &mut rows {
@@ -405,6 +429,7 @@ impl Store {
         complete: bool,
         attachments: &[String],
         created: &[String],
+        origin: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -415,7 +440,7 @@ impl Store {
         for file in attachments {
             tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, message])?;
         }
-        tx.execute("INSERT INTO messages(conversation_id,role,content,complete) VALUES(?1,'assistant',?2,?3)",params![id,assistant,complete])?;
+        tx.execute("INSERT INTO messages(conversation_id,role,content,complete,origin) VALUES(?1,'assistant',?2,?3,?4)",params![id,assistant,complete,origin])?;
         let reply = tx.last_insert_rowid();
         for file in created {
             tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, reply])?;
@@ -448,6 +473,93 @@ impl Store {
     /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.
     pub fn project_files(&self, project: Option<&str>) -> rusqlite::Result<Vec<FileInfo>> {
         self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE project_id IS ?1 AND kept=1 ORDER BY created_at DESC, rowid DESC"))?.query_map([project], Self::file_row)?.collect()
+    }
+    /// Athena: data e tamanho indexados de cada nota (caminho absoluto).
+    pub fn note_stamps(&self) -> rusqlite::Result<std::collections::HashMap<String, (i64, i64)>> {
+        self.conn.prepare("SELECT note,modified,bytes FROM note_index")?.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect()
+    }
+    pub fn index_note(&self, note: &str, modified: i64, bytes: i64, chunks: &[String]) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM note_index WHERE note=?1", [note])?;
+        tx.execute("INSERT INTO note_index VALUES(?1,?2,?3)", params![note, modified, bytes])?;
+        for (ord, text) in chunks.iter().enumerate() {
+            tx.execute("INSERT INTO note_chunks(note,ord,text) VALUES(?1,?2,?3)", params![note, ord as i64, text])?;
+        }
+        tx.commit()
+    }
+    pub fn forget_note(&self, note: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM note_index WHERE note=?1", [note])?;
+        Ok(())
+    }
+    pub fn indexed_note_paths(&self, root: &str) -> rusqlite::Result<Vec<String>> {
+        self.conn
+            .prepare("SELECT note FROM note_index WHERE substr(note,1,length(?1))=?1")?
+            .query_map([root], |r| r.get(0))?
+            .collect()
+    }
+    /// Um trecho inicial por nota, para quando o tópico vem do nome da pasta.
+    pub fn note_openings(&self, folder: &str, limit: usize) -> rusqlite::Result<Vec<i64>> {
+        self.conn
+            .prepare("SELECT coalesce(body.id,c.id) FROM note_index n
+                JOIN note_chunks c ON c.note=n.note AND c.ord=0
+                LEFT JOIN note_chunks body ON body.note=n.note AND body.ord=1 AND instr(c.text,char(10))=0
+                WHERE substr(n.note,1,length(?1))=?1 ORDER BY n.modified DESC,n.note LIMIT ?2")?
+            .query_map(params![folder, limit as i64], |r| r.get(0))?
+            .collect()
+    }
+    /// Busca por palavras nas notas de uma pasta: (nota, trecho com destaque), uma linha por nota.
+    pub fn search_notes(&self, query: &str, root: &str, limit: usize) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut seen = std::collections::HashSet::new();
+        let rows: Vec<(String, String)> = self.conn
+            .prepare("SELECT c.note, snippet(note_chunks_fts, 0, '«', '»', '…', 14) FROM note_chunks_fts JOIN note_chunks c ON c.id=note_chunks_fts.rowid WHERE note_chunks_fts MATCH ?1 AND substr(c.note,1,length(?2))=?2 ORDER BY bm25(note_chunks_fts) LIMIT 200")?
+            .query_map(params![query, root], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows.into_iter().filter(|(note, _)| seen.insert(note.clone())).take(limit).collect())
+    }
+    /// Trechos com links wiki (`[[`) das notas de uma pasta, para os backlinks.
+    pub fn notes_with_links(&self, root: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        self.conn
+            .prepare("SELECT note,text FROM note_chunks WHERE substr(note,1,length(?1))=?1 AND instr(text,'[[')>0 ORDER BY note,ord")?
+            .query_map([root], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+    /// Trechos (id) que contêm as palavras, para a conversa.
+    pub fn search_note_chunks(&self, query: &str, root: &str, limit: usize) -> rusqlite::Result<Vec<i64>> {
+        self.conn
+            .prepare(&format!("SELECT c.id FROM note_chunks_fts JOIN note_chunks c ON c.id=note_chunks_fts.rowid WHERE note_chunks_fts MATCH ?1 AND substr(c.note,1,length(?2))=?2 ORDER BY bm25(note_chunks_fts) LIMIT {limit}"))?
+            .query_map(params![query, root], |r| r.get(0))?
+            .collect()
+    }
+    pub fn note_chunks_without_vector(&self, model: &str, root: &str, limit: usize) -> rusqlite::Result<Vec<(i64, String)>> {
+        self.conn
+            .prepare(&format!("SELECT id,text FROM note_chunks WHERE substr(note,1,length(?2))=?2 AND NOT EXISTS(SELECT 1 FROM note_vectors WHERE chunk_id=note_chunks.id AND model_id=?1) ORDER BY id LIMIT {limit}"))?
+            .query_map(params![model, root], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+    pub fn set_note_vector(&self, chunk: i64, model: &str, vector: &[f32]) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO note_vectors VALUES(?1,?2,?3)", params![chunk, model, memory::encode(vector)])?;
+        Ok(())
+    }
+    pub fn note_vectors(&self, model: &str, root: &str) -> rusqlite::Result<Vec<(i64, Vec<f32>)>> {
+        self.conn
+            .prepare("SELECT v.chunk_id,v.vector FROM note_vectors v JOIN note_chunks c ON c.id=v.chunk_id WHERE v.model_id=?1 AND substr(c.note,1,length(?2))=?2")?
+            .query_map(params![model, root], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(|row| match row {
+                Ok((id, raw)) => memory::decode(&raw).map(|v| Ok((id, v))),
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+    /// (nota, texto) dos trechos, na ordem pedida.
+    pub fn note_chunks_by_ids(&self, ids: &[i64]) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut statement = self.conn.prepare("SELECT note,text FROM note_chunks WHERE id=?1")?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(row) = statement.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.next() {
+                out.push(row?);
+            }
+        }
+        Ok(out)
     }
     pub fn add_reminder(&self, text: &str, due: i64, repeat: &str, conversation: Option<&str>) -> rusqlite::Result<Reminder> {
         let reminder = Reminder { id: id(), text: text.to_string(), due, repeat: repeat.to_string(), conversation_id: conversation.map(String::from) };
@@ -868,6 +980,27 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn athena_indexa_busca_na_pasta_e_reindexa() {
+        let path = std::env::temp_dir().join(format!("ayla-athena-idx-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        db.index_note("/notas/Treino.md", 10, 5, &["Agachamento e supino na segunda.".into()]).unwrap();
+        db.index_note("/outra/Treino.md", 10, 5, &["Supino na outra pasta.".into()]).unwrap();
+        let hits = db.search_notes("\"supino\"", "/notas/", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "/notas/Treino.md");
+        assert!(hits[0].1.contains("«supino»"), "{}", hits[0].1);
+        db.index_note("/notas/Treino.md", 20, 6, &["Corrida no sábado.".into()]).unwrap();
+        assert!(db.search_notes("\"supino\"", "/notas/", 10).unwrap().is_empty(), "reindexada");
+        assert_eq!(db.note_stamps().unwrap()["/notas/Treino.md"], (20, 6));
+        let ids = db.search_note_chunks("\"corrida\"", "/notas/", 5).unwrap();
+        db.set_note_vector(ids[0], "emb", &[1.0, 0.0]).unwrap();
+        assert_eq!(db.note_vectors("emb", "/notas/").unwrap().len(), 1);
+        assert_eq!(db.note_chunks_by_ids(&ids).unwrap()[0].1, "Corrida no sábado.");
+        db.forget_note("/notas/Treino.md").unwrap();
+        assert!(db.note_chunks_by_ids(&ids).unwrap().is_empty() && db.note_vectors("emb", "/notas/").unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+    #[test]
     fn lembretes_vencem_reagendam_e_saem() {
         let path = std::env::temp_dir().join(format!("ayla-lembretes-{}.db", id()));
         let db = Store::open(&path).unwrap();
@@ -910,6 +1043,26 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
     #[test]
+    fn cloud_origin_survives_reopening_and_old_turns_remain_unlabelled() {
+        let root = std::env::temp_dir().join(format!("ayla-origin-{}", id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("ayla.db");
+        let db = Store::open(&path).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        db.save_turn(&chat.id,"a","b",true,&[],&[],None).unwrap();
+        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
+        drop(db);
+        let db = Store::open(&path).unwrap();
+        db.save_turn(&chat.id,"c","d",true,&[],&[],Some("cloud_search")).unwrap();
+        drop(db);
+        let rows = Store::open(&path).unwrap().messages(&chat.id).unwrap();
+        assert!(rows[..3].iter().all(|row| row.origin.is_none()));
+        assert_eq!(rows[3].origin.as_deref(),Some("cloud_search"));
+        assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(),1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn facts_support_editing_text_search_vectors_and_deletion() {
         let path = std::env::temp_dir().join(format!("ayla-facts-{}.db", id()));
         let db = Store::open(&path).unwrap();
@@ -945,7 +1098,7 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();
@@ -1003,7 +1156,7 @@ mod tests {
         assert!(!db.rename_conversation("inexistente", "x").unwrap());
         let file = FileInfo { id: "f1".into(), name: "nota.md".into(), kind: Kind::Text, bytes: 1, created_at: 0, conversation_id: None, project_id: None, message_id: None, path: "files/f1/nota.md".into(), extracted: None };
         db.insert_file(&file, "sha", false).unwrap();
-        db.save_turn(&a.id, "oi", "olá", true, &[file.id.clone()], &[]).unwrap();
+        db.save_turn(&a.id, "oi", "olá", true, &[file.id.clone()], &[], None).unwrap();
         db.add_message(&b.id, "user", "fica", true).unwrap();
         let fact = db.insert_fact("O usuário vai viajar em julho.", "fato", Privacy::Uncertain, "auto", Some(&a.id), None).unwrap();
         assert_eq!(db.delete_conversation(&a.id).unwrap(), Some(vec!["files/f1/nota.md".to_string()]));

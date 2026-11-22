@@ -1,10 +1,13 @@
 //! Serviços nativos compartilhados pelo desktop e, posteriormente, pelos adaptadores.
+pub mod athena;
+pub mod athena_git;
 pub mod cloud;
 pub mod files;
 pub mod hardware;
 pub mod iris;
 pub mod memory;
 pub mod policy;
+pub mod research;
 pub mod reminders;
 pub mod preferences;
 

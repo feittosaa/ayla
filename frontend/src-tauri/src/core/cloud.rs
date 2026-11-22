@@ -384,6 +384,18 @@ pub fn chat_request(api: Api, base: &str, secret: &Secret, model: &str, effort: 
     })
 }
 
+pub fn search_request(platform: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, message: &str) -> Result<reqwest::RequestBuilder, String> {
+    let key = match (platform, secret) {
+        ("chatgpt", Secret::ChatGpt(token)) | ("openai", Secret::Key(token)) => token,
+        _ => return Err("Para pesquisar na web, escolha uma conta do ChatGPT ou da OpenAI em Configurações › Nuvem.".into()),
+    };
+    let instructions = format!("{system}\n\nPesquise na web antes de responder. Responda em português. Para pedidos abertos, traga de 3 a 4 opções distintas, ordenadas da melhor para a pior segundo o seu julgamento, e explique em uma frase por que cada uma funciona melhor ou pior. Respeite a quantidade pedida explicitamente. Cite junto de cada opção a página específica ou o vídeo encontrado usando a ferramenta de citações. Escreva os nomes em texto simples e deixe os links para as citações. Use apenas fontes pertinentes à plataforma solicitada. Se não encontrar o suficiente, seja claro sobre isso.");
+    let mut body = responses_body(model, effort, &instructions, message);
+    body["tools"] = json!([{"type":"web_search"}]);
+    body["tool_choice"] = json!("required");
+    Ok(client()?.post(format!("{OPENAI_API}/responses")).bearer_auth(key).json(&body))
+}
+
 /// Esforço só vai quando a pessoa escolhe; sem escolha, cada plataforma usa o padrão dela.
 pub fn compatible_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
     let mut body = json!({"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}], "stream": true});
@@ -489,6 +501,14 @@ pub fn http_error(status: u16, body: &str) -> String {
 
 /// Lê o streaming SSE e repassa o texto; falha se terminar sem conclusão.
 pub async fn stream(request: reqwest::RequestBuilder, api: Api, cancel: &CancellationToken, mut report: impl FnMut(Value)) -> Result<String, String> {
+    read_stream(request, api, cancel, None, &mut report).await
+}
+
+pub async fn stream_search(request: reqwest::RequestBuilder, cancel: &CancellationToken, videos: bool, mut report: impl FnMut(Value)) -> Result<String, String> {
+    read_stream(request, Api::ChatGpt, cancel, Some(videos), &mut report).await
+}
+
+async fn read_stream(request: reqwest::RequestBuilder, api: Api, cancel: &CancellationToken, search: Option<bool>, report: &mut impl FnMut(Value)) -> Result<String, String> {
     use futures_util::StreamExt;
     let response = tokio::select! {_ = cancel.cancelled() => return Err("Resposta interrompida".into()), r = request.send() => r.map_err(|_| "Não foi possível conectar à plataforma")?};
     if !response.status().is_success() {
@@ -498,6 +518,8 @@ pub async fn stream(request: reqwest::RequestBuilder, api: Api, cancel: &Cancell
     }
     let mut stream = response.bytes_stream();
     let (mut buffer, mut full, mut done) = (Vec::new(), String::new(), false);
+    // Alguns streams só entregam os itens em `output_item.done` e fecham com `output` vazio.
+    let mut items = Vec::new();
     while !done {
         let item = tokio::select! {_ = cancel.cancelled() => return Err("Resposta interrompida".into()), item = stream.next() => item};
         let Some(item) = item else { break };
@@ -515,6 +537,22 @@ pub async fn stream(request: reqwest::RequestBuilder, api: Api, cancel: &Cancell
                 break;
             }
             let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
+            if let Some(videos) = search {
+                match event["type"].as_str() {
+                    Some("response.output_item.done") => { items.push(event["item"].clone()); continue; }
+                    Some("response.completed") => {
+                        let mut result = event["response"].clone();
+                        if result["output"].as_array().is_none_or(|output| output.is_empty()) {
+                            result["output"] = Value::Array(std::mem::take(&mut items));
+                        }
+                        let answer = super::research::answer(&result, videos)?;
+                        report(json!({"type":"token","text":answer}));
+                        return Ok(answer);
+                    }
+                    Some("error" | "response.failed" | "response.incomplete") => {}
+                    _ => continue,
+                }
+            }
             let step = match api { Api::Compatible => parse_compatible(&event), Api::Anthropic => parse_anthropic(&event), Api::ChatGpt => parse_responses(&event) };
             match step {
                 Step::Text(text) => {
@@ -641,6 +679,16 @@ pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
     else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { Some("webp") }
     else { None }
 }
+/// A lista do plano ChatGPT já vem na ordem recomendada para a conta.
+pub fn automatic_model<'a>(platform: &str, catalog: &'a [(String, String)]) -> Result<&'a str, String> {
+    catalog.iter().map(|(id, _)| id.as_str()).find(|id| {
+        let name = id.to_ascii_lowercase();
+        !id.is_empty() && !is_image_model(id)
+            && !["embed", "whisper", "tts", "audio", "transcri", "moderation", "realtime", "dall-e", "sora", "rerank", "deep-research", "search-api", "search-preview"].iter().any(|tag| name.contains(tag))
+            && (platform != "openai" || name.starts_with("gpt-") && !name.contains("instruct"))
+    }).ok_or_else(|| "A conta conectada não ofereceu um modelo de conversa disponível.".to_string())
+}
+
 pub fn parse_models(api: Api, body: &Value) -> Vec<(String, String)> {
     let empty = Vec::new();
     if api == Api::ChatGpt {

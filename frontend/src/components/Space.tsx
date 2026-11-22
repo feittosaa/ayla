@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import Chat from './Chat';
 import MemoryPanel from './MemoryPanel';
@@ -7,6 +7,8 @@ import { native, errorText, fileLabels, formatBytes, type Conversation, type Fil
 import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
 
 type View = 'chat' | 'overview' | 'memory' | 'files';
+type Slot = { key: string; conversation: Conversation | null; busy: boolean };
+let slotCounter = 0;
 type Props = {
   snapshot: Snapshot; refresh: () => Promise<void>;
   /** `null` é o espaço geral da Ayla; senão, um projeto. */
@@ -14,6 +16,7 @@ type Props = {
   /** Espaço visível no momento. */
   active: boolean;
   compact?: boolean;
+  quickOpening?: number | null;
   onDeleted?: () => void;
   onOpenSettings?: (section: string) => void;
   /** Na barra da Ayla: lista de projetos, abrir e criar. */
@@ -33,19 +36,40 @@ export function ProjectAvatar({ project, size = 36 }: { project: Project; size?:
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, active, compact = false, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
+export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversation, setConversation] = useState<Conversation | null>(null);
+  // Cada conversa respondendo fica montada (oculta) para a resposta seguir enquanto outra é aberta.
+  const [slots, setSlots] = useState<Slot[]>([{ key: 'c0', conversation: null, busy: false }]);
+  const [activeKey, setActiveKey] = useState('c0');
+  const conversation = slots.find(s => s.key === activeKey)?.conversation ?? null;
+  /** Troca a conversa em todas as abas onde ela aparece (título, permissão). */
+  const replaceConversation = useCallback((id: string, change: (c: Conversation) => Conversation | null) => {
+    setSlots(prev => prev.map(s => s.conversation?.id === id ? { ...s, conversation: change(s.conversation) } : s));
+  }, []);
   const [view, setView] = useState<View>(project ? 'overview' : 'chat');
-  const [normalSidebar, setNormalSidebar] = useState(() => window.innerWidth >= 760);
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 1000px)').matches);
+  const [normalSidebar, setNormalSidebar] = useState(true);
+  const [overlaySidebar, setOverlaySidebar] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 1000px)');
+    const update = () => { setNarrow(query.matches); setOverlaySidebar(false); };
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
   const [compactSidebar, setCompactSidebar] = useState(false);
-  const sidebar = compact ? compactSidebar : normalSidebar;
-  const setSidebar = compact ? setCompactSidebar : setNormalSidebar;
-  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const sidebar = compact ? compactSidebar : narrow ? overlaySidebar : normalSidebar;
+  const setSidebar = compact ? setCompactSidebar : narrow ? setOverlaySidebar : setNormalSidebar;
+  const focusComposer = compact && active ? quickOpening : null;
+  useLayoutEffect(() => {
+    if (focusComposer == null) return;
+    setView('chat');
+    setCompactSidebar(false);
+  }, [focusComposer]);
+  const [error, setError] = useState('');
   const [editing, setEditing] = useState<string | null>(null); const [draftTitle, setDraftTitle] = useState(''); const [confirming, setConfirming] = useState<string | null>(null);
   const projectId = project?.id ?? null;
   const mode = snapshot.preferences.usage_mode;
-  const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Neste computador; nuvem só com sua revisão';
+  const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Nuvem disponível';
 
   useEffect(() => { native<Conversation[]>('conversations', { project: projectId }).then(setConversations).catch(e => setError(errorText(e))); }, [projectId]);
   // Título resumido pela Ayla depois da primeira resposta.
@@ -53,19 +77,29 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     const stop = listen<{ id: string; title: string }>('conversation-updated', event => {
       const { id, title } = event.payload;
       setConversations(prev => prev.map(c => c.id === id ? { ...c, title } : c));
-      setConversation(current => current && current.id === id ? { ...current, title } : current);
+      replaceConversation(id, current => ({ ...current, title }));
     });
     return () => { void stop.then(unlisten => unlisten()); };
-  }, []);
-  const onConversation = useCallback((item: Conversation) => {
-    setConversation(item);
+  }, [replaceConversation]);
+  const onConversation = useCallback((key: string, item: Conversation) => {
+    setSlots(prev => prev.map(s => s.key === key ? { ...s, conversation: item } : s));
     setConversations(prev => prev.some(c => c.id === item.id) ? prev.map(c => c.id === item.id ? item : c) : [item, ...prev]);
   }, []);
+  /** Uma conversa que terminou de responder fora da tela deixa de ficar montada. */
+  const setSlotBusy = useCallback((key: string, busy: boolean) => {
+    setSlots(prev => {
+      const slot = prev.find(s => s.key === key);
+      if (!slot || slot.busy === busy) return prev;
+      return prev.map(s => s.key === key ? { ...s, busy } : s);
+    });
+  }, []);
+  useEffect(() => { setSlots(prev => prev.some(s => s.key !== activeKey && !s.busy) ? prev.filter(s => s.key === activeKey || s.busy) : prev); }, [slots, activeKey]);
+  const busyIds = new Set(slots.filter(s => s.busy && s.conversation).map(s => s.conversation!.id));
   /** Atualiza uma conversa na lista (e a aberta) sem trocar de conversa. */
   const patch = useCallback((item: Conversation) => {
     setConversations(prev => prev.map(c => c.id === item.id ? item : c));
-    setConversation(current => current && current.id === item.id ? item : current);
-  }, []);
+    replaceConversation(item.id, () => item);
+  }, [replaceConversation]);
   async function rename(item: Conversation) {
     const title = draftTitle.trim(); setEditing(null);
     if (!title || title === item.title) return;
@@ -76,17 +110,25 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     try {
       await native('delete_conversation', { id: item.id });
       setConversations(prev => prev.filter(c => c.id !== item.id));
-      setConversation(current => current?.id === item.id ? null : current);
+      replaceConversation(item.id, () => null);
       await refresh();
     } catch (e) { setError(errorText(e)); }
   }
   function openConversation(item: Conversation | null) {
-    if (busy && item?.id !== conversation?.id) return;
-    setConversation(item); setView('chat');
-    if (window.innerWidth < 760) setSidebar(false);
+    const open = item && slots.find(s => s.conversation?.id === item.id);
+    const current = slots.find(s => s.key === activeKey);
+    if (open) setActiveKey(open.key);
+    else if (current && !current.busy) setSlots(prev => prev.map(s => s.key === activeKey ? { ...s, conversation: item } : s));
+    else {
+      const key = `c${++slotCounter}`;
+      setSlots(prev => [...prev, { key, conversation: item, busy: false }]); setActiveKey(key);
+    }
+    setView('chat');
+    if (compact || narrow) setSidebar(false);
   }
 
   return <div className="chat-layout">
+    {(compact || narrow) && sidebar && <div className="sidebar-backdrop" aria-hidden="true" onClick={() => setSidebar(false)} />}
     {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
       {project && onBack && <button className="ghost-button back-to-ayla" onClick={onBack}><ChevronLeftIcon size={16} />Ayla</button>}
       <div className="brand">
@@ -99,7 +141,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
         <button className="conversation-item" aria-current={view === 'memory' ? 'page' : undefined} onClick={() => setView('memory')}>Memória</button>
         <button className="conversation-item" aria-current={view === 'files' ? 'page' : undefined} onClick={() => setView('files')}>Arquivos</button>
       </nav>}
-      <button className="new-chat" disabled={busy} onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
+      <button className="new-chat" onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
       <nav className="conversation-list" aria-label="Conversas e projetos">
         {!project && <>
           <div className="sidebar-label-row"><p className="sidebar-label">Projetos</p><button className="icon-button small" aria-label="Novo projeto" title="Novo projeto" onClick={onNewProject}><PlusIcon size={16} /></button></div>
@@ -118,10 +160,10 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
               <div className="row-actions"><button className="danger-action" onClick={() => void remove(item)}>Apagar</button><button className="ghost-button" onClick={() => setConfirming(null)}>Cancelar</button></div>
             </div>
           : <div key={item.id} className="conversation-row">
-              <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} disabled={busy && item.id !== conversation?.id} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={item.title}>{item.title}</button>
+              <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={item.title}>{item.title}</button>
               <span className="row-tools">
                 <button className="icon-button tiny" aria-label={`Renomear “${item.title}”`} title="Renomear" onClick={() => { setConfirming(null); setEditing(item.id); setDraftTitle(item.title); }}><PencilIcon size={15} /></button>
-                <button className="icon-button tiny" aria-label={`Apagar “${item.title}”`} title="Apagar" disabled={busy && item.id === conversation?.id} onClick={() => { setEditing(null); setConfirming(item.id); }}><TrashIcon size={15} /></button>
+                <button className="icon-button tiny" aria-label={`Apagar “${item.title}”`} title="Apagar" disabled={busyIds.has(item.id)} onClick={() => { setEditing(null); setConfirming(item.id); }}><TrashIcon size={15} /></button>
               </span>
             </div>)}
         {error && view === 'chat' && <p className="sidebar-error" role="alert">{error}</p>}
@@ -130,9 +172,9 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     </aside>}
 
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
-    <div className="chat-slot" hidden={view !== 'chat'}>
-      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={conversation} onConversation={onConversation} onBusy={setBusy} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat'} onOpenSettings={onOpenSettings} />
-    </div>
+    {slots.map(slot => <div key={slot.key} className="chat-slot" hidden={view !== 'chat' || slot.key !== activeKey}>
+      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} />
+    </div>)}
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
     {project && view === 'memory' && <main className="settings-main"><div className="settings-content">
       {!sidebar && <button className="ghost-button back-button-inline" onClick={() => setSidebar(true)}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
@@ -194,10 +236,10 @@ function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, o
     <section className="settings-group" aria-labelledby="danger-title"><h2 id="danger-title">Apagar projeto</h2>
       <div className="group-card">
         {confirmDelete ? <div className="group-row stacked" role="group" aria-label="Confirmar exclusão">
-          <span>Apagar <b>{project.name}</b> com {project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} e {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}? Isso não pode ser desfeito; o backup em Configurações guarda uma cópia antes.</span>
+          <span>Apagar <b>{project.name}</b> com {project.conversations} {project.conversations === 1 ? 'conversa' : 'conversas'} e {project.memories} {project.memories === 1 ? 'memória' : 'memórias'}? Isso não pode ser desfeito; o backup em Configurações guarda uma cópia antes. As notas do projeto vão para a lixeira da Athena (Athena › .trash).</span>
           <div className="row-actions"><button className="danger-action" disabled={saving} onClick={() => void remove()}>Apagar de vez</button><button className="ghost-button" onClick={() => setConfirmDelete(false)}>Cancelar</button></div>
         </div> : <div className="group-row">
-          <span className="row-text"><span className="row-hint">Remove o projeto, as conversas e as memórias dele. As memórias gerais não são afetadas.</span></span>
+          <span className="row-text"><span className="row-hint">Remove o projeto, as conversas, as memórias e os arquivos dele; as notas vão para a lixeira da Athena. As memórias gerais não são afetadas.</span></span>
           <button onClick={() => setConfirmDelete(true)}>Apagar…</button>
         </div>}
       </div>

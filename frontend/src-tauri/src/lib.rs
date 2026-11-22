@@ -132,12 +132,12 @@ pub fn run() {
         std::process::exit(code);
     }
     let initial = desktop::Launch::from_args();
-    let (_instance, requests) = match desktop::register(initial) {
+    let (instance, requests) = match desktop::register(initial) {
         Ok(Some(primary)) => primary,
         Ok(None) => return,
         Err(error) => { eprintln!("Falha ao registrar a Ayla na sessão: {error}"); return; }
     };
-    tauri::Builder::default()
+    let exit_code = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         // Camada de compatibilidade da Moneta: a página dela aparece dentro da Ayla e cada pedido
@@ -153,6 +153,22 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let organ = app.state::<core::organs::Organ>();
                 responder.respond(organ.forward(request).await);
+            });
+        })
+        // Anexos das notas da Athena (imagens e PDFs), lidos da pasta de cada raiz.
+        .register_asynchronous_uri_scheme_protocol("athena-file", |context, request, responder| {
+            use tauri::http::{Response, StatusCode};
+            if context.webview_label() != "main" {
+                responder.respond(Response::builder().status(StatusCode::FORBIDDEN).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = match app.try_state::<Core>() {
+                    Some(core) => core::services::athena_file(&core, request.uri().path()),
+                    None => Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Vec::new()).unwrap_or_default(),
+                };
+                responder.respond(response);
             });
         })
         .setup(move |app| {
@@ -178,12 +194,24 @@ pub fn run() {
                     core::services::memory_tick(&handle).await;
                 }
             });
-            // Lembretes: confere ao abrir (os perdidos avisam como atrasados) e a cada 15 s.
+            // Athena: Git das notas (puxar ao abrir e intervalo do obsidian-git), conferido a cada minuto.
+            let notes = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let mut boot = true;
+                loop {
+                    core::services::athena_git_tick(&notes, boot).await;
+                    boot = false;
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
+            // Lembretes: confere ao abrir (os perdidos avisam como atrasados) e a cada 2 s
+            // (consulta barata ao índice por horário), para avisos de segundos chegarem na hora.
             let reminders = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     core::services::reminder_tick(&reminders).await;
-                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             });
             app.manage(core::organs::Organ::moneta(&directory));
@@ -253,6 +281,30 @@ pub fn run() {
             core::services::chat,
             core::services::cloud_references,
             core::services::reminders_list,
+            core::notify::notify_test,
+            core::services::athena_pick_folder,
+            core::services::athena_tree,
+            core::services::athena_add_vault,
+            core::services::athena_remove_vault,
+            core::services::athena_mkdir,
+            core::services::athena_backlinks,
+            core::services::athena_rename,
+            core::services::athena_rename_folder,
+            core::services::athena_tags,
+            core::services::athena_attachment,
+            core::services::athena_read,
+            core::services::athena_write,
+            core::services::athena_create,
+            core::services::athena_daily,
+            core::services::athena_trash,
+            core::services::athena_search,
+            core::services::athena_open_folder,
+            core::services::athena_trash_folder,
+            core::services::athena_open_attachment,
+            core::services::athena_move_file,
+            core::services::athena_open_obsidian,
+            core::services::athena_git_status,
+            core::services::athena_git_sync,
             core::services::reminder_delete,
             core::services::reminder_snooze,
             core::services::backup_data,
@@ -265,11 +317,14 @@ pub fn run() {
             core::organs::organ_remove,
             core::organs::organ_open_separate,
             core::organs::organ_local_words,
+            core::research::suggests_web_search,
+            core::research::automatic_check,
+            core::services::set_response_source,
             core::version::app_version
         ])
         .build(tauri::generate_context!())
         .expect("Não foi possível iniciar a Ayla")
-        .run(|app, event| {
+        .run_return(|app, event| {
             if let tauri::RunEvent::WindowEvent { ref label, event: tauri::WindowEvent::CloseRequested { ref api, .. }, .. } = event {
                 if let Some(win) = app.get_webview_window(label) {
                     if app.state::<Core>().prefs().is_ok_and(|p| p.desktop.background) && win.hide().is_ok() {
@@ -288,7 +343,6 @@ pub fn run() {
                     // No reinício, espera a Moneta gravar e sair antes de a nova Ayla subi-la de novo.
                     organ.stop(desktop::restart_requested());
                 }
-                desktop::relaunch_if_requested();
                 if let Some(state) = app.try_state::<ManagedBackend>() {
                     if let Ok(mut backend) = state.0.lock() {
                         if let Some(backend) = backend.take() {
@@ -298,6 +352,9 @@ pub fn run() {
                 }
             }
         });
+    drop(instance);
+    desktop::relaunch_if_requested();
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]

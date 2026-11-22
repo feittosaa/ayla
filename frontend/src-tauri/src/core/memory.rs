@@ -96,8 +96,8 @@ const STOPWORDS: &[&str] = &[
     "pela", "mais", "menos", "muito", "tenho", "tem", "estou", "está", "esta", "ayla", "que",
     "porque", "então", "entao", "algo", "fazer", "pode", "posso", "seria", "sabe", "lembra",
 ];
-/// Consulta FTS5 segura: só palavras relevantes, cada uma entre aspas.
-pub fn fts_query(text: &str) -> Option<String> {
+/// Palavras relevantes para busca textual.
+pub(super) fn search_terms(text: &str) -> Vec<String> {
     let mut terms: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .map(|w| w.to_lowercase())
@@ -106,6 +106,12 @@ pub fn fts_query(text: &str) -> Option<String> {
     terms.sort();
     terms.dedup();
     terms.truncate(12);
+    terms
+}
+
+/// Consulta FTS5 segura: só palavras relevantes, cada uma entre aspas.
+pub fn fts_query(text: &str) -> Option<String> {
+    let terms = search_terms(text);
     (!terms.is_empty()).then(|| {
         terms
             .iter()

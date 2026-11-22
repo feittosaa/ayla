@@ -10,6 +10,8 @@ export type Preferences = {
   history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
+  athena_folder: string; athena_vaults: string[]; athena_git: boolean;
+  response_source: '' | 'local' | 'auto' | 'cloud';
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
@@ -36,16 +38,17 @@ export type Conversation = { id: string; title: string; cloud_consent: boolean; 
 export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
 export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
 export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
-export type Message = { role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[] };
+export type ReplyOrigin = 'cloud' | 'cloud_search';
+export type Message = { origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[] };
 /** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
 export type Source = { id: string; name: string; pages: number[]; date?: string };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources'; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] };
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin'; origin?: ReplyOrigin; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] };
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
 export type Effort = '' | 'low' | 'medium' | 'high';
 /** Memória pública que pode acompanhar um envio à nuvem, se continuar marcada na revisão. */
 export type Reference = { id: string; content: string };
-export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[] };
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[] };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 
