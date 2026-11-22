@@ -264,6 +264,36 @@ pub fn wiki_targets(text: &str) -> Vec<String> {
     out
 }
 
+/// Alvos de links entre notas, ignorando exemplos de código.
+pub fn graph_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut fenced = false;
+    for (code, part) in code_spans(text) {
+        if code { continue; }
+        for line in part.lines() {
+            if line.trim_start().starts_with("~~~") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced { continue; }
+            targets.extend(wiki_targets(line));
+            for (start, _) in line.match_indices("](") {
+                let tail = &line[start + 2..];
+                let raw = if let Some(angle) = tail.strip_prefix('<') {
+                    angle.split_once('>').map(|(url, _)| url)
+                } else {
+                    tail.split_once(')').map(|(url, _)| url.split_ascii_whitespace().next().unwrap_or(""))
+                };
+                let Some(url) = raw.and_then(|url| percent_decode(url.split('#').next().unwrap_or(""))) else { continue };
+                if url.to_ascii_lowercase().ends_with(".md") && !url.starts_with('/') && !url.contains(':') {
+                    targets.push(url.trim_start_matches("./").to_string());
+                }
+            }
+        }
+    }
+    targets
+}
+
 /// O alvo de um link aponta para esta nota? Pelo nome (como o Obsidian) ou pelo caminho sem `.md`.
 pub fn links_to(target: &str, note_path: &str) -> bool {
     let target = target.trim().trim_end_matches(".md").to_lowercase();
@@ -671,8 +701,24 @@ pub fn paste_image(root: &Path, note: &str, before: &str, after: &str, expected:
     Ok((format!("![[{target}]]"), modified))
 }
 
-pub fn add_banner(root: &Path, note: &str, content: &str, expected: i64, bytes: &[u8]) -> Result<(String, i64), String> {
-    let (_, updated, modified) = save_note_image(root, note, expected, bytes, |target| with_banner(content, target))?;
+/// Usa como banner uma imagem que já está na mesma raiz da nota (cofre, projeto ou Athena).
+pub fn set_banner(root: &Path, note: &str, content: &str, expected: i64, image: &str) -> Result<(String, i64), String> {
+    let root = root.canonicalize().map_err(|_| "Pasta da nota indisponível")?;
+    let note_path = root.join(safe_relative(note).ok_or("Nota inválida")?);
+    if !note_path.is_file() {
+        return Err("Nota não encontrada na pasta da Athena".into());
+    }
+    let image = image.trim().trim_start_matches("./");
+    let relative = Path::new(image);
+    let inside = !image.is_empty()
+        && relative.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.')))
+        && attachment_mime(relative).is_some_and(|mime| mime.starts_with("image/"));
+    let found = root.join(relative).canonicalize().ok().filter(|path| inside && path.starts_with(&root) && path.is_file());
+    if found.is_none() {
+        return Err("Escolha uma imagem desta mesma pasta".into());
+    }
+    let updated = with_banner(content, &relative_string(relative));
+    let modified = write(&root, note, &updated, Some(expected))?;
     Ok((updated, modified))
 }
 
@@ -929,22 +975,34 @@ mod tests {
     }
 
     #[test]
-    fn banner_preserva_nota_e_copia_imagem_para_a_raiz() {
+    fn banner_usa_imagem_da_mesma_raiz_sem_copiar() {
         let root = temp();
+        let outside = temp();
         let source = "---\r\nbanner: \"\"\r\ntags: [mapa]\r\n---\r\nTexto com [[Link]].";
         let note = create_in(&root, "", "Nota", source).unwrap();
+        fs::create_dir_all(root.join("Mapas")).unwrap();
+        fs::write(root.join("Mapas/Norte.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(root.join("texto.pdf"), b"%PDF").unwrap();
+        fs::write(outside.join("fora.png"), b"\x89PNG\r\n\x1a\n").unwrap();
         let (_, modified) = read(&root, &note).unwrap();
-        let bytes = b"\x89PNG\r\n\x1a\n";
-        let (updated, _) = add_banner(&root, &note, source, modified, bytes).unwrap();
-        let banner = updated.lines().find_map(|line| line.strip_prefix("banner: \"[[").and_then(|value| value.strip_suffix("]]\""))).unwrap();
-        assert!(banner.starts_with("Imagens/Nota/"));
-        assert_eq!(fs::read(root.join(banner)).unwrap(), bytes);
-        assert_eq!(updated, format!("---\r\ntags: [mapa]\r\nbanner: \"[[{banner}]]\"\r\n---\r\nTexto com [[Link]]."));
-        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: \"[[mapa.png]]\"\n---\n\nTexto");
-        assert!(add_banner(&root, &note, source, i64::MIN, bytes).is_err());
-        assert_eq!(fs::read_dir(root.join("Imagens/Nota")).unwrap().count(), 1);
+        for wrong in ["", "texto.pdf", "Ausente.png", "../fora.png", "/etc/hostname.png", ".obsidian/x.png"] {
+            assert!(set_banner(&root, &note, source, modified, wrong).is_err(), "{wrong}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("fora.png"), root.join("atalho.png")).unwrap();
+            assert!(set_banner(&root, &note, source, modified, "atalho.png").is_err(), "link para fora da raiz");
+        }
+        assert_eq!(read(&root, &note).unwrap().0, source, "recusas não alteram a nota");
+        let before = attachments(&root).len();
+        let (updated, _) = set_banner(&root, &note, source, modified, "Mapas/Norte.png").unwrap();
+        assert_eq!(updated, "---\r\ntags: [mapa]\r\nbanner: \"[[Mapas/Norte.png]]\"\r\n---\r\nTexto com [[Link]].");
         assert_eq!(read(&root, &note).unwrap().0, updated);
+        assert_eq!(attachments(&root).len(), before, "nada foi copiado");
+        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: \"[[mapa.png]]\"\n---\n\nTexto");
+        assert!(set_banner(&root, &note, &updated, i64::MIN, "Mapas/Norte.png").is_err());
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]

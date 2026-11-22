@@ -5,8 +5,9 @@ import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
 import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
-import { VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
+import { IMAGE, VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
 import BrandMark from './BrandMark';
+import AthenaGraph, { type NoteGraph } from './AthenaGraph';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[] };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
@@ -17,7 +18,8 @@ type GitStatus = { repo: boolean; branch: string; changes: number; files: Change
 type GitInfo = { enabled: boolean; obsidian: boolean; status: GitStatus; last: { at: number; outcome: Outcome } | null };
 type Adding = { root: string; folder: string; kind: 'note' | 'folder' };
 type Folder = { name: string; path: string; folders: Folder[]; notes: Note[]; files: Note[] };
-type TagEntry = { tag: string; notes: { root: string; rootName: string; path: string; title: string }[] };
+type TagEntry = { tag: string; notes: NoteGraph['nodes'] };
+type Overview = { tags: TagEntry[]; graph: NoteGraph };
 type Pane = { tabs: Tab[]; active: number };
 /** O que está sendo arrastado: nota ou pasta da árvore, ou uma aba. */
 type DragItem = { kind: 'note' | 'file' | 'folder'; root: string; path: string; label: string; tab?: { pane: number; at: number } };
@@ -84,6 +86,32 @@ function restoreLayout(): Record<Side, number> {
   } catch { return { left: widths.left.initial, right: widths.right.initial }; }
 }
 const same = (tab: { root: string; path: string }, root: string, path: string) => tab.root === root && tab.path === path;
+/** Aba visível na tela em foco. */
+const shownTab = (ws: Workspace): Tab | undefined => { const pane = ws.panes[Math.min(ws.focused, ws.panes.length - 1)]; return pane?.tabs[pane.active]; };
+/** Chaves da árvore que precisam estar abertas para mostrar a nota (raiz e pastas acima dela). */
+function ancestors(root: string, path: string) {
+  const parts = path.split('/').slice(0, -1);
+  return [`${root}|`, ...parts.map((_, i) => `${root}|${parts.slice(0, i + 1).join('/')}`)];
+}
+/** Só as notas da raiz em foco, com os links renumerados. */
+function graphOf(graph: NoteGraph, root: string): NoteGraph {
+  const index = new Map<number, number>();
+  const nodes = graph.nodes.filter((node, i) => node.root === root && index.set(i, index.size));
+  const edges: [number, number][] = [];
+  for (const [a, b] of graph.edges) {
+    const from = index.get(a); const to = index.get(b);
+    if (from !== undefined && to !== undefined) edges.push([from, to]);
+  }
+  return { nodes, edges };
+}
+function sameGraph(previous: NoteGraph, next: NoteGraph) {
+  return previous.nodes.length === next.nodes.length && previous.edges.length === next.edges.length
+    && previous.nodes.every((node, index) => {
+      const other = next.nodes[index];
+      return same(node, other.root, other.path) && node.title === other.title && node.rootName === other.rootName;
+    })
+    && previous.edges.every(([from, to], index) => from === next.edges[index][0] && to === next.edges[index][1]);
+}
 const changeLabel: Record<Change['kind'], string> = { novo: 'N', modificado: 'M', apagado: 'A', renomeado: 'R', conflito: '!' };
 function ago(seconds: number) {
   const diff = Math.max(0, Date.now() / 1000 - seconds);
@@ -96,16 +124,23 @@ function ago(seconds: number) {
 /** Athena: notas em Markdown em árvore — notas da Athena, cofres (ex.: do Obsidian) e projetos —, com
  * abas (fixáveis), duas notas lado a lado, links entre notas, busca, nota do dia e painel do Git. */
 export default function Athena({ active, onOpenSettings }: { active: boolean; onOpenSettings: () => void }) {
-  const [tree, setTree] = useState<Tree | null>(null); const [expanded, setExpanded] = useState<string[]>(['ayla|']);
+  const [workspace, setWorkspace] = useState<Workspace>(restore);
+  const opened = shownTab(workspace);
+  const [tree, setTree] = useState<Tree | null>(null);
+  const [expanded, setExpanded] = useState<string[]>(() => ['ayla|', ...(opened ? ancestors(opened.root, opened.path) : [])]);
   const [query, setQuery] = useState(''); const [hits, setHits] = useState<Hit[] | null>(null);
   const [error, setError] = useState(''); const [adding, setAdding] = useState<Adding | null>(null); const [name, setName] = useState('');
   useEffect(() => { if (active) preloadPdf(); }, [active]);
   /** Nota recém-criada que abre pedindo o título. */
   const [fresh, setFresh] = useState<string | null>(null);
   const [folderEdit, setFolderEdit] = useState<{ root: string; path: string; name: string } | null>(null);
-  const [tags, setTags] = useState<TagEntry[]>([]); const [tag, setTag] = useState<string | null>(null); const [showTags, setShowTags] = useState(false);
-  const [focus, setFocus] = useState('ayla'); const [sidebar, setSidebar] = useState(true);
-  const [workspace, setWorkspace] = useState<Workspace>(restore);
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [graphError, setGraphError] = useState('');
+  const overviewRequest = useRef(0);
+  const tags = overview?.tags ?? [];
+  const [tag, setTag] = useState<string | null>(null); const [showTags, setShowTags] = useState(false);
+  /** Raiz em foco: a da nota aberta ao entrar na Athena (não sempre a Athena). */
+  const [focus, setFocus] = useState(() => opened?.root ?? 'ayla'); const [sidebar, setSidebar] = useState(true);
   const [statuses, setStatuses] = useState(['', '']); const [confirming, setConfirming] = useState<number | null>(null);
   /** Nota a apagar pela lixeira da barra lateral, à espera da confirmação no modal. */
   const [trashing, setTrashing] = useState<{ root: string; path: string; title: string } | null>(null);
@@ -135,20 +170,31 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   }
 
   const load = useCallback(() => { void native<Tree>('athena_tree').then(setTree).catch(e => setError(errorText(e))); }, []);
-  const loadTags = useCallback(() => { void native<TagEntry[]>('athena_tags').then(setTags).catch(() => setTags([])); }, []);
+  const loadOverview = useCallback(() => {
+    const request = ++overviewRequest.current;
+    void native<Overview>('athena_overview').then(result => {
+      if (request !== overviewRequest.current) return;
+      setOverview(current => current && sameGraph(current.graph, result.graph) ? { ...result, graph: current.graph } : result);
+      setGraphError('');
+    }, error => { if (request === overviewRequest.current) setGraphError(errorText(error)); });
+  }, []);
   const rootOf = useCallback((id: string) => tree?.roots.find(r => r.id === id) ?? null, [tree]);
   const expand = useCallback((root: string, path: string) => {
-    const keys = [`${root}|`];
-    const parts = path.split('/').slice(0, -1);
-    parts.forEach((_, i) => keys.push(`${root}|${parts.slice(0, i + 1).join('/')}`));
-    setExpanded(prev => [...new Set([...prev, ...keys])]);
+    setExpanded(prev => [...new Set([...prev, ...ancestors(root, path)])]);
   }, []);
   useEffect(() => { localStorage.setItem(WORKSPACE, JSON.stringify(workspace)); }, [workspace]);
-  useEffect(() => { if (active) { load(); loadTags(); } }, [active, load, loadTags]);
+  useEffect(() => { if (active) { load(); loadOverview(); } }, [active, load, loadOverview]);
 
   const panes = workspace.panes;
   const focused = Math.min(workspace.focused, panes.length - 1);
   const activeTab = panes[focused].tabs[panes[focused].active] as Tab | undefined;
+  // A raiz em foco acompanha a nota que passa a ficar visível (trocar de aba, fechar, abrir pela conversa).
+  const activeRoot = activeTab?.root;
+  useEffect(() => { if (activeRoot) setFocus(activeRoot); }, [activeRoot]);
+  // Cofre fechado ou indisponível fora da Ayla: volta para a Athena.
+  useEffect(() => { if (tree && !tree.roots.some(r => r.id === focus && r.available)) setFocus('ayla'); }, [tree, focus]);
+  const graph = overview?.graph;
+  const focusedGraph = useMemo(() => graph ? graphOf(graph, focus) : null, [graph, focus]);
 
   /** Abre a nota na tela em foco: na aba atual (se não estiver fixada) ou numa aba nova. */
   const open = useCallback((root: string, path: string, options: { newTab?: boolean; edit?: boolean } = {}) => {
@@ -228,11 +274,11 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
 
   useEffect(() => {
     const stop = listen<{ root?: string; path?: string }>('notes-updated', event => {
-      load(); loadTags(); setRevision(r => r + 1);
+      load(); loadOverview(); setRevision(r => r + 1);
       if (event.payload?.root && event.payload.path) open(event.payload.root, event.payload.path, { newTab: true });
     });
     return () => { void stop.then(off => off()); };
-  }, [load, loadTags, open]);
+  }, [load, loadOverview, open]);
   useEffect(() => {
     if (!query.trim()) return;
     const id = setTimeout(() => void native<Hit[]>('athena_search', { query }).then(setHits).catch(e => setError(errorText(e))), 250);
@@ -249,7 +295,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   useEffect(() => { const id = setTimeout(refreshGit, saved ? 1200 : 0); return () => clearTimeout(id); }, [refreshGit, saved, revision]);
   useEffect(() => { window.addEventListener('focus', refreshGit); return () => window.removeEventListener('focus', refreshGit); }, [refreshGit]);
 
-  const onSaved = useCallback(() => { load(); loadTags(); setSaved(n => n + 1); }, [load, loadTags]);
+  const onSaved = useCallback(() => { load(); loadOverview(); setSaved(n => n + 1); }, [load, loadOverview]);
   async function flushAll() { await Promise.all(flushers.current.map(f => f?.())); }
 
   /** Nova pasta: cria com o nome digitado; ao clicar fora sem nome, desiste. */
@@ -270,12 +316,12 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     setError('');
     try {
       const made = await native<string>('athena_create', { root, folder, title: 'Nova nota', empty: true });
-      load(); setFresh(`${root}|${made}`); open(root, made, { edit: true });
+      load(); loadOverview(); setFresh(`${root}|${made}`); open(root, made, { edit: true });
     } catch (e) { setError(errorText(e)); }
   }
   async function today() {
     const root = rootOf(focus)?.available ? focus : 'ayla';
-    try { const daily = await native<string>('athena_daily', { root }); load(); open(root, daily); } catch (e) { setError(errorText(e)); }
+    try { const daily = await native<string>('athena_daily', { root }); load(); loadOverview(); open(root, daily); } catch (e) { setError(errorText(e)); }
   }
   async function remove(index: number) {
     const tab = panes[index]?.tabs[panes[index].active];
@@ -286,7 +332,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     try {
       if (pane === undefined) await flushAll(); else await flushers.current[pane]?.();
       await native('athena_trash', { root, path });
-      setConfirming(null); setTrashing(null); drop(t => same(t, root, path)); load(); loadTags();
+      setConfirming(null); setTrashing(null); drop(t => same(t, root, path)); load(); loadOverview();
     } catch (e) { setTrashing(null); setError(errorText(e)); }
   }
   async function addVault(path?: string) {
@@ -295,13 +341,13 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       const folder = path ?? await native<string | null>('athena_pick_folder');
       if (!folder) return;
       await native('athena_add_vault', { path: folder });
-      setExpanded(prev => [...prev, `vault:${folder}|`]); setFocus(`vault:${folder}`); load(); vaultsChanged();
+      setExpanded(prev => [...prev, `vault:${folder}|`]); setFocus(`vault:${folder}`); load(); loadOverview(); vaultsChanged();
     } catch (e) { setError(errorText(e)); }
   }
   async function closeVault(root: Root) {
     try {
       await native('athena_remove_vault', { path: root.path });
-      drop(t => t.root === root.id); if (focus === root.id) setFocus('ayla'); load(); vaultsChanged();
+      drop(t => t.root === root.id); if (focus === root.id) setFocus('ayla'); load(); loadOverview(); vaultsChanged();
     } catch (e) { setError(errorText(e)); }
   }
   async function sync() {
@@ -310,7 +356,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     try {
       await flushAll();
       const outcome = await native<Outcome>('athena_git_sync', { root: gitRoot.id });
-      setStatuses([outcome.message, outcome.message]); load(); loadTags(); setRevision(r => r + 1);
+      setStatuses([outcome.message, outcome.message]); load(); loadOverview(); setRevision(r => r + 1);
     } catch (e) { setError(errorText(e)); } finally { setSyncing(false); }
   }
   /** Renomeia ou move a nota da aba (o núcleo atualiza os links nas outras notas). */
@@ -319,7 +365,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     try {
       await flushAll();
       const result = await native<{ path: string; relinked: number }>('athena_rename', { root: tab.root, path: tab.path, to });
-      retarget(tab.root, tab.path, result.path); expand(tab.root, result.path); load(); loadTags(); setRevision(r => r + 1);
+      retarget(tab.root, tab.path, result.path); expand(tab.root, result.path); load(); loadOverview(); setRevision(r => r + 1);
       const text = result.relinked ? `Links atualizados em ${result.relinked} ${result.relinked === 1 ? 'nota' : 'notas'}` : folderOf(result.path) !== folderOf(tab.path) ? 'Nota movida' : 'Nota renomeada';
       setStatuses(prev => prev.map((s, k) => k === index ? text : s));
     } catch (e) { setError(errorText(e)); }
@@ -333,7 +379,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     try {
       await flushAll();
       const result = await native<{ path: string; relinked: number }>('athena_rename_folder', { root, path, to });
-      setFolderEdit(null); setExpanded(prev => [...prev, `${root}|${result.path}`]); retarget(root, path, result.path, true); load(); setRevision(r => r + 1);
+      setFolderEdit(null); setExpanded(prev => [...prev, `${root}|${result.path}`]); retarget(root, path, result.path, true); load(); loadOverview(); setRevision(r => r + 1);
       if (result.relinked) setStatuses(prev => prev.map(() => `Pasta renomeada · links atualizados em ${result.relinked} ${result.relinked === 1 ? 'nota' : 'notas'}`));
     } catch (e) { setError(errorText(e)); }
   }
@@ -410,7 +456,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     if (found) { open(tab.root, found); return; }
     try {
       const made = await native<string>('athena_create', { root: tab.root, folder: folderOf(target), title: target.slice(target.lastIndexOf('/') + 1) });
-      load(); open(tab.root, made, { edit: true });
+      load(); loadOverview(); open(tab.root, made, { edit: true });
     } catch (e) { setError(errorText(e)); }
   }
   const showTag = (t: string) => { setTag(t); setShowTags(true); setQuery(''); setHits(null); setSidebar(true); };
@@ -430,7 +476,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     try {
       await flushAll();
       await native('athena_trash_folder', { root, path: folder });
-      drop(t => t.root === root && t.path.startsWith(`${folder}/`)); load(); loadTags();
+      drop(t => t.root === root && t.path.startsWith(`${folder}/`)); load(); loadOverview();
     } catch (e) { setError(errorText(e)); }
   }
   function tools(root: string, folder: string): ReactNode {
@@ -518,7 +564,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       {tab && isAttachment(tab.path)
         ? <AttachmentView key={`${tab.root}|${tab.path}`} root={tab.root} target={tab.path} onError={setError} />
         : tab
-        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} revision={revision}
+        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} images={(root?.files ?? []).filter(file => IMAGE.test(file.path))} rootName={root?.name ?? 'Athena'} revision={revision}
             onEditing={editing => setTab(index, pane.active, { editing })}
             onFollow={target => void follow(tab, target)}
             onOpen={path => open(tab.root, path)}
@@ -542,7 +588,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
 
   function gitPanel() {
     const status = git?.status;
-    return <aside className="athena-panel" aria-label="Painel do Git" style={{ flexBasis: layout.right, width: layout.right }}>
+    return <section className="athena-git-panel" aria-label="Painel do Git">
       <header className="panel-head"><GitIcon size={16} /><b>{gitRoot?.name ?? 'Athena'}</b>
         <button className="icon-button" data-tip="Atualizar" aria-label="Atualizar o status" onClick={refreshGit}><RefreshIcon size={15} /></button>
         <button className="icon-button tip-end" data-tip="Fechar" aria-label="Fechar o painel" onClick={() => setWorkspace(ws => ({ ...ws, panel: false }))}><CloseIcon size={15} /></button>
@@ -576,10 +622,10 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
           : <p className="panel-muted">Nenhum arquivo alterado.</p>}
         {status.changes > status.files.length && <p className="panel-muted">E mais {status.changes - status.files.length}.</p>}
       </section>}
-    </aside>;
+    </section>;
   }
 
-  const sections: Root['kind'][] = ['ayla', 'vault', 'project'];
+  const sections: Root['kind'][] = ['ayla', 'project', 'vault'];
   return <div className={['chat-layout athena', drag ? 'dragging' : '', resizing ? 'resizing' : ''].join(' ')} onClickCapture={e => { if (swallow.current) { e.stopPropagation(); e.preventDefault(); } }}>
     {drag && <div className="drag-ghost" style={{ left: drag.x + 14, top: drag.y + 10 }}>{drag.item.kind === 'folder' ? '📁 ' : ''}{drag.item.label}{drag.drop?.kind === 'folder' && <small> → {drag.drop.path ? drag.drop.path.slice(drag.drop.path.lastIndexOf('/') + 1) : rootOf(drag.drop.root)?.name}</small>}</div>}
     {sidebar && <aside className="sidebar organ-sidebar athena-sidebar" aria-label="Notas da Athena" style={{ flexBasis: layout.left, width: layout.left }}>
@@ -617,8 +663,11 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
       <div className="note-panes">{panes.map(paneView)}</div>
     </main>
-    {workspace.panel && handle('right', 'Ajustar a largura do painel do Git')}
-    {workspace.panel && gitPanel()}
+    {handle('right', 'Ajustar a largura do painel direito')}
+    <aside className="athena-panel" data-git={workspace.panel} aria-label="Painel direito da Athena" style={{ flexBasis: layout.right, width: layout.right }}>
+      {workspace.panel && gitPanel()}
+      <AthenaGraph graph={focusedGraph} scope={rootOf(focus)?.name} activeNote={activeTab} onOpen={open} onRefresh={loadOverview} error={graphError} />
+    </aside>
     {trashing && <div className="dialog-backdrop" onClick={() => setTrashing(null)}>
       <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="athena-trash-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') setTrashing(null); }}>
         <h2 id="athena-trash-title">Apagar “{trashing.title}”?</h2>

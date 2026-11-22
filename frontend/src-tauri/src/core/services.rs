@@ -1252,28 +1252,13 @@ pub async fn athena_paste_image(app: tauri::AppHandle, state: tauri::State<'_, C
 }
 
 #[tauri::command]
-pub async fn athena_add_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64) -> Result<Option<Value>, String> {
-    use std::io::Read;
+pub async fn athena_set_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64, image: String) -> Result<Value, String> {
     use tauri::Emitter;
-    use tauri_plugin_dialog::DialogExt;
     let dir = state.athena_path(&state.prefs()?, &root)?;
-    let picker = app.clone();
-    let selected = crate::desktop::panel_dialog(&app, move || {
-        picker.dialog().file().add_filter("Imagens", &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "avif"])
-            .blocking_pick_file().and_then(|file| file.into_path().ok())
-    }).await?;
-    let Some(selected) = selected else { return Ok(None) };
-    let (content, modified) = tauri::async_runtime::spawn_blocking(move || {
-        let file = fs::File::open(selected).map_err(|_| "Não foi possível abrir a imagem")?;
-        if !file.metadata().map_err(|_| "Não foi possível ler a imagem")?.is_file() {
-            return Err("Selecione um arquivo de imagem".to_string());
-        }
-        let mut bytes = Vec::new();
-        file.take(athena::MAX_ATTACHMENT + 1).read_to_end(&mut bytes).map_err(|_| "Não foi possível ler a imagem")?;
-        athena::add_banner(&dir, &path, &content, expected, &bytes)
-    }).await.map_err(|_| "Falha ao adicionar o banner")??;
+    let (content, modified) = tauri::async_runtime::spawn_blocking(move || athena::set_banner(&dir, &path, &content, expected, &image))
+        .await.map_err(|_| "Falha ao definir o banner")??;
     let _ = app.emit("notes-updated", json!({"root": root}));
-    Ok(Some(json!({"content": content, "modified": modified})))
+    Ok(json!({"content": content, "modified": modified}))
 }
 
 /// Nota nova numa pasta da raiz (vazia = raiz).
@@ -1322,22 +1307,53 @@ pub async fn athena_rename_folder(state: tauri::State<'_, Core>, root: String, p
     Ok(json!({"path": new, "relinked": changed}))
 }
 
-/// Tags de todas as raízes, com as notas de cada uma.
+/// Tags e conexões das notas, extraídas na mesma passagem pelos arquivos.
 #[tauri::command]
-pub async fn athena_tags(state: tauri::State<'_, Core>) -> Result<Vec<Value>, String> {
+pub async fn athena_overview(state: tauri::State<'_, Core>) -> Result<Value, String> {
     let roots: Vec<AthenaRoot> = state.athena_roots(&state.prefs()?).into_iter().filter(|r| r.path.is_dir()).collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut map: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
-        for root in roots {
-            for note in athena::list(&root.path) {
-                let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
-                for tag in athena::tags(&text) {
-                    map.entry(tag).or_default().push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+    tauri::async_runtime::spawn_blocking(move || athena_overview_for(roots))
+        .await.map_err(|_| "Falha ao ler as conexões das notas".into())
+}
+
+fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    let mut tags = BTreeMap::<String, Vec<Value>>::new();
+    let mut nodes = Vec::new();
+    let mut edges = BTreeSet::new();
+    for root in roots {
+        let mut notes = athena::list(&root.path);
+        notes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        let base = nodes.len();
+        let mut paths = HashMap::<String, usize>::new();
+        for (index, note) in notes.iter().enumerate() {
+            nodes.push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+            let path = note.path.to_lowercase();
+            let path = path.trim_end_matches(".md");
+            for suffix in std::iter::once(path).chain(path.match_indices('/').map(|(i, _)| &path[i + 1..])) {
+                paths.entry(suffix.to_owned()).and_modify(|other| {
+                    let previous = &notes[*other];
+                    if note.path.len() < previous.path.len()
+                        || (note.path.len() == previous.path.len() && note.modified > previous.modified) {
+                        *other = index;
+                    }
+                }).or_insert(index);
+            }
+        }
+        for (index, note) in notes.iter().enumerate() {
+            let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
+            for tag in athena::tags(&text) {
+                tags.entry(tag).or_default().push(nodes[base + index].clone());
+            }
+            for target in athena::graph_targets(&text) {
+                let target = target.to_lowercase();
+                if let Some(&other) = paths.get(target.trim_end_matches(".md")).filter(|&&other| other != index) {
+                    edges.insert([base + index.min(other), base + index.max(other)]);
                 }
             }
         }
-        map.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect()
-    }).await.map_err(|_| "Falha ao ler as tags".into())
+    }
+    let tags: Vec<_> = tags.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect();
+    json!({"tags": tags, "graph": {"nodes": nodes, "edges": edges}})
 }
 
 /// Imagem anexada a uma nota (![[foto.png]]), procurada pelo nome na raiz, como data URL.
@@ -3302,6 +3318,29 @@ mod tests {
         assert!(find(&pending.id).is_none(), "anexo não enviado fica de fora");
         assert!(find(&text.id).is_none(), "texto não é mídia");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn athena_overview_connects_existing_notes_within_each_root() {
+        let tmp = std::env::temp_dir().join(format!("ayla-graph-{}", store::id()));
+        let first = tmp.join("primeiro");
+        let second = tmp.join("segundo");
+        fs::create_dir_all(first.join("pastas")).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("A.md"), "# A\n#aventura [[B#Seção|apelido]] [[B]] [Mapa](<pastas/Mapa de teste.md#Norte>)\n`[[Isolada]]`\n~~~\n[[Isolada]]\n~~~\n[[A]] [[Ausente]]").unwrap();
+        fs::write(first.join("B.md"), "[[A]]").unwrap();
+        fs::write(first.join("Isolada.md"), "Nota sem relação.").unwrap();
+        fs::write(first.join("pastas/Mapa de teste.md"), "").unwrap();
+        fs::write(second.join("A.md"), "[[B]]").unwrap();
+        let overview = athena_overview_for(vec![
+            AthenaRoot { id: "one".into(), kind: "vault", name: "Primeiro".into(), path: first, available: true },
+            AthenaRoot { id: "two".into(), kind: "vault", name: "Segundo".into(), path: second, available: true },
+        ]);
+        assert_eq!(overview["graph"]["nodes"].as_array().unwrap().len(), 5);
+        assert_eq!(overview["graph"]["edges"], json!([[0, 1], [0, 3]]));
+        assert_eq!(overview["tags"][0]["tag"], "aventura");
+        assert_eq!(overview["tags"][0]["notes"][0]["root"], "one");
+        fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]
