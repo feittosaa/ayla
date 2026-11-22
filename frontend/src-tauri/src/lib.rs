@@ -357,7 +357,9 @@ pub fn run() {
     std::process::exit(exit_code);
 }
 
-#[cfg(test)]
+// O backend Python legado só sobe em build de desenvolvimento (ver `BackendState::start`): em
+// `--release` ele recusa de propósito, então estes testes só valem sem otimização.
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -1,3 +1,7 @@
+/** Título (nome sem `.md`) e pasta de um caminho relativo de nota. */
+export const titleOf = (path: string) => path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/i, '');
+export const folderOf = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+
 /** Prefixos dos links internos (nunca são endereços da web): notas/anexos e tags. */
 export const WIKI = 'athena-link:';
 export const TAG = 'athena-tag:';

@@ -2,18 +2,16 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Markdown from './Markdown';
 import ZoomImage from './ZoomImage';
 import { errorText, native } from '../services/Desktop';
-import { PDF, attachmentUrl, frontmatter } from '../services/Wiki';
+import { PDF, attachmentUrl, folderOf, frontmatter, titleOf } from '../services/Wiki';
 
 export type Note = { path: string; title: string; modified: number; bytes: number };
 export type Tab = { root: string; path: string; pinned: boolean; editing: boolean };
 
-export const titleOf = (path: string) => path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/i, '');
-export const folderOf = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 
 /** Banner da nota (propriedade `banner`, como no make-md), na largura toda, com a altura `banner_y`. */
 function Banner({ url, y }: { url: string; y: number }) {
+  // Uma imagem por instância: quem usa troca a `key` quando o endereço muda.
   const [failed, setFailed] = useState(false);
-  useEffect(() => { setFailed(false); }, [url]);
   if (failed) return null;
   return <div className="note-banner" role="img" aria-label="Banner da nota"><img src={url} alt="" style={{ objectPosition: `center ${y}%` }} onError={() => setFailed(true)} /></div>;
 }
@@ -61,15 +59,20 @@ export default function AthenaNote(props: Props) {
   const events = useRef(props);
   useEffect(() => { events.current = props; });
 
-  const load = useCallback(async () => {
-    try {
-      const note = await native<{ content: string; modified: number }>('athena_read', { root: tab.root, path: tab.path });
-      setContent(note.content); latest.current = note.content; stamp.current = note.modified; dirty.current = false; setFailed('');
-      if (!note.content.trim() || /^# [^\n]*\n*$/.test(note.content)) events.current.onEditing(true);
-      void native<{ path: string; title: string }[]>('athena_backlinks', { root: tab.root, path: tab.path }).then(setBacklinks).catch(() => setBacklinks([]));
-    } catch (e) { setFailed(errorText(e)); }
+  /** Conteúdo lido do disco vira o estado da aba (e a nota vazia abre em edição). */
+  const apply = useCallback((note: { content: string; modified: number }) => {
+    setContent(note.content); latest.current = note.content; stamp.current = note.modified; dirty.current = false; setFailed('');
+    if (!note.content.trim() || /^# [^\n]*\n*$/.test(note.content)) events.current.onEditing(true);
+    void native<{ path: string; title: string }[]>('athena_backlinks', { root: tab.root, path: tab.path }).then(setBacklinks).catch(() => setBacklinks([]));
   }, [tab.root, tab.path]);
-  useEffect(() => { if (!dirty.current) void load(); }, [load, revision]);
+  const read = useCallback(() => native<{ content: string; modified: number }>('athena_read', { root: tab.root, path: tab.path }), [tab.root, tab.path]);
+  const load = useCallback(() => read().then(apply, e => setFailed(errorText(e))), [read, apply]);
+  useEffect(() => {
+    if (dirty.current) return;
+    let alive = true;
+    read().then(note => { if (alive) apply(note); }, e => { if (alive) setFailed(errorText(e)); });
+    return () => { alive = false; };
+  }, [read, apply, revision]);
 
   const save = useCallback(async (text: string) => {
     try {
@@ -134,7 +137,7 @@ export default function AthenaNote(props: Props) {
   if (failed) return <div className="note-scroll"><article className="note-page"><h1 className="note-title">{title}</h1><p role="alert" className="app-error">{failed}</p></article></div>;
   if (content === null) return <div className="note-scroll" aria-busy="true" />;
   return <div className="note-scroll" onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
-    {note.banner && <Banner url={fileUrl(note.banner.target)} y={note.banner.y} />}
+    {note.banner && <Banner key={note.banner.target} url={fileUrl(note.banner.target)} y={note.banner.y} />}
     <article className="note-page">
       {renaming !== null
         ? <form onSubmit={e => { e.preventDefault(); const name = renaming.trim(); setRenaming(null); if (name && name !== title) void props.onRename(name); }}><input className="athena-rename" autoFocus value={renaming} maxLength={120} aria-label="Novo nome da nota" onChange={e => setRenaming(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setRenaming(null); }} onBlur={() => setRenaming(null)} /></form>
