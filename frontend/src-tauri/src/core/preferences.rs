@@ -47,6 +47,8 @@ pub struct Preferences {
     pub desktop: DesktopPreferences,
     /// Versões anteriores: uma pasta de notas escolhida. Agora vale como um cofre a mais.
     pub athena_folder: String,
+    pub iris_folder: Option<PathBuf>,
+    pub iris_folders: Vec<PathBuf>,
     /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
     /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
@@ -124,6 +126,8 @@ impl Default for Preferences {
             notifications: Notifications::default(),
             desktop: DesktopPreferences::default(),
             athena_folder: String::new(),
+            iris_folder: None,
+            iris_folders: Vec::new(),
             athena_vaults: Vec::new(),
             athena_git: true,
             response_source: String::new(),
@@ -174,10 +178,20 @@ impl Preferences {
     /// Campos que têm comando próprio (cofres da Athena e modo de resposta): uma tela que salva
     /// as preferências a partir de uma cópia antiga não pode desfazê-los.
     pub fn keep_managed(&mut self, saved: &Preferences) {
+        self.iris_folder = saved.iris_folder.clone();
+        self.iris_folders = saved.iris_folders.clone();
         self.athena_vaults = saved.athena_vaults.clone();
         self.athena_folder = saved.athena_folder.clone();
         self.response_source = saved.response_source.clone();
     }
+    pub fn system_folders(&self) -> Vec<PathBuf> {
+        let mut folders = self.iris_folders.clone();
+        if let Some(old) = &self.iris_folder {
+            if !folders.contains(old) { folders.insert(0, old.clone()); }
+        }
+        folders
+    }
+
     /// Cofres da Athena, incluindo a pasta escolhida em versões anteriores.
     pub fn vaults(&self) -> Vec<String> {
         let mut out = self.athena_vaults.clone();

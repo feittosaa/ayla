@@ -34,6 +34,7 @@
 ## Execução e preservação
 
 - Trabalhe no escopo autorizado e preserve alterações preexistentes.
+- Depois de validar uma modificação na Ayla, aplique a compilação à instalação local do usuário para teste. Preserve seus dados e use um perfil descartável nas verificações.
 - Não criar branches adicionais, commits, pushes, merges, limpezas ou publicações sem autorização explícita. Não implementar diretamente em `main` ou `development`.
 - Preserve bancos e arquivos do usuário; faça backup antes de migrações. Nunca exponha conteúdo pessoal, tokens ou secrets nos logs, testes e documentação.
 - Use dados temporários e provedores simulados nos testes; não importe a aplicação contra o banco real para testar.

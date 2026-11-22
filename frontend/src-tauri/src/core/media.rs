@@ -10,7 +10,7 @@ pub const MAX_WHOLE: u64 = 80 * 1024 * 1024;
 /// Maior trecho entregue de uma vez quando o pedido não diz onde termina.
 pub const MAX_CHUNK: u64 = 4 * 1024 * 1024;
 /// Lado maior das miniaturas, em pixels.
-pub const THUMB_SIZE: i32 = 480;
+pub const THUMB_SIZE: i32 = 224;
 
 /// `Range: bytes=início-fim` → (início, fim inclusivo), dentro do tamanho do arquivo.
 pub fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
@@ -70,6 +70,21 @@ pub fn serve(path: &Path, mime: &str, range: Option<&str>) -> Response<Vec<u8>> 
     }
 }
 
+/// Extrai um quadro JPEG com um decodificador e tempo limitados.
+async fn video_poster(binary: &Path, path: &Path) -> Option<Vec<u8>> {
+    use std::{process::Stdio, time::Duration};
+    let mut command = tokio::process::Command::new(binary);
+    command.kill_on_drop(true).stdin(Stdio::null()).stderr(Stdio::null())
+        .args(["-nostdin", "-v", "error", "-protocol_whitelist", "file", "-format_whitelist",
+            "mov,matroska,webm,ogg,avi", "-threads", "1", "-i"]).arg(path)
+        .args(["-map", "0:v:0", "-frames:v", "1", "-an", "-filter_threads", "1", "-vf"])
+        .arg(format!("scale={THUMB_SIZE}:{THUMB_SIZE}:force_original_aspect_ratio=decrease"))
+        .args([
+            "-threads", "1", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"]);
+    let output = tokio::time::timeout(Duration::from_secs(8), command.output()).await.ok()?.ok()?;
+    (output.status.success() && output.stdout.starts_with(&[0xff, 0xd8])).then_some(output.stdout)
+}
+
 /// Abre o arquivo no aplicativo padrão do sistema (visualizador de imagens, de PDF, player).
 pub fn open_in_system(path: &Path) -> Result<(), String> {
     use std::process::{Command, Stdio};
@@ -81,18 +96,40 @@ pub fn open_in_system(path: &Path) -> Result<(), String> {
 /// caminho, tamanho e data do arquivo). Sem como gerar (formato que o sistema não lê, PDF sem o
 /// `pdftoppm` instalado, ou fora do Linux), devolve `None`.
 pub fn thumbnail(cache: &Path, path: &Path, pdf: bool) -> Option<PathBuf> {
+    cached_thumbnail(cache, path, if pdf { "pdf" } else { "image" }, |target| {
+        if pdf { render_pdf_page(path, target) } else { render_thumbnail(path, target) }
+    })
+}
+
+pub fn video_thumbnail(cache: &Path, path: &Path, binary: &Path) -> Option<PathBuf> {
+    cached_thumbnail(cache, path, "video", |target| {
+        let Some(bytes) = tauri::async_runtime::block_on(video_poster(binary, path)) else { return false };
+        let temporary = target.with_extension("video-tmp");
+        let saved = fs::write(&temporary, bytes).is_ok() && fs::rename(&temporary, target).is_ok();
+        if !saved {
+            let _ = fs::remove_file(temporary);
+        }
+        saved
+    })
+}
+
+fn cached_thumbnail(cache: &Path, path: &Path, kind: &str, render: impl FnOnce(&Path) -> bool) -> Option<PathBuf> {
     use sha2::{Digest, Sha256};
+    static GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let meta = fs::metadata(path).ok()?;
-    let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-    let key = Sha256::digest(format!("{}|{}|{stamp}|{THUMB_SIZE}", path.to_string_lossy(), meta.len()).as_bytes());
+    let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+    let key = Sha256::digest(format!("{}|{}|{stamp}|{THUMB_SIZE}|{kind}", path.to_string_lossy(), meta.len()).as_bytes());
     let name: String = key.iter().take(16).map(|b| format!("{b:02x}")).collect();
     let target = cache.join(format!("{name}.jpg"));
     if target.is_file() {
         return Some(target);
     }
+    let _guard = GENERATION.lock().ok()?;
+    if target.is_file() {
+        return Some(target);
+    }
     fs::create_dir_all(cache).ok()?;
-    let made = if pdf { render_pdf_page(path, &target) } else { render_thumbnail(path, &target) };
-    made.then_some(target)
+    render(&target).then_some(target)
 }
 
 /// Tempo máximo para desenhar a primeira página de um PDF (arquivos quebrados não travam a grade).
@@ -105,7 +142,7 @@ fn render_pdf_page(path: &Path, target: &Path) -> bool {
     let stem = target.with_extension("pdf-tmp");
     let produced = stem.with_extension("pdf-tmp.jpg");
     let Ok(mut child) = Command::new("pdftoppm")
-        .args(["-f", "1", "-l", "1", "-singlefile", "-jpeg", "-jpegopt", "quality=82", "-scale-to", &THUMB_SIZE.to_string()])
+        .args(["-f", "1", "-l", "1", "-singlefile", "-jpeg", "-jpegopt", "quality=68", "-scale-to", &THUMB_SIZE.to_string()])
         .arg(path).arg(&stem)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .spawn() else { return false };
@@ -127,11 +164,13 @@ fn render_pdf_page(path: &Path, target: &Path) -> bool {
 #[cfg(target_os = "linux")]
 fn render_thumbnail(path: &Path, target: &Path) -> bool {
     // gdk-pixbuf já vem com o GTK do Tauri: lê JPEG, PNG, GIF, WebP etc. pelos módulos do sistema.
-    let Ok(pixbuf) = gdk_pixbuf::Pixbuf::from_file_at_scale(path, THUMB_SIZE, THUMB_SIZE, true) else { return false };
+    let Some((_, width, height)) = gdk_pixbuf::Pixbuf::file_info(path) else { return false };
+    let side = THUMB_SIZE.min(width.max(height)).max(1);
+    let Ok(pixbuf) = gdk_pixbuf::Pixbuf::from_file_at_scale(path, side, side, true) else { return false };
     let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
     let pixbuf = if pixbuf.has_alpha() { flatten(&pixbuf) } else { pixbuf };
-    let temporary = target.with_extension("tmp");
-    let saved = pixbuf.savev(&temporary, "jpeg", &[("quality", "82")]).is_ok() && fs::rename(&temporary, target).is_ok();
+    let temporary = target.with_extension(format!("{}.tmp", super::store::id()));
+    let saved = pixbuf.savev(&temporary, "jpeg", &[("quality", "68")]).is_ok() && fs::rename(&temporary, target).is_ok();
     if !saved {
         let _ = fs::remove_file(&temporary);
     }

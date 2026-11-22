@@ -19,6 +19,10 @@ export function DesktopSettings({value, saving, save, run}: {
       <label>Cantos ({custom.panel_radius} px)<input type="range" min="0" max="48" value={custom.panel_radius} onChange={e=>setCustom({...custom,panel_radius:Number(e.target.value)})} /></label>
       <button disabled={saving} onClick={()=>save({...value,panel_color:custom.panel_color,panel_accent:custom.panel_accent,panel_font:custom.panel_font,panel_radius:custom.panel_radius})}>Salvar aparência</button>
     </div>}
-    <div className="group-row row-actions"><button onClick={()=>run('quick')}>Abrir visão rápida</button><button onClick={()=>run('quit')}>Encerrar Ayla</button></div>
+    <div className="group-row row-actions">
+      <button onClick={() => run('quick')}>Abrir visão rápida</button>
+      <button onClick={() => run('quit')}>Encerrar Ayla</button>
+      <button onClick={() => run('restart')}>Reiniciar Ayla</button>
+    </div>
   </div></section>;
 }

@@ -439,9 +439,41 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .iris-source { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--ayla-text-soft); font-size: 14px; text-align: left; }
 .app-shell .iris-source:hover { background: var(--ayla-hover); color: var(--ayla-text); }
 .app-shell .iris-source.active { background: var(--ayla-hover); border-color: var(--ayla-border-soft); color: var(--ayla-accent); box-shadow: inset 2px 0 0 var(--ayla-accent); }
-.iris-source small { color: var(--ayla-text-faint); font-size: 12px; }
+.iris-source small, .iris-system-row > small { color: var(--ayla-text-faint); font-size: 12px; }
 .iris-main > .app-error { margin: 12px 24px 0; }
+.iris-sidebar { overflow-y: auto; }
+.iris-folder nav { margin-top: 4px; }
+.iris-action-row { display: flex; align-items: center; min-width: 0; }
+.iris-system-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
+.iris-system-row > .iris-source { grid-area: 1 / 1 / 2 / -1; }
+.iris-system-row > .iris-row-actions { grid-area: 1 / 2; margin-right: 4px; z-index: 1; }
+.iris-system-row > small { grid-area: 1 / 3; margin-right: 11px; pointer-events: none; }
+.iris-action-row > .iris-dir { flex: 1; min-width: 0; }
+.iris-row-actions { display: flex; flex: 0 0 auto; opacity: 0; pointer-events: none; }
+.iris-action-row:hover > .iris-row-actions, .iris-action-row:focus-within > .iris-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-shell .iris-row-actions .icon-button { width: 28px; height: 28px; min-height: 28px; padding: 0; }
+.app-shell .iris-caret { flex: 0 0 22px; width: 22px; min-height: 32px; padding: 0; border: 0; background: transparent; }
+.iris-caret[aria-expanded="true"] { transform: rotate(90deg); }
+@media (hover: none) { .iris-row-actions { opacity: 1; pointer-events: auto; } }
+.iris-root-row { position: relative; }
+.iris-root-row[data-drop]::after { content: ""; position: absolute; inset-inline: 0; height: 2px; background: var(--ayla-accent); pointer-events: none; }
+.iris-root-row[data-drop="before"]::after { top: 0; }
+.iris-root-row[data-drop="after"]::after { bottom: 0; }
+.app-shell .iris-grip { cursor: grab; touch-action: none; }
+.app-shell .iris-grip:active { cursor: grabbing; }
+.iris-dir-children { padding-left: 12px; border-left: 1px solid var(--ayla-border-soft); }
+.iris-dir-group { position: relative; }
+.iris-dir-group summary { cursor: pointer; list-style: none; width: 22px; line-height: 32px; text-align: center; }
+.iris-dir-group details[open] > summary { transform: rotate(90deg); }
+.app-shell .iris-dir { display: block; max-width: 100%; min-height: 32px; padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: transparent; border: 0; }
+.app-shell .iris-dir[aria-pressed="true"] { color: var(--ayla-accent); background: var(--ayla-hover); }
+.iris-dir-group > .iris-dir { position: absolute; top: 0; left: 22px; max-width: calc(100% - 22px); }
 .iris-grid-area { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 24px 24px; }
+.iris-controls { display: flex; justify-content: flex-end; }
+.iris-order { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; font-size: 13px; color: var(--ayla-text-soft); }
 .iris-empty { margin: 60px auto; max-width: 460px; text-align: center; color: var(--ayla-text-faint); }
 .iris-month h2 { position: sticky; top: -6px; z-index: 2; margin: 0; padding: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--ayla-text-soft); background: var(--ayla-bg); }
 .iris-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
@@ -468,6 +500,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-viewer-title small { color: #aaa; font-size: 12px; }
 .iris-viewer-count { color: #aaa; font-size: 12px; white-space: nowrap; }
 .app-shell .iris-viewer-bar .icon-button { width: 36px; height: 36px; min-height: 36px; padding: 0; color: #ddd; }
+.iris-trash-confirm { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; color: #eee; }
+.iris-trash-confirm > span { overflow-wrap: anywhere; }
 .iris-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0 64px 24px; }
 .iris-stage .media-stage { padding: 0; }
 .iris-stage .media-stage img { border-radius: 0; }

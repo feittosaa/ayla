@@ -83,6 +83,11 @@ pub fn list(root: &Path) -> Vec<Note> {
 
 /// Anexos que a Athena mostra (imagens e PDF), para a árvore, como o explorador do Obsidian.
 pub fn attachments(root: &Path) -> Vec<Note> {
+    scan_attachments(root, Some(MAX_NOTES)).0
+}
+
+pub fn scan_attachments(root: &Path, limit: Option<usize>) -> (Vec<Note>, Vec<String>) {
+    let mut folders = Vec::new();
     let mut out = Vec::new();
     let mut pending = vec![PathBuf::new()];
     while let Some(dir) = pending.pop() {
@@ -95,11 +100,12 @@ pub fn attachments(root: &Path) -> Vec<Note> {
             let Ok(kind) = entry.file_type() else { continue };
             let relative = dir.join(&name);
             if kind.is_dir() {
+                if limit.is_none() { folders.push(relative_string(&relative)); }
                 pending.push(relative);
             } else if kind.is_file() && attachment_mime(&relative).is_some() {
                 let Ok(meta) = entry.metadata() else { continue };
                 out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
-                if out.len() >= MAX_NOTES {
+                if limit.is_some_and(|max| out.len() >= max) {
                     pending.clear();
                     break;
                 }
@@ -107,7 +113,8 @@ pub fn attachments(root: &Path) -> Vec<Note> {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
+    folders.sort();
+    (out, folders)
 }
 
 /// Move um anexo para outra pasta da mesma raiz (sem sobrescrever). Links pelo nome continuam
