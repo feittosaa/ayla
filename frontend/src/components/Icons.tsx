@@ -15,6 +15,7 @@ export const PaperclipIcon = ({ size }: Props) => <Icon size={size}><path d="M21
 export const SlidersIcon = ({ size }: Props) => <Icon size={size}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></Icon>;
 export const MicIcon = ({ size }: Props) => <Icon size={size}><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" /></Icon>;
 export const ExpandIcon = ({ size }: Props) => <Icon size={size}><path d="M5 19 19 5M8 5h11v11" /></Icon>;
+export const FullscreenIcon = ({ size }: Props) => <Icon size={size}><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></Icon>;
 export const ArrowUpIcon = ({ size }: Props) => <Icon size={size}><path d="M12 19V5M5 12l7-7 7 7" /></Icon>;
 export const CopyIcon = ({ size }: Props) => <Icon size={size}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Icon>;
 export const ChevronRightIcon = ({ size }: Props) => <Icon size={size}><path d="M9 18l6-6-6-6" /></Icon>;

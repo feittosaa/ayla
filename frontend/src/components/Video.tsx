@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { FullscreenIcon } from './Icons';
 import { download } from '../services/Download';
 
 /** Maior vídeo tocado dentro da Ayla: ele fica inteiro na memória enquanto toca. */
@@ -7,6 +8,7 @@ const MAX_BYTES = 300 * 1024 * 1024;
 /** Vídeo de uma nota ou da Iris, com controles. `onSystem` abre no player do sistema. */
 export default function Video({ src, className, autoPlay, onSystem }: { src: string; className?: string; autoPlay?: boolean; onSystem?: () => void }) {
   const [state, setState] = useState<{ src: string; url?: string; error?: 'grande' | 'indisponível' }>({ src });
+  const video = useRef<HTMLVideoElement>(null);
   // Outro vídeo: volta a carregar (ajuste durante a renderização, sem efeito).
   if (state.src !== src) setState({ src });
   useEffect(() => {
@@ -22,5 +24,9 @@ export default function Video({ src, className, autoPlay, onSystem }: { src: str
     {onSystem && <button className="link-button" onClick={onSystem}>Abrir no player do sistema</button>}
   </span>;
   if (!state.url) return <span className="video-fallback" role="status">Carregando o vídeo…</span>;
-  return <video className={className} src={state.url} controls autoPlay={autoPlay} preload="metadata" />;
+  return <span className="video-frame">
+    <video ref={video} className={className} src={state.url} controls autoPlay={autoPlay} preload="metadata" />
+    <button type="button" className="icon-button video-fullscreen tip-end" data-tip="Tela cheia" aria-label="Tela cheia"
+      onClick={() => void video.current?.requestFullscreen().catch(() => undefined)}><FullscreenIcon size={18} /></button>
+  </span>;
 }
