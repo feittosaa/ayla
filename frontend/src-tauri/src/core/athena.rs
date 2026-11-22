@@ -81,6 +81,54 @@ pub fn list(root: &Path) -> Vec<Note> {
     out
 }
 
+/// Anexos que a Athena mostra (imagens e PDF), para a árvore, como o explorador do Obsidian.
+pub fn attachments(root: &Path) -> Vec<Note> {
+    let mut out = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else { continue };
+            let relative = dir.join(&name);
+            if kind.is_dir() {
+                pending.push(relative);
+            } else if kind.is_file() && attachment_mime(&relative).is_some() {
+                let Ok(meta) = entry.metadata() else { continue };
+                out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
+                if out.len() >= MAX_NOTES {
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Move um anexo para outra pasta da mesma raiz (sem sobrescrever). Links pelo nome continuam
+/// valendo, porque os anexos são procurados pelo nome.
+pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, String> {
+    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some()).ok_or("Arquivo inválido")?;
+    let name = from_path.file_name().ok_or("Arquivo inválido")?;
+    let to_path = safe_folder(folder).ok_or("Pasta inválida")?.join(name);
+    if !root.join(&from_path).is_file() {
+        return Err("Arquivo não encontrado".into());
+    }
+    if root.join(&to_path).exists() {
+        return Err("Já existe um arquivo com esse nome nessa pasta".into());
+    }
+    if let Some(parent) = root.join(&to_path).parent() {
+        fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?;
+    }
+    fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível mover o arquivo")?;
+    Ok(relative_string(&to_path))
+}
+
 /// Pastas (relativas, com `/`) para a árvore, inclusive as vazias; ignora as ocultas.
 pub fn folders(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -231,6 +279,25 @@ pub fn trash(root: &Path, relative: &str) -> Result<(), String> {
         n += 1;
     }
     fs::rename(&source, &target).map_err(|_| "Não foi possível mover a nota para a lixeira".into())
+}
+
+/// Pasta inteira para a lixeira da raiz (`.trash/<nome>`), com tudo o que tiver dentro.
+pub fn trash_folder(root: &Path, relative: &str) -> Result<(), String> {
+    let relative = safe_folder(relative).filter(|p| !p.as_os_str().is_empty()).ok_or("Pasta inválida")?;
+    let source = root.join(&relative);
+    if !source.is_dir() {
+        return Err("Pasta não encontrada".into());
+    }
+    let bin = root.join(".trash");
+    fs::create_dir_all(&bin).map_err(|_| "Não foi possível criar a lixeira")?;
+    let name = relative.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let mut target = bin.join(&name);
+    let mut n = 2;
+    while target.exists() {
+        target = bin.join(format!("{name} {n}"));
+        n += 1;
+    }
+    fs::rename(&source, &target).map_err(|_| "Não foi possível mover a pasta para a lixeira".into())
 }
 
 /// Nota do dia, no formato das notas diárias do Obsidian (`AAAA-MM-DD.md` na raiz).
@@ -564,8 +631,44 @@ pub fn tags(text: &str) -> Vec<String> {
 
 // Anexos (![[foto.png]]): procurados pelo nome na raiz, como o Obsidian.
 
-pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "svg", "avif"];
 pub const MAX_ATTACHMENT: u64 = 15 * 1024 * 1024;
+/// PDFs aparecem na nota (![[arquivo.pdf]]) e abrem numa aba, até este tamanho.
+pub const MAX_PDF: u64 = 80 * 1024 * 1024;
+
+/// Tipo do anexo que a Athena mostra (imagens e PDF); outros arquivos não são servidos.
+pub fn attachment_mime(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_string_lossy().to_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        _ => return None,
+    })
+}
+
+/// Decodifica `%XX` de um trecho de URL (nomes com espaço e acentos).
+pub fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
 
 /// Caminho de um anexo pelo nome (ou caminho relativo), dentro da raiz e fora de pastas ocultas.
 pub fn find_attachment(root: &Path, target: &str) -> Option<PathBuf> {
@@ -734,6 +837,33 @@ mod tests {
         assert_eq!(folder, "Jogos/RPG");
         assert!(root.join("Jogos/RPG/Elenco.md").is_file());
         assert!(rename_folder(&root, "Jogos", "Jogos/RPG/dentro").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lixeira_de_pasta_tipos_e_enderecos() {
+        let root = temp();
+        fs::create_dir_all(root.join("Jogos/RPG")).unwrap();
+        fs::write(root.join("Jogos/RPG/Sessão.md"), "x").unwrap();
+        fs::create_dir_all(root.join(".trash/RPG")).unwrap();
+        assert!(trash_folder(&root, "").is_err() && trash_folder(&root, "../fora").is_err() && trash_folder(&root, "Nada").is_err());
+        trash_folder(&root, "Jogos/RPG").unwrap();
+        assert!(!root.join("Jogos/RPG").exists());
+        assert!(root.join(".trash/RPG 2/Sessão.md").is_file(), "não sobrescreve o que já está na lixeira");
+        fs::create_dir_all(root.join("Livros/.oculta")).unwrap();
+        fs::write(root.join("Livros/Regras.pdf"), "%PDF").unwrap();
+        fs::write(root.join("Livros/.oculta/x.pdf"), "%PDF").unwrap();
+        fs::write(root.join("Livros/script.sh"), "x").unwrap();
+        let found: Vec<String> = attachments(&root).into_iter().map(|n| n.path).collect();
+        assert_eq!(found, vec!["Livros/Regras.pdf".to_string()]);
+        assert_eq!(move_attachment(&root, "Livros/Regras.pdf", "").unwrap(), "Regras.pdf");
+        assert!(root.join("Regras.pdf").is_file());
+        assert!(move_attachment(&root, "Livros/script.sh", "").is_err() && move_attachment(&root, "../x.pdf", "").is_err());
+        assert_eq!(attachment_mime(Path::new("a/Foto.JFIF")), Some("image/jpeg"));
+        assert_eq!(attachment_mime(Path::new("livro.pdf")), Some("application/pdf"));
+        assert_eq!(attachment_mime(Path::new("script.sh")), None);
+        assert_eq!(percent_decode("Minha%20foto%C3%A9.png").as_deref(), Some("Minha fotoé.png"));
+        assert_eq!(percent_decode("quebrado%2"), None);
         let _ = fs::remove_dir_all(&root);
     }
 

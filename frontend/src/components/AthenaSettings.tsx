@@ -7,7 +7,7 @@ type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path
 export default function AthenaSettings({ prefs, saving, save }: { prefs: Preferences; saving: boolean; save: (values: Partial<Preferences>, message?: string) => Promise<void> }) {
   const [roots, setRoots] = useState<Root[]>([]); const [error, setError] = useState('');
   const load = useCallback(() => { void native<{ roots: Root[] }>('athena_tree').then(tree => setRoots(tree.roots)).catch(e => setError(errorText(e))); }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); window.addEventListener('athena-vaults', load); return () => window.removeEventListener('athena-vaults', load); }, [load]);
   const vaults = roots.filter(r => r.kind === 'vault');
   return <section id="athena" className="settings-group" aria-labelledby="athena-title"><h2 id="athena-title">Athena</h2>
     <div className="group-card">
@@ -18,7 +18,7 @@ export default function AthenaSettings({ prefs, saving, save }: { prefs: Prefere
       </label>
       <div className="group-row"><span className="row-text"><span className="row-title">Plugins do Obsidian</span><span className="row-hint">Os plugins rodam dentro do Obsidian. Use "Abrir no Obsidian" na nota para Kanban, Dataview, Excalidraw e os outros; na Ayla, essas notas aparecem como Markdown.</span></span></div>
     </div>
-    <p className="group-note">As notas da Ayla e as de cada projeto ficam nos dados da Ayla; as dos cofres ficam nas pastas deles. Apagar move para a lixeira da pasta (.trash). Notas nunca vão para a nuvem.</p>
+    <p className="group-note">As notas da Athena e as de cada projeto ficam nos dados da Ayla; as dos cofres ficam nas pastas deles. Apagar move para a lixeira da pasta (.trash). Notas nunca vão para a nuvem.</p>
     {error && <p role="alert" className="app-error">{error}</p>}
   </section>;
 }

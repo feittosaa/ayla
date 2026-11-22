@@ -190,10 +190,10 @@ impl Core {
         .await;
         result.map(|items| items.into_iter().map(|(f, _)| f).collect()).unwrap_or_default()
     }
-    /// Raízes da Athena: as notas da Ayla, os cofres (ex.: do Obsidian) e os projetos da Ayla,
+    /// Raízes da Athena: as notas da própria Athena, os cofres (ex.: do Obsidian) e os projetos da Ayla,
     /// cada projeto com a própria pasta de notas.
     fn athena_roots(&self, prefs: &Preferences) -> Vec<AthenaRoot> {
-        let mut out = vec![AthenaRoot { id: "ayla".into(), kind: "ayla", name: "Notas da Ayla".into(), path: self.root.join("athena"), available: true }];
+        let mut out = vec![AthenaRoot { id: "ayla".into(), kind: "ayla", name: "Athena".into(), path: self.root.join("athena"), available: true }];
         for vault in prefs.vaults() {
             let path = PathBuf::from(&vault);
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| vault.clone());
@@ -250,7 +250,7 @@ impl Core {
         Ok(key)
     }
     /// Athena na conversa: trechos das notas relevantes ao pedido, como (título, texto). Entram as
-    /// notas da Ayla, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
+    /// notas da Athena, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
     /// projetos ficam de fora, como a memória). Uma pasta que corresponde ao pedido fornece
     /// trechos de notas distintas. Para os demais pedidos, vale a busca por significado ou palavras.
     async fn notes_context(&self, prefs: &Preferences, message: &str, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String)> {
@@ -536,12 +536,13 @@ pub const OPTIONS_GUIDE: &str = "\n\nQuando o pedido aceitar mais de uma boa res
 #[tauri::command]
 pub fn save_preferences(
     state: tauri::State<'_, Core>,
-    preferences: Preferences,
+    mut preferences: Preferences,
 ) -> Result<(), String> {
-    state
-        .preferences
-        .lock()
-        .map_err(|_| "Configuração ocupada")?
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    if let Ok(saved) = store.load() {
+        preferences.keep_managed(&saved);
+    }
+    store
         .save(&preferences)
         .map_err(|_| {
             "Não foi possível salvar: verifique os limites e a URL HTTPS do provedor".into()
@@ -966,7 +967,7 @@ pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), S
             for path in copies {
                 remove_copy(&state.root, &path);
             }
-            // Notas do projeto (Athena): vão para a lixeira das notas da Ayla, não somem.
+            // Notas do projeto (Athena): vão para a lixeira das notas da Athena, não somem.
             let notes = state.root.join("projetos-notas").join(&id);
             if notes.is_dir() {
                 let bin = state.root.join("athena").join(".trash");
@@ -1132,11 +1133,11 @@ pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String>
     let open: Vec<String> = prefs.vaults();
     let listed = tauri::async_runtime::spawn_blocking(move || {
         roots.into_iter().map(|root| {
-            let (folders, notes) = if root.path.is_dir() { (athena::folders(&root.path), athena::list(&root.path)) } else { (Vec::new(), Vec::new()) };
+            let (folders, notes, files) = if root.path.is_dir() { (athena::folders(&root.path), athena::list(&root.path), athena::attachments(&root.path)) } else { (Vec::new(), Vec::new(), Vec::new()) };
             json!({
                 "id": root.id, "kind": root.kind, "name": root.name, "path": root.path.to_string_lossy(), "available": root.available,
                 "obsidian": root.path.join(".obsidian").is_dir(), "git": athena_git::is_repo(&root.path),
-                "folders": folders, "notes": notes,
+                "folders": folders, "notes": notes, "files": files,
             })
         }).collect::<Vec<_>>()
     }).await.map_err(|_| "Falha ao ler as notas")?;
@@ -1273,7 +1274,7 @@ pub async fn athena_attachment(state: tauri::State<'_, Core>, root: String, targ
             return Err("Imagem grande demais para mostrar".to_string());
         }
         let bytes = fs::read(&path).map_err(|_| "Não foi possível ler o anexo".to_string())?;
-        let mime = match extension.as_str() { "jpg" | "jpeg" => "image/jpeg", "svg" => "image/svg+xml", "gif" => "image/gif", "webp" => "image/webp", "bmp" => "image/bmp", "avif" => "image/avif", _ => "image/png" };
+        let mime = match extension.as_str() { "jpg" | "jpeg" | "jfif" => "image/jpeg", "svg" => "image/svg+xml", "gif" => "image/gif", "webp" => "image/webp", "bmp" => "image/bmp", "avif" => "image/avif", _ => "image/png" };
         Ok(Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))))
     }).await.map_err(|_| "Falha ao ler o anexo".to_string())?
 }
@@ -1392,6 +1393,56 @@ pub async fn athena_git_tick(app: &tauri::AppHandle, boot: bool) {
             _ => {}
         }
     }
+}
+
+/// Apaga uma pasta da raiz: vai inteira para a lixeira (`.trash`), nada some de vez.
+#[tauri::command]
+pub fn athena_trash_folder(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::trash_folder(&dir, &path)
+}
+
+/// Anexo (imagem ou PDF) de uma raiz pelo nome ou caminho, como nos links do Obsidian.
+fn athena_attachment_path(state: &Core, root: &str, target: &str) -> Result<PathBuf, String> {
+    let dir = state.athena_path(&state.prefs()?, root)?;
+    let path = athena::find_attachment(&dir, target).ok_or("Anexo não encontrado")?;
+    athena::attachment_mime(&path).ok_or("Este tipo de arquivo não é mostrado na Athena")?;
+    Ok(path)
+}
+
+/// `athena-file://localhost/<raiz>/<anexo>`: imagens e PDFs das notas, lidos direto da pasta.
+pub fn athena_file(state: &Core, uri_path: &str) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::{header, Response, StatusCode};
+    let fail = |status: StatusCode| Response::builder().status(status).body(Vec::new()).unwrap_or_default();
+    let trimmed = uri_path.trim_start_matches('/');
+    let Some((root, target)) = trimmed.split_once('/') else { return fail(StatusCode::BAD_REQUEST) };
+    let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return fail(StatusCode::BAD_REQUEST) };
+    let Ok(path) = athena_attachment_path(state, &root, &target) else { return fail(StatusCode::NOT_FOUND) };
+    let mime = athena::attachment_mime(&path).unwrap_or("application/octet-stream");
+    let limit = if mime == "application/pdf" { athena::MAX_PDF } else { athena::MAX_ATTACHMENT };
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > limit {
+        return fail(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    match fs::read(&path) {
+        Ok(bytes) => Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE, mime)
+            .header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'")
+            .header(header::CACHE_CONTROL, "no-cache").body(bytes).unwrap_or_default(),
+        Err(_) => fail(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Move um anexo (imagem ou PDF) para outra pasta da mesma raiz.
+#[tauri::command]
+pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: String, folder: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    athena::move_attachment(&dir, &path, &folder)
+}
+
+/// Abre o anexo no aplicativo padrão do sistema (visualizador de PDF ou de imagens).
+#[tauri::command]
+pub fn athena_open_attachment(state: tauri::State<'_, Core>, root: String, target: String) -> Result<(), String> {
+    let path = athena_attachment_path(&state, &root, &target)?;
+    std::process::Command::new("xdg-open").arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o arquivo".into())
 }
 
 /// Abre a nota no Obsidian (onde os plugins do cofre rodam).

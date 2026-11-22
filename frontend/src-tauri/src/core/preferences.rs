@@ -47,7 +47,7 @@ pub struct Preferences {
     pub desktop: DesktopPreferences,
     /// Versões anteriores: uma pasta de notas escolhida. Agora vale como um cofre a mais.
     pub athena_folder: String,
-    /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Ayla.
+    /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
     /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
     pub athena_git: bool,
@@ -171,6 +171,13 @@ impl Preferences {
             75
         }
     }
+    /// Campos que têm comando próprio (cofres da Athena e modo de resposta): uma tela que salva
+    /// as preferências a partir de uma cópia antiga não pode desfazê-los.
+    pub fn keep_managed(&mut self, saved: &Preferences) {
+        self.athena_vaults = saved.athena_vaults.clone();
+        self.athena_folder = saved.athena_folder.clone();
+        self.response_source = saved.response_source.clone();
+    }
     /// Cofres da Athena, incluindo a pasta escolhida em versões anteriores.
     pub fn vaults(&self) -> Vec<String> {
         let mut out = self.athena_vaults.clone();
@@ -289,6 +296,19 @@ mod tests {
         assert!(prefs.validate().is_err());
         let old: Preferences = serde_json::from_str("{}").unwrap();
         assert_eq!(old.response_source, "");
+    }
+
+    #[test]
+    fn saving_an_old_copy_keeps_vaults_and_response_source() {
+        let mut saved = Preferences::default();
+        saved.athena_vaults = vec!["/home/teste/cofre".into()];
+        saved.response_source = "auto".into();
+        let mut stale = Preferences::default();
+        stale.memory_auto = !saved.memory_auto;
+        stale.keep_managed(&saved);
+        assert_eq!(stale.athena_vaults, saved.athena_vaults);
+        assert_eq!(stale.response_source, "auto");
+        assert_ne!(stale.memory_auto, saved.memory_auto);
     }
 
     #[test]

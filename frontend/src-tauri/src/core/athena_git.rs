@@ -150,26 +150,92 @@ pub fn obsidian_running() -> bool {
     })
 }
 
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct Change {
+    pub path: String,
+    /// "novo", "modificado", "apagado", "renomeado" ou "conflito".
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Commit {
+    pub message: String,
+    pub at: i64,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Status {
     pub repo: bool,
     pub branch: String,
     /// Arquivos alterados ainda sem commit.
     pub changes: usize,
+    /// Os primeiros arquivos alterados (até `MAX_FILES`).
+    pub files: Vec<Change>,
     pub remote: bool,
+    /// Ramo ligado a um remoto: só então há commits a enviar ou a receber.
+    pub upstream: bool,
+    /// Commits locais ainda não enviados e do remoto ainda não puxados (pelo último contato).
+    pub ahead: usize,
+    pub behind: usize,
+    pub last_commit: Option<Commit>,
     pub settings: Option<Settings>,
+}
+
+pub const MAX_FILES: usize = 200;
+
+/// `git status --porcelain -z`: caminho e tipo de cada mudança (renomeações trazem o nome novo).
+pub fn parse_changes(raw: &str) -> Vec<Change> {
+    let mut out = Vec::new();
+    let mut parts = raw.split('\0').filter(|p| !p.is_empty());
+    while let Some(entry) = parts.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (code, path) = (&entry[..2], &entry[3..]);
+        let kind = match code {
+            "??" => "novo",
+            c if c.contains('U') || c == "AA" || c == "DD" => "conflito",
+            c if c.contains('R') || c.contains('C') => {
+                parts.next();
+                "renomeado"
+            }
+            c if c.contains('D') => "apagado",
+            c if c.contains('A') => "novo",
+            _ => "modificado",
+        };
+        out.push(Change { path: path.to_string(), kind });
+    }
+    out
 }
 
 pub fn status(root: &Path) -> Status {
     if !is_repo(root) {
         return Status::default();
     }
-    let changes = run(root, &["status", "--porcelain"]).map(|o| o.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
+    let files = run(root, &["status", "--porcelain", "-z", "--untracked-files=all"]).map(|o| parse_changes(&o)).unwrap_or_default();
+    let upstream = run(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).is_ok();
+    let (ahead, behind) = if upstream {
+        run(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]).ok().and_then(|o| {
+            let mut n = o.split_whitespace().map(|v| v.parse::<usize>().unwrap_or(0));
+            Some((n.next()?, n.next()?))
+        }).unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    let last_commit = run(root, &["log", "-1", "--format=%s%x1f%ct"]).ok().and_then(|o| {
+        let (message, at) = o.trim().split_once('\u{1f}')?;
+        Some(Commit { message: message.to_string(), at: at.parse().ok()? })
+    });
     Status {
         repo: true,
         branch: run(root, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|b| b.trim().to_string()).unwrap_or_default(),
-        changes,
+        changes: files.len(),
+        files: files.into_iter().take(MAX_FILES).collect(),
         remote: run(root, &["remote"]).is_ok_and(|r| !r.trim().is_empty()),
+        upstream,
+        ahead,
+        behind,
+        last_commit,
         settings: Some(settings(root)),
     }
 }
@@ -291,6 +357,13 @@ mod tests {
     }
 
     #[test]
+    fn mudancas_do_status_porcelain() {
+        let raw = " M Notas/a.md\0?? nova pasta/b.md\0R  c.md\0antiga.md\0 D d.md\0UU e.md\0A  f.md\0";
+        let kinds: Vec<(String, &str)> = parse_changes(raw).into_iter().map(|c| (c.path, c.kind)).collect();
+        assert_eq!(kinds, vec![("Notas/a.md".into(), "modificado"), ("nova pasta/b.md".into(), "novo"), ("c.md".into(), "renomeado"), ("d.md".into(), "apagado"), ("e.md".into(), "conflito"), ("f.md".into(), "novo")]);
+    }
+
+    #[test]
     fn erros_sem_credenciais_e_link_do_obsidian() {
         let error = clean_error("fatal: unable to access 'https://ghp_SEGREDO@github.com/eu/notas.git/': Could not resolve host");
         assert!(!error.contains("ghp_SEGREDO") && error.contains("github.com/eu/notas.git"), "{error}");
@@ -314,7 +387,16 @@ mod tests {
         std::fs::write(vault.join("Nota.md"), "um\n").unwrap();
         let first = sync(&vault, &Settings::default(), at()).unwrap();
         assert_eq!((first.committed, first.pushed), (1, true), "{}", first.message);
-        assert_eq!(status(&vault).changes, 0);
+        let clean = status(&vault);
+        assert_eq!((clean.changes, clean.ahead, clean.behind, clean.upstream), (0, 0, 0, true));
+        assert!(clean.last_commit.is_some_and(|c| c.at > 0));
+        std::fs::write(vault.join("Nova.md"), "x\n").unwrap();
+        std::fs::write(vault.join("Nota.md"), "um e meio\n").unwrap();
+        let mut files = status(&vault).files;
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(files, vec![Change { path: "Nota.md".into(), kind: "modificado" }, Change { path: "Nova.md".into(), kind: "novo" }]);
+        std::fs::remove_file(vault.join("Nova.md")).unwrap();
+        std::fs::write(vault.join("Nota.md"), "um\n").unwrap();
         // Outro computador muda a mesma linha; aqui também: conflito.
         quiet(&other, &["pull", "-q", "origin", "main"]);
         std::fs::write(other.join("Nota.md"), "dois\n").unwrap();
