@@ -42,7 +42,26 @@ struct LockFile {
     parallelism: u32,
     salt: String,
     key: String,
+    /// A mesma chave dos dados, cifrada pela chave de recuperação (pastas protegidas antes dela
+    /// existir não têm; dá para criar com a senha).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<Wrapped>,
 }
+
+/// Chave dos dados cifrada por uma chave derivada (Argon2id) de um segredo.
+#[derive(Clone, Serialize, Deserialize)]
+struct Wrapped {
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    salt: String,
+    key: String,
+}
+
+/// Dado associado da cópia da chave cifrada pela chave de recuperação.
+const RECOVERY_AAD: &[u8; 8] = b"AYLARCV1";
+/// Base32 de Crockford: sem I, L, O e U, que se confundem ao anotar.
+const RECOVERY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// Chave dos dados de uma pasta, apagada da memória quando sai de uso.
 #[derive(Clone)]
@@ -335,45 +354,121 @@ fn hex(bytes: &[u8]) -> String {
 
 fn lock_file(dir: &Path) -> Result<LockFile, String> {
     let text = fs::read(dir.join(LOCK_FILE)).map_err(|_| "Esta pasta não está protegida")?;
-    serde_json::from_slice(&text).map_err(|_| "Proteção da pasta danificada".into())
+    let lock: LockFile = serde_json::from_slice(&text).map_err(|_| "Proteção da pasta danificada")?;
+    if lock.version != 1 || lock.kdf != "argon2id" {
+        return Err("Proteção da pasta em formato desconhecido".into());
+    }
+    Ok(lock)
+}
+
+fn write_lock(dir: &Path, lock: &LockFile) -> Result<(), String> {
+    write_atomic(&dir.join(LOCK_FILE), &serde_json::to_vec_pretty(lock).map_err(|_| "Falha ao salvar a proteção")?)
+}
+
+fn wrap(secret: &str, key: &Key, aad: &[u8]) -> Result<Wrapped, String> {
+    let salt = random::<16>()?;
+    let kek = derive(secret, &salt, MEMORY_KIB, ITERATIONS, 1)?;
+    Ok(Wrapped { memory: MEMORY_KIB, iterations: ITERATIONS, parallelism: 1, salt: B64.encode(salt), key: B64.encode(seal(&kek, aad, key.0.as_slice())?) })
+}
+
+fn unwrap(wrapped: &Wrapped, secret: &str, aad: &[u8], wrong: &str) -> Result<Key, String> {
+    if wrapped.memory > 1024 * 1024 || wrapped.iterations > 20 || wrapped.parallelism > 8 {
+        return Err("Proteção da pasta em formato desconhecido".into());
+    }
+    let salt = B64.decode(&wrapped.salt).map_err(|_| "Proteção da pasta danificada")?;
+    let sealed = B64.decode(&wrapped.key).map_err(|_| "Proteção da pasta danificada")?;
+    let kek = derive(secret, &salt, wrapped.memory, wrapped.iterations, wrapped.parallelism)?;
+    let plain = Zeroizing::new(open(&kek, aad, &sealed).ok_or(wrong)?);
+    let key: [u8; 32] = plain.as_slice().try_into().map_err(|_| "Proteção da pasta danificada")?;
+    Ok(Key(Zeroizing::new(key)))
+}
+
+fn main_key(lock: &LockFile) -> Wrapped {
+    Wrapped { memory: lock.memory, iterations: lock.iterations, parallelism: lock.parallelism, salt: lock.salt.clone(), key: lock.key.clone() }
 }
 
 /// Confere a senha e devolve a chave dos dados.
 pub fn unlock(dir: &Path, password: &str) -> Result<Key, String> {
     let lock = lock_file(dir)?;
-    if lock.version != 1 || lock.kdf != "argon2id" || lock.memory > 1024 * 1024 || lock.iterations > 20 || lock.parallelism > 8 {
-        return Err("Proteção da pasta em formato desconhecido".into());
-    }
-    let salt = B64.decode(&lock.salt).map_err(|_| "Proteção da pasta danificada")?;
-    let wrapped = B64.decode(&lock.key).map_err(|_| "Proteção da pasta danificada")?;
-    let kek = derive(password, &salt, lock.memory, lock.iterations, lock.parallelism)?;
-    let plain = Zeroizing::new(open(&kek, MAGIC, &wrapped).ok_or("Senha incorreta")?);
-    let key: [u8; 32] = plain.as_slice().try_into().map_err(|_| "Proteção da pasta danificada")?;
-    Ok(Key(Zeroizing::new(key)))
+    unwrap(&main_key(&lock), password, MAGIC, "Senha incorreta")
 }
 
-fn save_lock(dir: &Path, key: &Key, password: &str) -> Result<(), String> {
+/// Grava a proteção com a senha nova, mantendo a chave de recuperação indicada.
+fn save_lock(dir: &Path, key: &Key, password: &str, recovery: Option<Wrapped>) -> Result<(), String> {
     if password.chars().count() < MIN_PASSWORD {
         return Err(format!("Use uma senha com pelo menos {MIN_PASSWORD} caracteres"));
     }
-    let salt = random::<16>()?;
-    let kek = derive(password, &salt, MEMORY_KIB, ITERATIONS, 1)?;
-    let lock = LockFile {
-        version: 1, kdf: "argon2id".into(), memory: MEMORY_KIB, iterations: ITERATIONS, parallelism: 1,
-        salt: B64.encode(salt), key: B64.encode(seal(&kek, MAGIC, key.0.as_slice())?),
-    };
-    write_atomic(&dir.join(LOCK_FILE), &serde_json::to_vec_pretty(&lock).map_err(|_| "Falha ao salvar a proteção")?)
+    let main = wrap(password, key, MAGIC)?;
+    write_lock(dir, &LockFile {
+        version: 1, kdf: "argon2id".into(), memory: main.memory, iterations: main.iterations, parallelism: main.parallelism,
+        salt: main.salt, key: main.key, recovery,
+    })
 }
 
-/// Troca a senha (só a chave dos dados é recifrada).
+/// Troca a senha (só a chave dos dados é recifrada); a chave de recuperação continua valendo.
 pub fn change_password(dir: &Path, current: &str, new: &str) -> Result<(), String> {
-    let key = unlock(dir, current)?;
-    save_lock(dir, &key, new)
+    let lock = lock_file(dir)?;
+    let key = unwrap(&main_key(&lock), current, MAGIC, "Senha incorreta")?;
+    save_lock(dir, &key, new, lock.recovery)
+}
+
+/// Chave de recuperação nova: 160 bits aleatórios, em grupos de 4 (`ATHENA-XXXX-…`).
+fn recovery_code() -> Result<String, String> {
+    let bytes = random::<20>()?;
+    let mut bits = 0u64;
+    let mut count = 0;
+    let mut out = String::new();
+    for byte in bytes {
+        bits = (bits << 8) | byte as u64;
+        count += 8;
+        while count >= 5 {
+            count -= 5;
+            out.push(RECOVERY_ALPHABET[((bits >> count) & 31) as usize] as char);
+        }
+    }
+    let groups: Vec<String> = out.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+    Ok(format!("ATHENA-{}", groups.join("-")))
+}
+
+/// Como a chave foi digitada (minúsculas, espaços, traços, O no lugar de 0) → forma canônica.
+fn normalize_code(code: &str) -> Option<String> {
+    let mut clean: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect();
+    if clean.len() == 38 && clean.starts_with("ATHENA") {
+        clean.drain(..6);
+    }
+    let clean: String = clean.chars().map(|c| match c { 'O' => '0', 'I' | 'L' => '1', other => other }).collect();
+    (clean.len() == 32 && clean.bytes().all(|b| RECOVERY_ALPHABET.contains(&b))).then_some(clean)
+}
+
+/// A pasta tem chave de recuperação?
+pub fn has_recovery(dir: &Path) -> bool {
+    lock_file(dir).is_ok_and(|lock| lock.recovery.is_some())
+}
+
+/// Cria uma chave de recuperação nova (a anterior deixa de valer). Pede a senha atual.
+pub fn new_recovery(dir: &Path, password: &str) -> Result<String, String> {
+    let mut lock = lock_file(dir)?;
+    let key = unwrap(&main_key(&lock), password, MAGIC, "Senha incorreta")?;
+    let code = recovery_code()?;
+    lock.recovery = Some(wrap(&normalize_code(&code).ok_or("Falha ao criar a chave")?, &key, RECOVERY_AAD)?);
+    write_lock(dir, &lock)?;
+    Ok(code)
+}
+
+/// Senha esquecida: com a chave de recuperação, define uma senha nova (a chave continua valendo).
+pub fn recover(dir: &Path, code: &str, password: &str) -> Result<Key, String> {
+    let lock = lock_file(dir)?;
+    let recovery = lock.recovery.clone().ok_or("Esta pasta não tem chave de recuperação")?;
+    let code = normalize_code(code).ok_or("Chave de recuperação incorreta")?;
+    let key = unwrap(&recovery, &code, RECOVERY_AAD, "Chave de recuperação incorreta")?;
+    save_lock(dir, &key, password, Some(recovery))?;
+    Ok(key)
 }
 
 /// Protege uma pasta: cifra cada arquivo e subpasta, confere tudo e só então apaga os originais.
 /// Arquivos e pastas ocultos (como `.obsidian`) ficam como estão.
-pub fn protect(root: &Path, folder: &str, password: &str) -> Result<usize, String> {
+/// Devolve quantos arquivos foram cifrados e a chave de recuperação (mostrada uma única vez).
+pub fn protect(root: &Path, folder: &str, password: &str) -> Result<(usize, String), String> {
     let folder = clean(folder)?;
     let dir = root.join(&folder);
     if !dir.is_dir() {
@@ -440,7 +535,11 @@ pub fn protect(root: &Path, folder: &str, password: &str) -> Result<usize, Strin
         })();
         if let Err(error) = result { undo(&created); return Err(error); }
     }
-    if let Err(error) = save_lock(&dir, &key, password) { undo(&created); return Err(error); }
+    let saved = recovery_code().and_then(|code| {
+        let recovery = wrap(&normalize_code(&code).ok_or("Falha ao criar a chave")?, &key, RECOVERY_AAD)?;
+        save_lock(&dir, &key, password, Some(recovery)).map(|_| code)
+    });
+    let code = match saved { Ok(code) => code, Err(error) => { undo(&created); return Err(error); } };
     // Tudo cifrado e conferido: agora sim os originais saem (de vez; ir para a lixeira os deixaria legíveis).
     for file in &files {
         let _ = fs::remove_file(dir.join(file));
@@ -449,7 +548,7 @@ pub fn protect(root: &Path, folder: &str, password: &str) -> Result<usize, Strin
     for sub in &folders {
         let _ = fs::remove_dir(dir.join(sub));
     }
-    Ok(files.len())
+    Ok((files.len(), code))
 }
 
 /// Tira a proteção: decifra tudo de volta para arquivos comuns e apaga os cifrados e a proteção.
@@ -525,7 +624,9 @@ mod tests {
         fs::write(dir.join("Bancos/cartão.png"), b"\x89PNG\r\n\x1a\nimagem").unwrap();
         fs::write(dir.join(".obsidian/app.json"), "{}").unwrap();
         assert!(protect(&root, "Senhas", "curta").is_err(), "senha curta");
-        assert_eq!(protect(&root, "Senhas", "senha forte 123").unwrap(), 3);
+        let (count, code) = protect(&root, "Senhas", "senha forte 123").unwrap();
+        assert_eq!(count, 3);
+        assert!(code.starts_with("ATHENA-") && code.len() == 7 + 32 + 7, "{code}");
         assert!(protect(&root, "Senhas", "senha forte 123").is_err(), "já protegida");
         assert_eq!(protected_folders(&root), ["Senhas"]);
         assert_eq!(protected_folder_of(&root, "Senhas/Bancos/Itaú.md").as_deref(), Some("Senhas"));
@@ -570,6 +671,24 @@ mod tests {
 
         change_password(&dir, "senha forte 123", "outra senha boa").unwrap();
         assert!(unlock(&dir, "senha forte 123").is_err());
+        assert!(unlock(&dir, "outra senha boa").is_ok());
+
+        // Senha esquecida: a chave (digitada de qualquer jeito) define outra e continua valendo.
+        assert!(!lock.contains(&code[7..]), "a chave não fica no disco");
+        assert!(has_recovery(&dir));
+        assert_eq!(recover(&dir, "ATHENA-0000-0000-0000-0000-0000-0000-0000-0000", "nova senha 1").err().as_deref(), Some("Chave de recuperação incorreta"));
+        assert!(recover(&dir, "curta", "nova senha 1").is_err());
+        let typed = code.to_lowercase().replace('-', " ").replace('0', "o");
+        assert!(recover(&dir, &typed, "curta").is_err(), "senha nova curta");
+        let recovered = recover(&dir, &typed, "nova senha 1").unwrap();
+        assert_eq!(read(&dir, &recovered, "Email.md").unwrap().0, b"nova");
+        assert!(unlock(&dir, "outra senha boa").is_err());
+        let key = unlock(&dir, "nova senha 1").unwrap();
+        recover(&dir, &code, "nova senha 2").unwrap();
+        let key2 = new_recovery(&dir, "nova senha 2").unwrap();
+        assert!(recover(&dir, &code, "nova senha 3").is_err(), "a chave anterior deixa de valer");
+        recover(&dir, &key2, "outra senha boa").unwrap();
+        drop(key);
         let key = unlock(&dir, "outra senha boa").unwrap();
         assert_eq!(read(&dir, &key, "Email.md").unwrap().0, b"nova");
 
@@ -614,6 +733,18 @@ mod tests {
         fs::write(file_of(&dir, &a.id), tampered).unwrap();
         assert!(read(&dir, &key, "a.md").is_err());
         assert!(protect(&root, "", "senha forte 123").is_err());
+        // Pasta protegida antes da chave de recuperação existir: cria uma com a senha.
+        let lock: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(LOCK_FILE)).unwrap()).unwrap();
+        let mut old = lock.clone();
+        old.as_object_mut().unwrap().remove("recovery");
+        fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!has_recovery(&dir));
+        assert_eq!(recover(&dir, "ATHENA-0000-0000-0000-0000-0000-0000-0000-0000", "nova senha 1").err().as_deref(), Some("Esta pasta não tem chave de recuperação"));
+        assert!(new_recovery(&dir, "senha errada").is_err());
+        let code = new_recovery(&dir, "senha forte 123").unwrap();
+        assert!(has_recovery(&dir));
+        recover(&dir, &code, "nova senha 1").unwrap();
+        assert!(unlock(&dir, "nova senha 1").is_ok());
         let _ = fs::remove_dir_all(root);
     }
 }

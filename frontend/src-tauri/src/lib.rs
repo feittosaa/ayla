@@ -317,6 +317,8 @@ pub fn run() {
             core::services::athena_lock,
             core::services::athena_unprotect,
             core::services::athena_change_password,
+            core::services::athena_recover,
+            core::services::athena_new_recovery,
             core::services::athena_create,
             core::services::athena_daily,
             core::services::athena_trash,

@@ -2,17 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, KeyIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
 import { IMAGE, VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
 import BrandMark from './BrandMark';
-import { LockDialog, LockedView, UNLOCK_GRACE_MS, type LockMode } from './AthenaLock';
+import { LockDialog, LockedView, UNLOCK_GRACE_MS, type LockMode, type LockResult } from './AthenaLock';
 import AthenaGraph, { type NoteGraph } from './AthenaGraph';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[]; bannerHeight?: number | null; protected?: Lock[] };
 /** Pasta protegida da raiz: aberta nesta execução (desde `since`, em segundos) ou bloqueada. */
-type Lock = { folder: string; unlocked: boolean; since: number | null };
+type Lock = { folder: string; unlocked: boolean; since: number | null; recovery: boolean };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
 type Hit = { root: string; rootName: string; path: string; title: string; snippet: string };
 type Outcome = { committed: number; pulled: boolean; pushed: boolean; message: string };
@@ -506,26 +506,38 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     setExpanded(prev => prev.filter(key => key !== `${root}|${folder}` && !key.startsWith(`${root}|${folder}/`)));
     load(); setRevision(r => r + 1);
   }
-  async function submitLock(password: string, next: string) {
+  /** Envia o diálogo de senha; devolve a chave de recuperação quando uma é criada (proteger ou chave nova). */
+  async function submitLock(mode: LockMode, secret: string, next: string): Promise<LockResult> {
     if (!lockDialog) return;
-    const { mode, root, folder } = lockDialog;
+    const { root, folder } = lockDialog;
+    let recovery: string | undefined;
     if (mode === 'protect') {
       await flushAll();
-      await native('athena_protect', { root, folder, password });
+      recovery = (await native<{ count: number; recovery: string }>('athena_protect', { root, folder, password: secret })).recovery;
       // Abas da pasta continuam abertas, agora pedindo a senha.
       setExpanded(prev => prev.filter(key => key !== `${root}|${folder}` && !key.startsWith(`${root}|${folder}/`)));
     } else if (mode === 'unlock') {
-      await unlockFolder(root, folder, password);
+      await unlockFolder(root, folder, secret);
+    } else if (mode === 'recover') {
+      await native('athena_recover', { root, folder, code: secret, password: next });
+      showOpened(root, folder);
+    } else if (mode === 'recovery') {
+      recovery = await native<string>('athena_new_recovery', { root, folder, password: secret });
     } else if (mode === 'password') {
-      await native('athena_change_password', { root, folder, current: password, password: next });
+      await native('athena_change_password', { root, folder, current: secret, password: next });
     } else {
       await flushAll();
-      await native('athena_unprotect', { root, folder, password });
+      await native('athena_unprotect', { root, folder, password: secret });
     }
-    setLockDialog(null); load(); loadOverview(); setRevision(r => r + 1);
+    load(); loadOverview(); setRevision(r => r + 1);
+    return recovery;
   }
   async function unlockFolder(root: string, folder: string, password: string) {
     await native('athena_unlock', { root, folder, password });
+    showOpened(root, folder);
+  }
+  /** Pasta aberta (pela senha ou pela chave de recuperação): foco nela e árvore aberta. */
+  function showOpened(root: string, folder: string) {
     setFocus(root); setClock(Date.now());
     setExpanded(prev => [...new Set([...prev, `${root}|`, `${root}|${folder}`])]);
     load(); setRevision(r => r + 1);
@@ -537,6 +549,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     return <>
       <button className="icon-button tiny" title="Bloquear agora" aria-label={`Bloquear a pasta ${folder}`} onClick={stop(() => void lockFolder(root, folder))}><LockIcon size={13} /></button>
       <button className="icon-button tiny" title="Trocar a senha" aria-label={`Trocar a senha da pasta ${folder}`} onClick={stop(() => setLockDialog({ mode: 'password', root, folder }))}>✱</button>
+      <button className={lock.recovery ? 'icon-button tiny' : 'icon-button tiny lock-missing'} title={lock.recovery ? 'Nova chave de recuperação' : 'Esta pasta não tem chave de recuperação: criar uma'} aria-label={`${lock.recovery ? 'Nova chave' : 'Criar chave'} de recuperação da pasta ${folder}`} onClick={stop(() => setLockDialog({ mode: 'recovery', root, folder }))}><KeyIcon size={13} /></button>
       <button className="icon-button tiny" title="Tirar a proteção" aria-label={`Tirar a proteção da pasta ${folder}`} onClick={stop(() => setLockDialog({ mode: 'unprotect', root, folder }))}><UnlockIcon size={13} /></button>
     </>;
   }
@@ -638,7 +651,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       {tab && !tree
         ? <div className="note-scroll" aria-busy="true" />
         : tab && lockedTab
-        ? <LockedView key={`${tab.root}|${lockedTab.folder}`} folder={lockedTab.folder} onUnlock={password => unlockFolder(tab.root, lockedTab.folder, password)} />
+        ? <LockedView key={`${tab.root}|${lockedTab.folder}`} folder={lockedTab.folder} recovery={lockedTab.recovery} onUnlock={password => unlockFolder(tab.root, lockedTab.folder, password)} onForgot={() => setLockDialog({ mode: 'recover', root: tab.root, folder: lockedTab.folder })} />
         : tab && isAttachment(tab.path)
         ? <AttachmentView key={`${tab.root}|${tab.path}`} root={tab.root} target={tab.path} onError={setError} />
         : tab
@@ -746,7 +759,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       {workspace.panel && gitPanel()}
       <AthenaGraph graph={focusedGraph} scope={rootOf(focus)?.name} activeNote={activeTab} onOpen={open} onRefresh={loadOverview} error={graphError} />
     </aside>
-    {lockDialog && <LockDialog mode={lockDialog.mode} folder={lockDialog.folder} git={rootOf(lockDialog.root)?.git} onSubmit={submitLock} onClose={() => setLockDialog(null)} />}
+    {lockDialog && <LockDialog mode={lockDialog.mode} folder={lockDialog.folder} git={rootOf(lockDialog.root)?.git} recovery={lockOf(lockDialog.root, lockDialog.folder)?.recovery} onSubmit={submitLock} onClose={() => { setLockDialog(null); load(); }} />}
     {trashing && <div className="dialog-backdrop" onClick={() => setTrashing(null)}>
       <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="athena-trash-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') setTrashing(null); }}>
         <h2 id="athena-trash-title">Apagar “{trashing.title}”?</h2>

@@ -993,6 +993,10 @@ pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, d
 /// Apaga o projeto com conversas e memórias dele (a interface pede confirmação).
 #[tauri::command]
 pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    // Uma pasta protegida bloqueada não sai junto com o projeto: precisa ser aberta antes.
+    if let Some(folder) = locked_inside(&state.root.join("projetos-notas").join(&id)) {
+        return Err(format!("As notas do projeto têm a pasta protegida \"{folder}\", que está bloqueada. Abra-a na Athena com a senha antes de apagar o projeto."));
+    }
     let db = state.store.lock().map_err(|_| "Dados ocupados")?;
     let copies = db.project_file_paths(&id).unwrap_or_default();
     let name = db.projects().unwrap_or_default().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_else(|| "Projeto".into());
@@ -1176,7 +1180,7 @@ pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String>
             for folder in athena_lock::protected_folders(&root.path) {
                 let dir = root.path.join(&folder);
                 let session = athena_lock::session(&dir);
-                locks.push(json!({"folder": folder, "unlocked": session.is_some(), "since": session.as_ref().map(|s| s.1)}));
+                locks.push(json!({"folder": folder, "unlocked": session.is_some(), "since": session.as_ref().map(|s| s.1), "recovery": athena_lock::has_recovery(&dir)}));
                 // Desbloqueada: o conteúdo aparece na árvore da Athena (e só nela).
                 let Some((key, _)) = session else { continue };
                 for entry in athena_lock::entries(&dir, &key) {
@@ -1587,20 +1591,31 @@ pub async fn athena_git_tick(app: &tauri::AppHandle, boot: bool) {
 #[tauri::command]
 pub fn athena_trash_folder(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    trash_folder_in(&dir, &path)
+}
+
+/// Apagar pasta: uma pasta protegida só sai (inteira ou em parte) aberta com a senha; uma pasta
+/// comum com uma protegida dentro não sai.
+fn trash_folder_in(dir: &std::path::Path, path: &str) -> Result<(), String> {
     if let Some(place) = protected(&dir, &path) {
         let key = unlocked(&place)?;
         if place.inner.is_empty() {
             // A pasta inteira vai para a lixeira ainda cifrada, com a proteção junto.
-            athena::trash_folder(&dir, &path)?;
+            athena::trash_folder(dir, path)?;
             athena_lock::end_session(&place.dir);
             return Ok(());
         }
         return athena_lock::trash(&place.dir, &key, &place.inner, &dir.join(".trash"));
     }
-    if !athena_lock::protected_folders(&dir.join(&path)).is_empty() {
+    if !athena_lock::protected_folders(&dir.join(path)).is_empty() {
         return Err("Esta pasta tem uma pasta protegida dentro; apague a protegida primeiro".into());
     }
-    athena::trash_folder(&dir, &path)
+    athena::trash_folder(dir, path)
+}
+
+/// Primeira pasta protegida e bloqueada dentro da pasta, se houver.
+fn locked_inside(dir: &std::path::Path) -> Option<String> {
+    athena_lock::protected_folders(dir).into_iter().find(|folder| athena_lock::session(&dir.join(folder)).is_none())
 }
 
 // ---- Pastas protegidas da Athena ----
@@ -1737,15 +1752,35 @@ fn protected_media(state: &Core, root: &str, target: &str) -> Option<Result<(Vec
     })())
 }
 
-/// Protege uma pasta com senha (os arquivos passam a ficar cifrados no disco e no Git).
+/// Protege uma pasta com senha (os arquivos passam a ficar cifrados no disco e no Git). Devolve a
+/// chave de recuperação, que só existe nesta resposta.
 #[tauri::command]
-pub async fn athena_protect(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, folder: String, password: String) -> Result<usize, String> {
+pub async fn athena_protect(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, folder: String, password: String) -> Result<Value, String> {
     use tauri::Emitter;
     let dir = state.athena_path(&state.prefs()?, &root)?;
-    let count = tauri::async_runtime::spawn_blocking(move || athena_lock::protect(&dir, &folder, &password))
+    let (count, recovery) = tauri::async_runtime::spawn_blocking(move || athena_lock::protect(&dir, &folder, &password))
         .await.map_err(|_| "Falha ao proteger a pasta")??;
     let _ = app.emit("notes-updated", json!({"root": root}));
-    Ok(count)
+    Ok(json!({"count": count, "recovery": recovery}))
+}
+
+/// Senha esquecida: a chave de recuperação define uma senha nova e já abre a pasta.
+#[tauri::command]
+pub async fn athena_recover(state: tauri::State<'_, Core>, root: String, folder: String, code: String, password: String) -> Result<i64, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let place = protected(&dir, &folder).filter(|p| p.inner.is_empty()).ok_or("Esta pasta não está protegida")?;
+    let (dir, key) = tauri::async_runtime::spawn_blocking(move || athena_lock::recover(&place.dir, &code, &password).map(|key| (place.dir, key)))
+        .await.map_err(|_| "Falha ao recuperar a pasta")??;
+    Ok(athena_lock::start_session(&dir, key))
+}
+
+/// Chave de recuperação nova (a anterior deixa de valer), com a senha atual.
+#[tauri::command]
+pub async fn athena_new_recovery(state: tauri::State<'_, Core>, root: String, folder: String, password: String) -> Result<String, String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let place = protected(&dir, &folder).filter(|p| p.inner.is_empty()).ok_or("Esta pasta não está protegida")?;
+    tauri::async_runtime::spawn_blocking(move || athena_lock::new_recovery(&place.dir, &password))
+        .await.map_err(|_| "Falha ao criar a chave de recuperação")?
 }
 
 /// Abre uma pasta protegida nesta execução da Ayla. Devolve o momento da senha (segundos Unix).
@@ -3654,9 +3689,17 @@ mod tests {
         assert_eq!(protected(&root, "Senhas").unwrap().inner, "");
         assert!(protected(&root, "Solta.md").is_none());
 
-        // Bloqueada: nada entra, nada sai.
+        // Bloqueada: nada entra, nada sai, e não pode ser apagada (nem ela, nem a pasta de cima).
         assert!(move_across(&root, "Solta.md", "Senhas/Solta.md").is_err());
         assert!(root.join("Solta.md").is_file());
+        assert!(trash_folder_in(&root, "Senhas").is_err());
+        assert!(trash_folder_in(&root, "Senhas/Pessoal").is_err());
+        fs::create_dir_all(root.join("Cofre")).unwrap();
+        fs::rename(root.join("Senhas"), root.join("Cofre/Senhas")).unwrap();
+        assert!(trash_folder_in(&root, "Cofre").is_err(), "pasta de cima também não");
+        assert_eq!(locked_inside(&root).as_deref(), Some("Cofre/Senhas"));
+        fs::rename(root.join("Cofre/Senhas"), root.join("Senhas")).unwrap();
+        assert!(root.join("Senhas").join(athena_lock::LOCK_FILE).is_file() && !root.join(".trash").exists(), "nada foi apagado");
 
         let dir = root.join("Senhas");
         athena_lock::start_session(&dir, athena_lock::unlock(&dir, "senha forte 123").unwrap());
@@ -3676,6 +3719,7 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("Solta.md")).unwrap(), "vai entrar");
         let on_disk: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
         assert!(on_disk.iter().all(|n| n.ends_with(".athena") || n == athena_lock::LOCK_FILE), "{on_disk:?}");
+        assert_eq!(locked_inside(&root), None, "aberta, pode sair");
         athena_lock::end_session(&dir);
         assert!(athena::list(&root).iter().all(|n| !n.path.starts_with("Senhas")));
         assert!(athena::attachments(&root).is_empty());
