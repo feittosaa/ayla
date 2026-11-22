@@ -317,6 +317,8 @@ pub fn run() {
             core::services::athena_open_folder,
             core::services::athena_trash_folder,
             core::services::media_open,
+            desktop::appearance_icon,
+            core::services::save_appearance,
             core::services::athena_move_file,
             core::services::iris_library,
             core::services::iris_trash_image,

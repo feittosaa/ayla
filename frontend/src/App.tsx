@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
+import AppearanceSettings from './components/AppearanceSettings';
+import BrandMark from './components/BrandMark';
+import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, useMode, useSystemIcon, type Appearance } from './services/Appearance';
 import { DesktopSettings } from './components/DesktopIntegration';
 import { quickStyle, useDesktopView } from './services/DesktopView';
 import Space from './components/Space';
@@ -13,7 +16,7 @@ import Iris from './components/Iris';
 import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
 import { useOrgan } from './services/Organ';
-import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, IrisIcon, SettingsIcon } from './components/Icons';
+import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
@@ -24,7 +27,7 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
   { id: 'maximum', title: 'Máximo', percent: 75, text: 'Até 75% da memória. Prioriza capacidade.' },
 ];
 const sections = [
-  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
+  { id: 'desktop', label: 'Integração com o sistema' }, { id: 'aparencia', label: 'Aparência' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
   { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
@@ -48,6 +51,17 @@ export default function App() {
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
   const { view, markShown } = useDesktopView(onQuick, setDesktopError);
   const panelReady = Boolean((snapshot && draft) || error);
+  // Aparência: a salva nas preferências, ou a prévia enquanto a pessoa ajusta em Configurações.
+  const [preview, setPreview] = useState<Appearance | null>(null);
+  const savedLook = snapshot?.preferences.appearance ?? DEFAULT_APPEARANCE;
+  const look = preview ?? savedLook;
+  // A prévia sai quando o valor salvo alcança o que está na tela.
+  useEffect(() => {
+    if (preview && (Object.keys(preview) as (keyof Appearance)[]).every(k => preview[k] === savedLook[k])) setPreview(null);
+  }, [preview, savedLook]);
+  const mode = useMode(look);
+  useLayoutEffect(() => applyAppearance(look, mode), [look, mode]);
+  useSystemIcon(savedLook, useMode(savedLook), Boolean(snapshot));
   useLayoutEffect(() => {
     const generation = view.pending;
     if (panelReady && view.quick && generation != null) {
@@ -125,15 +139,15 @@ export default function App() {
   const profile = draft.profile || snapshot.recommended_profile || 'moderate';
   const transcriber = snapshot.models.some(m => supports(m, 'transcription'));
 
-  return <div className={view.quick ? 'app-shell quick-view' : 'app-shell'} style={view.quick ? quickStyle(view.theme, prefs.desktop) : undefined}>
+  return <AppearanceContext.Provider value={look}><div className={view.quick ? 'app-shell quick-view' : 'app-shell'} style={view.quick ? quickStyle(view.theme, prefs.desktop) : undefined}>
     {view.quick && <div className="quick-toolbar"><span>Visão rápida</span><button type="button" className="icon-button quick-expand" title="Abrir janela da Ayla" aria-label="Abrir janela da Ayla" onClick={() => desktopAction('open')}><ExpandIcon size={18} /></button></div>}
     {desktopError && <div className="desktop-error" role="alert">{desktopError} <button onClick={()=>setDesktopError('')}>Fechar</button></div>}
     <nav className="rail" aria-label="Espaços">
-      <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
+      <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><BrandMark name="ayla" size={24} /></button>
       {/* Athena: parte da própria Ayla (notas). */}
-      <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BookIcon size={22} /></button>
+      <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BrandMark name="athena" size={26} /></button>
       {/* Iris: imagens, vídeos e PDFs de toda a Ayla (Athena, chat e imagens geradas). */}
-      <button className="rail-item" aria-label="Iris" title="Iris · imagens, vídeos e PDFs" aria-current={space === 'iris' ? 'page' : undefined} onClick={() => openSpace('iris')}><IrisIcon size={22} /></button>
+      <button className="rail-item" aria-label="Iris" title="Iris · imagens, vídeos e PDFs" aria-current={space === 'iris' ? 'page' : undefined} onClick={() => openSpace('iris')}><BrandMark name="iris" size={24} /></button>
       {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
       <div className="rail-projects">
         {organ.status && <>
@@ -206,6 +220,7 @@ export default function App() {
             </section>
 
             <DesktopSettings value={prefs.desktop} saving={saving} save={desktop => void quickSave({desktop})} run={desktopAction} />
+            <AppearanceSettings saved={prefs.appearance} onPreview={setPreview} onSaved={() => void refresh()} />
             <section id="microfone" className="settings-group" aria-labelledby="mic-title"><h2 id="mic-title">Microfone</h2>
               <div className="group-card">
                 <label className="group-row">
@@ -321,5 +336,5 @@ export default function App() {
         <div className="row-actions"><button className="primary-action" disabled={!projectName.trim()}>Criar projeto</button><button type="button" className="ghost-button" onClick={closeNewProject}>Cancelar</button></div>
       </form>
     </div>}
-  </div>;
+  </div></AppearanceContext.Provider>;
 }

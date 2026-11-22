@@ -5,6 +5,7 @@ import MemoryPanel from './MemoryPanel';
 import AppVersion from './AppVersion';
 import { native, errorText, fileLabels, formatBytes, type Conversation, type FileInfo, type Project, type Snapshot } from '../services/Desktop';
 import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
+import BrandMark from './BrandMark';
 
 type View = 'chat' | 'overview' | 'memory' | 'files';
 type Slot = { key: string; conversation: Conversation | null; busy: boolean };
@@ -132,7 +133,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
       {project && onBack && <button className="ghost-button back-to-ayla" onClick={onBack}><ChevronLeftIcon size={16} />Ayla</button>}
       <div className="brand">
-        {project ? <ProjectAvatar project={project} size={28} /> : <span className="orb" aria-hidden="true" />}
+        {project ? <ProjectAvatar project={project} size={28} /> : <BrandMark name="ayla" size={24} />}
         <span className="brand-name" title={project?.name}>{project ? project.name : 'Ayla'}</span>
         <button className="icon-button" aria-label="Recolher a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon /></button>
       </div>

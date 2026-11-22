@@ -570,6 +570,16 @@ pub fn save_preferences(
             "Não foi possível salvar: verifique os limites e a URL HTTPS do provedor".into()
         })
 }
+/// Guarda só a aparência (salva enquanto a pessoa ajusta cores e controles), sem sobrescrever
+/// outras preferências salvas no meio-tempo.
+#[tauri::command]
+pub fn save_appearance(state: tauri::State<'_, Core>, appearance: super::preferences::Appearance) -> Result<(), String> {
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler as configurações")?;
+    if prefs.appearance == appearance { return Ok(()); }
+    prefs.appearance = appearance;
+    store.save(&prefs).map_err(|_| "Aparência fora dos limites suportados".into())
+}
 /// Guarda só o modo de resposta, sem sobrescrever outras preferências salvas no meio-tempo.
 #[tauri::command]
 pub fn set_response_source(state: tauri::State<'_, Core>, source: String) -> Result<(), String> {

@@ -27,6 +27,58 @@ fn xdg(var: &str, relative: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(relative))
 }
 
+/// Ícone da Ayla no menu de aplicativos (o mesmo caminho que o instalador usa). `None` num
+/// perfil separado (`AYLA_DATA_DIR`), para testes não trocarem o ícone real do usuário.
+pub fn menu_icon_path() -> Option<PathBuf> {
+    if std::env::var_os("AYLA_DATA_DIR").is_some() {
+        return None;
+    }
+    Some(xdg("XDG_DATA_HOME", ".local/share").join("icons/hicolor/512x512/apps/dev.feit.ayla.png"))
+}
+
+/// Valida o PNG do ícone (base64, até 2 MB, 512×512) e devolve os bytes e os pixels RGBA.
+fn decode_icon(png: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    use base64::Engine;
+    use gdk_pixbuf::prelude::PixbufLoaderExt;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(png).map_err(|_| "Ícone inválido")?;
+    if bytes.len() > 2 << 20 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("Ícone inválido".into());
+    }
+    let loader = gdk_pixbuf::PixbufLoader::with_type("png").map_err(|_| "Ícone inválido")?;
+    loader.write(&bytes).and_then(|()| loader.close()).map_err(|_| "Ícone inválido")?;
+    let pixbuf = loader.pixbuf().ok_or("Ícone inválido")?.add_alpha(false, 0, 0, 0).map_err(|_| "Ícone inválido")?;
+    if pixbuf.width() != ICON_SIDE || pixbuf.height() != ICON_SIDE {
+        return Err("O ícone deve ter 512×512".into());
+    }
+    let (stride, side) = (pixbuf.rowstride() as usize, ICON_SIDE as usize);
+    let raw = pixbuf.read_pixel_bytes();
+    let rgba = (0..side).flat_map(|row| raw[row * stride..row * stride + side * 4].iter().copied()).collect();
+    Ok((bytes, rgba))
+}
+const ICON_SIDE: i32 = 512;
+
+/// Ícone escolhido em Aparência: PNG 512×512 desenhado pela interface. Vira o ícone da
+/// janela e do menu de aplicativos; só regrava o arquivo quando ele muda.
+#[tauri::command]
+pub fn appearance_icon(window: WebviewWindow, png: String) -> Result<(), String> {
+    let (bytes, rgba) = decode_icon(&png)?;
+    let side = ICON_SIDE as u32;
+    window.set_icon(tauri::image::Image::new_owned(rgba, side, side)).map_err(|_| "Não foi possível trocar o ícone da janela")?;
+    let Some(path) = menu_icon_path() else { return Ok(()) };
+    if fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+    let dir = path.parent().ok_or("Pasta de ícones indisponível")?;
+    fs::create_dir_all(dir).map_err(|_| "Não foi possível guardar o ícone")?;
+    let temporary = dir.join(".dev.feit.ayla.png.tmp");
+    fs::write(&temporary, &bytes).and_then(|()| fs::rename(&temporary, &path)).map_err(|_| "Não foi possível guardar o ícone")?;
+    // Avisa os menus de que o tema de ícones mudou (a pasta do tema é a referência de cache).
+    if let Some(theme) = dir.ancestors().nth(2) {
+        let _ = fs::File::open(theme).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    }
+    Ok(())
+}
+
 /// Pasta de dados da Ayla, a mesma que o Tauri usa (`app_data_dir`).
 pub fn data_root() -> PathBuf {
     std::env::var_os("AYLA_DATA_DIR").map(PathBuf::from)
@@ -461,5 +513,29 @@ mod tests {
             assert!(needs_tiling(&json!([&ayla, &other]), 42), "{key}");
             ayla[key] = previous;
         }
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    use base64::Engine;
+
+    fn png(side: i32) -> String {
+        let pixbuf = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, side, side).unwrap();
+        pixbuf.fill(0xff9f43ff);
+        let bytes = pixbuf.save_to_bufferv("png", &[]).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn icone_da_aparencia_so_aceita_png_512() {
+        let (bytes, rgba) = decode_icon(&png(512)).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert_eq!(rgba.len(), 512 * 512 * 4);
+        assert_eq!(&rgba[..4], &[0xff, 0x9f, 0x43, 0xff]);
+        assert!(decode_icon(&png(256)).is_err(), "tamanho errado");
+        assert!(decode_icon("não é base64").is_err());
+        assert!(decode_icon(&base64::engine::general_purpose::STANDARD.encode(b"GIF89a....")).is_err());
     }
 }

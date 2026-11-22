@@ -9,10 +9,17 @@
   --ayla-control: #1c1e22;
   --ayla-hover: #24262b;
   --ayla-selected: #24262b;
+  --ayla-selected-strong: #2b2e34;
+  --ayla-hover-strong: #2d3036;
+  --ayla-rail: #0d0e10;
+  --ayla-code: #0c0d0f;
+  /* Fundo da janela (translúcido com a transparência de Aparência) */
+  --ayla-window: var(--ayla-bg);
 
   /* Bordas */
   --ayla-border: #2b2e34;
   --ayla-border-soft: #24262b;
+  --ayla-border-strong: #3a3e46;
 
   /* Texto (contraste ≥ 4,5:1 sobre todas as superfícies) */
   --ayla-text: #ececee;
@@ -26,6 +33,9 @@
   --ayla-accent-ring: #2a2118;
   --ayla-on-accent: #1d1206;
   --ayla-error: #ffb4a2;
+
+  /* Escala das quinas (Aparência): 0 = retas, 1 = padrão, 1,5 = arredondadas */
+  --ayla-round: 1;
 
   /* Fontes do sistema: Adwaita/Cantarell no GNOME, Segoe UI no Windows */
   --ayla-font-main: system-ui, -apple-system, 'Segoe UI', Cantarell, 'Noto Sans', Ubuntu, sans-serif;

@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } 
 import { listen } from '@tauri-apps/api/event';
 import MediaView from './MediaView';
 import { preloadPdf } from '../services/PdfJs';
-import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, ExpandIcon, FileIcon, IrisIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, ExpandIcon, FileIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { mediaUrl, openInSystem, type MediaRef } from '../services/Media';
+import BrandMark from './BrandMark';
 
 type Kind = 'image' | 'video' | 'pdf';
 type Source = 'athena' | 'chat' | 'gerada' | 'arquivos' | 'computer';
@@ -314,7 +315,7 @@ export default function Iris({ active }: { active: boolean }) {
   // superior com os tipos de arquivo no lugar das abas.
   return <div className="chat-layout iris">
     {sidebar && <aside className="sidebar organ-sidebar iris-sidebar" aria-label="Filtros da Iris">
-      <div className="brand"><IrisIcon size={22} /><span className="brand-name">Iris</span><button className="icon-button organ-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
+      <div className="brand"><BrandMark name="iris" size={22} /><span className="brand-name">Iris</span><button className="icon-button organ-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
       <input className="organ-search" type="search" value={query} placeholder="Buscar pelo nome ou lugar" aria-label="Buscar arquivos" onChange={e => { setQuery(e.target.value); setShown(PAGE); }} />
       <div className="iris-sources" role="group" aria-label="Origem">
         <p className="sidebar-label">Origem</p>

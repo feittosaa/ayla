@@ -3,7 +3,8 @@ import { errorText, native } from '../services/Desktop';
 import { monetaPage, type OrganStatus } from '../services/Organ';
 
 export function OrganIcon({ status, size = 26 }: { status: OrganStatus; size?: number }) {
-  return status.icon ? <img src={status.icon} width={size} height={size} alt="" /> : <span className="avatar" style={{ width: size, height: size, background: '#d8b45a' }}>{status.name.slice(0, 1)}</span>;
+  // Logo monocromático (SVG) na cor do texto, como as marcas da Ayla, Athena e Iris.
+  return status.icon ? <span className="brand-mark" aria-hidden="true" style={{ width: size, height: size, WebkitMaskImage: `url("${status.icon}")`, maskImage: `url("${status.icon}")` }} /> : <span className="avatar" style={{ width: size, height: size, background: '#d8b45a' }}>{status.name.slice(0, 1)}</span>;
 }
 
 /** Espaço do órgão: inicia o contêiner da Moneta e a mostra na mesma tela da Ayla. */

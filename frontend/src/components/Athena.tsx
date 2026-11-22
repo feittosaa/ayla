@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { BookIcon, ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
 import { VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
+import BrandMark from './BrandMark';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[] };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
@@ -582,7 +583,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   return <div className={['chat-layout athena', drag ? 'dragging' : '', resizing ? 'resizing' : ''].join(' ')} onClickCapture={e => { if (swallow.current) { e.stopPropagation(); e.preventDefault(); } }}>
     {drag && <div className="drag-ghost" style={{ left: drag.x + 14, top: drag.y + 10 }}>{drag.item.kind === 'folder' ? '📁 ' : ''}{drag.item.label}{drag.drop?.kind === 'folder' && <small> → {drag.drop.path ? drag.drop.path.slice(drag.drop.path.lastIndexOf('/') + 1) : rootOf(drag.drop.root)?.name}</small>}</div>}
     {sidebar && <aside className="sidebar organ-sidebar athena-sidebar" aria-label="Notas da Athena" style={{ flexBasis: layout.left, width: layout.left }}>
-      <div className="brand"><BookIcon size={22} /><span className="brand-name">Athena</span><button className="icon-button organ-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
+      <div className="brand"><BrandMark name="athena" size={26} /><span className="brand-name">Athena</span><button className="icon-button organ-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
       <div className="athena-actions">
         <button className="new-chat" onClick={() => void addVault()}><PlusIcon size={18} />Abrir cofre</button>
         <button className="ghost-button" title={`Nota de hoje em ${rootOf(focus)?.name ?? 'Athena'}`} onClick={() => void today()}>Hoje</button>
