@@ -9,10 +9,11 @@ import CloudSettings from './components/CloudSettings';
 import Reminders from './components/Reminders';
 import Confirm from './components/Confirm';
 import Athena from './components/Athena';
+import Iris from './components/Iris';
 import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
 import { useOrgan } from './services/Organ';
-import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
+import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, IrisIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
 
@@ -28,7 +29,7 @@ const sections = [
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
-type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena';
+type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena' | 'iris';
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -41,7 +42,7 @@ export default function App() {
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const [desktopError, setDesktopError] = useState('');
-  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
+  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [irisVisited, setIrisVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
   const organInstalled = Boolean(organ.status?.installed);
   useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
@@ -78,6 +79,7 @@ export default function App() {
     setSpace(id); setNotice(''); setError('');
     if (id === 'moneta') setOrganVisited(true);
     if (id === 'athena') setAthenaVisited(true);
+    if (id === 'iris') setIrisVisited(true);
   }
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
@@ -130,6 +132,8 @@ export default function App() {
       <button className="rail-item" aria-label="Ayla" title="Ayla" aria-current={space === 'ayla' ? 'page' : undefined} onClick={() => openSpace('ayla')}><span className="orb" aria-hidden="true" /></button>
       {/* Athena: parte da própria Ayla (notas). */}
       <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BookIcon size={22} /></button>
+      {/* Iris: imagens, vídeos e PDFs de toda a Ayla (Athena, chat e imagens geradas). */}
+      <button className="rail-item" aria-label="Iris" title="Iris · imagens, vídeos e PDFs" aria-current={space === 'iris' ? 'page' : undefined} onClick={() => openSpace('iris')}><IrisIcon size={22} /></button>
       {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
       <div className="rail-projects">
         {organ.status && <>
@@ -156,6 +160,9 @@ export default function App() {
 
       {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
         <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} />
+      </div>}
+      {irisVisited && !view.quick && <div className="page" hidden={space !== 'iris'}>
+        <Iris active={space === 'iris'} />
       </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />

@@ -633,10 +633,8 @@ pub fn tags(text: &str) -> Vec<String> {
 
 pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "svg", "avif"];
 pub const MAX_ATTACHMENT: u64 = 15 * 1024 * 1024;
-/// PDFs aparecem na nota (![[arquivo.pdf]]) e abrem numa aba, até este tamanho.
-pub const MAX_PDF: u64 = 80 * 1024 * 1024;
 
-/// Tipo do anexo que a Athena mostra (imagens e PDF); outros arquivos não são servidos.
+/// Tipo do anexo que a Athena e a Iris mostram (imagens, vídeos e PDF); outros arquivos não são servidos.
 pub fn attachment_mime(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
     Some(match extension.as_str() {
@@ -648,6 +646,11 @@ pub fn attachment_mime(path: &Path) -> Option<&'static str> {
         "svg" => "image/svg+xml",
         "avif" => "image/avif",
         "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        "mkv" => "video/x-matroska",
         _ => return None,
     })
 }
@@ -862,6 +865,7 @@ mod tests {
         assert_eq!(attachment_mime(Path::new("a/Foto.JFIF")), Some("image/jpeg"));
         assert_eq!(attachment_mime(Path::new("livro.pdf")), Some("application/pdf"));
         assert_eq!(attachment_mime(Path::new("script.sh")), None);
+        assert_eq!(attachment_mime(Path::new("Sessão 1.MP4")), Some("video/mp4"));
         assert_eq!(percent_decode("Minha%20foto%C3%A9.png").as_deref(), Some("Minha fotoé.png"));
         assert_eq!(percent_decode("quebrado%2"), None);
         let _ = fs::remove_dir_all(&root);

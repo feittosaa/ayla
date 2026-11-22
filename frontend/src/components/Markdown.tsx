@@ -2,19 +2,22 @@ import { useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { native } from '../services/Desktop';
+import MediaView from './MediaView';
 import ZoomImage from './ZoomImage';
-import { PDF, TAG, WIKI, isAttachment, wikiToMarkdown } from '../services/Wiki';
+import { TAG, WIKI, isAttachment, wikiToMarkdown } from '../services/Wiki';
+import { mediaKind, mediaUrl, type MediaRef } from '../services/Media';
 
-/** Anexo de uma nota (imagem ou PDF), lido da pasta da nota pelo núcleo. */
-function Attachment({ target, alt, size, url, onOpen }: { target: string; alt: string; size?: string; url: string; onOpen?: (target: string) => void }) {
+/** Anexo de uma nota (imagem, vídeo ou PDF), pelo serviço de mídia comum à Iris. Imagens ficam
+ * no texto (com o tamanho de `![[x|300]]`); vídeo e PDF usam o leitor de mídia. */
+function Attachment({ target, alt, size, media, onOpen }: { target: string; alt: string; size?: string; media: MediaRef; onOpen?: (target: string) => void }) {
   const [failed, setFailed] = useState(false);
   if (failed) return <span className="md-image-alt">[anexo não encontrado: {alt || target}]</span>;
-  if (PDF.test(target)) return <span className="note-pdf">
-    <iframe src={url} title={alt || target} onError={() => setFailed(true)} />
-    {onOpen && <button type="button" className="link-button" onClick={() => onOpen(target)}>Abrir {target.slice(target.lastIndexOf('/') + 1)} numa aba</button>}
-  </span>;
+  const kind = mediaKind(target); const name = target.slice(target.lastIndexOf('/') + 1);
+  const open = onOpen && <button type="button" className="ghost-button" onClick={() => onOpen(target)}>Abrir numa aba</button>;
+  if (kind === 'video') return <span className="note-video"><MediaView media={media} name={name} kind="video" /></span>;
+  if (kind === 'pdf') return <span className="note-pdf"><span className="note-pdf-frame" aria-label={alt || target}><MediaView media={media} name={name} kind="pdf" actions={open} /></span></span>;
   const [width, height] = (size ?? '').split('x').map(Number);
-  return <ZoomImage className="note-image" src={url} alt={alt} width={width || undefined} height={height || undefined} onError={() => setFailed(true)} onClick={() => onOpen?.(target)} />;
+  return <ZoomImage className="note-image" src={mediaUrl(media)} alt={alt} width={width || undefined} height={height || undefined} onError={() => setFailed(true)} onClick={() => onOpen?.(target)} />;
 }
 
 type Props = {
@@ -23,14 +26,14 @@ type Props = {
   onNoteLink?: (target: string) => void;
   onTag?: (tag: string) => void;
   /** Endereço de um anexo (imagem ou PDF) da nota: só nas notas da Athena. */
-  attachmentUrl?: (target: string) => string;
+  media?: (target: string) => MediaRef;
   /** Abre um anexo numa aba (clique na imagem ou em [[arquivo.pdf]]). */
   onAttachment?: (target: string) => void;
 };
 
 /** Links da web abrem no navegador do sistema (só http/https). Imagens remotas nunca são carregadas
  * (evita rastreamento), só o texto alternativo; imagens anexadas às notas vêm da pasta da nota. */
-export default function Markdown({ text, onNoteLink, onTag, attachmentUrl, onAttachment }: Props) {
+export default function Markdown({ text, onNoteLink, onTag, media, onAttachment }: Props) {
   const relative = (src: string) => !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('//') && !src.startsWith('#');
   const components: Components = {
     a: ({ href, children }) => {
@@ -47,8 +50,8 @@ export default function Markdown({ text, onNoteLink, onTag, attachmentUrl, onAtt
     },
     img: ({ src, alt, title }) => {
       if (typeof src !== 'string') return null;
-      const target = src.startsWith(WIKI) ? decodeURIComponent(src.slice(WIKI.length)) : attachmentUrl && relative(src) ? decodeURIComponent(src.split('#')[0]) : null;
-      if (target && attachmentUrl) return <Attachment target={target} alt={alt || ''} size={title || undefined} url={attachmentUrl(target)} onOpen={onAttachment} />;
+      const target = src.startsWith(WIKI) ? decodeURIComponent(src.slice(WIKI.length)) : media && relative(src) ? decodeURIComponent(src.split('#')[0]) : null;
+      if (target && media) return <Attachment target={target} alt={alt || ''} size={title || undefined} media={media(target)} onOpen={onAttachment} />;
       return alt ? <span className="md-image-alt">[imagem: {alt}]</span> : null;
     },
   };

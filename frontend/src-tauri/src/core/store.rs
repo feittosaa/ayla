@@ -470,6 +470,20 @@ impl Store {
     pub fn conversation_files(&self, conversation: &str) -> rusqlite::Result<Vec<FileInfo>> {
         self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE conversation_id=?1 AND message_id IS NOT NULL ORDER BY message_id DESC, rowid"))?.query_map([conversation], Self::file_row)?.collect()
     }
+    /// Iris: imagens, GIFs, vídeos e PDFs guardados (anexos enviados, imagens geradas pelo chat
+    /// e arquivos adicionados direto), com a origem: quem enviou, a conversa e o projeto.
+    /// Anexos ainda na caixa de mensagem (não enviados) ficam de fora.
+    pub fn media_files(&self) -> rusqlite::Result<Vec<(FileInfo, Option<String>, Option<String>, Option<String>)>> {
+        let columns = FILE_COLUMNS.split(',').map(|c| format!("f.{c}")).collect::<Vec<_>>().join(",");
+        self.conn
+            .prepare(&format!("SELECT {columns}, m.role, c.title, p.name FROM files f
+                LEFT JOIN messages m ON m.id=f.message_id LEFT JOIN conversations c ON c.id=f.conversation_id
+                LEFT JOIN projects p ON p.id=f.project_id
+                WHERE f.kind IN ('image','gif','video','pdf') AND (f.message_id IS NOT NULL OR f.kept=1)
+                ORDER BY f.created_at DESC, f.rowid DESC"))?
+            .query_map([], |r| Ok((Self::file_row(r)?, r.get(10)?, r.get(11)?, r.get(12)?)))?
+            .collect()
+    }
     /// Arquivos de um projeto (ou gerais), enviados ou adicionados direto em Arquivos.
     pub fn project_files(&self, project: Option<&str>) -> rusqlite::Result<Vec<FileInfo>> {
         self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE project_id IS ?1 AND kept=1 ORDER BY created_at DESC, rowid DESC"))?.query_map([project], Self::file_row)?.collect()
@@ -998,7 +1012,8 @@ mod tests {
         assert_eq!(db.note_chunks_by_ids(&ids).unwrap()[0].1, "Corrida no sábado.");
         db.forget_note("/notas/Treino.md").unwrap();
         assert!(db.note_chunks_by_ids(&ids).unwrap().is_empty() && db.note_vectors("emb", "/notas/").unwrap().is_empty());
-        let _ = std::fs::remove_file(&path);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
     #[test]
     fn lembretes_vencem_reagendam_e_saem() {
@@ -1012,7 +1027,8 @@ mod tests {
         assert!(db.delete_reminder(&soon.id).unwrap());
         assert!(db.reminders(Some(5_000)).unwrap().is_empty());
         assert_eq!(db.reminders(None).unwrap()[0].due, 90_000);
-        let _ = std::fs::remove_file(&path);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
     #[test]
     fn iris_indexa_busca_no_escopo_e_apaga_com_o_arquivo() {
@@ -1040,7 +1056,8 @@ mod tests {
         db.delete_file("a").unwrap();
         assert!(db.chunks_by_ids(&hits).unwrap().is_empty());
         assert!(db.search_chunks("\"prazo\"", &only_a, 5).unwrap().is_empty() && !db.indexed("a").unwrap());
-        let _ = std::fs::remove_file(&path);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
     #[test]
     fn cloud_origin_survives_reopening_and_old_turns_remain_unlabelled() {

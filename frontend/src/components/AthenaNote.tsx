@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from './Markdown';
-import ZoomImage from './ZoomImage';
+import MediaView from './MediaView';
 import { errorText, native } from '../services/Desktop';
-import { PDF, attachmentUrl, folderOf, frontmatter, titleOf } from '../services/Wiki';
+import { attachmentUrl, folderOf, frontmatter, titleOf } from '../services/Wiki';
 
 export type Note = { path: string; title: string; modified: number; bytes: number };
 export type Tab = { root: string; path: string; pinned: boolean; editing: boolean };
@@ -16,13 +16,9 @@ function Banner({ url, y }: { url: string; y: number }) {
   return <div className="note-banner" role="img" aria-label="Banner da nota"><img src={url} alt="" style={{ objectPosition: `center ${y}%` }} onError={() => setFailed(true)} /></div>;
 }
 
-/** Anexo aberto numa aba (imagem ou PDF), com opção de abrir no aplicativo do sistema. */
+/** Anexo aberto numa aba (imagem, vídeo ou PDF), no leitor de mídia comum à Iris. */
 export function AttachmentView({ root, target, onError }: { root: string; target: string; onError: (text: string) => void }) {
-  const url = attachmentUrl(root, target);
-  return <div className="note-scroll attachment-view">
-    <div className="attachment-bar"><b>{target.slice(target.lastIndexOf('/') + 1)}</b><button className="ghost-button" onClick={() => void native('athena_open_attachment', { root, target }).catch(e => onError(errorText(e)))}>Abrir no visualizador do sistema</button></div>
-    {PDF.test(target) ? <iframe className="attachment-pdf" src={url} title={target} /> : <div className="attachment-image"><ZoomImage src={url} alt={target} /></div>}
-  </div>;
+  return <div className="attachment-view"><MediaView media={{ root, path: target }} name={target.slice(target.lastIndexOf('/') + 1)} bar onError={onError} /></div>;
 }
 
 type Props = {
@@ -37,6 +33,9 @@ type Props = {
   /** Abre um anexo (imagem ou PDF) numa aba. */
   onAttachment: (target: string) => void;
   onRename: (name: string) => Promise<void>;
+  /** Nota recém-criada: abre com o título selecionado para digitar o nome (como no Obsidian). */
+  askTitle?: boolean;
+  onTitled?: () => void;
   onSaved: () => void;
   onTag: (tag: string) => void;
   onStatus: (text: string) => void;
@@ -51,7 +50,9 @@ export default function AthenaNote(props: Props) {
   const { tab, notes, revision } = props;
   const [content, setContent] = useState<string | null>(null); const [failed, setFailed] = useState('');
   const [backlinks, setBacklinks] = useState<{ path: string; title: string }[]>([]);
-  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(() => props.askTitle ? titleOf(props.tab.path) : null);
+  /** Evita gravar o nome duas vezes (Enter seguido do blur do campo). */
+  const renamingNow = useRef(false);
   const [suggest, setSuggest] = useState<{ query: string; start: number } | null>(null);
   const editor = useRef<HTMLTextAreaElement | null>(null);
   const stamp = useRef<number | null>(null); const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -127,6 +128,7 @@ export default function AthenaNote(props: Props) {
 
   const note = useMemo(() => frontmatter(content ?? ''), [content]);
   const fileUrl = useCallback((target: string) => attachmentUrl(tab.root, target), [tab.root]);
+  const fileMedia = useCallback((target: string) => ({ root: tab.root, path: target }), [tab.root]);
   useLayoutEffect(() => {
     const field = editor.current;
     if (!field || !tab.editing) return;
@@ -134,14 +136,22 @@ export default function AthenaNote(props: Props) {
   }, [content, tab.editing]);
 
   const title = titleOf(tab.path);
+  /** Título confirmado (Enter ou clique fora): renomeia o arquivo se mudou. */
+  function rename(value: string) {
+    if (renamingNow.current) { renamingNow.current = false; return; }
+    renamingNow.current = true;
+    const name = value.trim(); setRenaming(null); props.onTitled?.();
+    if (name && name !== title) void props.onRename(name);
+    setTimeout(() => { renamingNow.current = false; }, 0);
+  }
   if (failed) return <div className="note-scroll"><article className="note-page"><h1 className="note-title">{title}</h1><p role="alert" className="app-error">{failed}</p></article></div>;
   if (content === null) return <div className="note-scroll" aria-busy="true" />;
   return <div className="note-scroll" onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
     {note.banner && <Banner key={note.banner.target} url={fileUrl(note.banner.target)} y={note.banner.y} />}
     <article className="note-page">
       {renaming !== null
-        ? <form onSubmit={e => { e.preventDefault(); const name = renaming.trim(); setRenaming(null); if (name && name !== title) void props.onRename(name); }}><input className="athena-rename" autoFocus value={renaming} maxLength={120} aria-label="Novo nome da nota" onChange={e => setRenaming(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setRenaming(null); }} onBlur={() => setRenaming(null)} /></form>
-        : <h1 className="note-title" title="Clique para renomear" onClick={() => setRenaming(title)}>{title}</h1>}
+        ? <form onSubmit={e => { e.preventDefault(); rename(renaming); }}><input className="athena-rename" autoFocus value={renaming} maxLength={120} placeholder="Título" aria-label="Título da nota (também o nome do arquivo)" onFocus={e => e.target.select()} onChange={e => setRenaming(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { renamingNow.current = true; setRenaming(null); props.onTitled?.(); } }} onBlur={() => rename(renaming)} /></form>
+        : <h1 className="note-title" title="Clique para renomear" onClick={() => { renamingNow.current = false; setRenaming(title); }}>{title}</h1>}
       {tab.editing
         ? <div className="athena-edit">
             <div className="athena-toolbar" role="toolbar" aria-label="Formatação">
@@ -158,7 +168,7 @@ export default function AthenaNote(props: Props) {
                 return options.length ? <ul className="link-suggest" role="listbox" aria-label="Notas para o link">{options.map(n => <li key={n.path}><button type="button" onMouseDown={e => { e.preventDefault(); pick(n.title); }}>{n.title}<small>{folderOf(n.path)}</small></button></li>)}</ul> : null;
               })()}
             </div>
-            <textarea ref={editor} className="athena-editor" value={content} spellCheck aria-label="Conteúdo da nota" onChange={e => typed(e.target.value, e.target.selectionStart)} onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onKeyDown={e => { if (e.key === 'Escape') setSuggest(null); }} />
+            <textarea ref={editor} className="athena-editor" value={content} autoFocus={renaming === null && !content.trim()} placeholder="Comece a escrever…" spellCheck aria-label="Conteúdo da nota" onChange={e => typed(e.target.value, e.target.selectionStart)} onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onKeyDown={e => { if (e.key === 'Escape') setSuggest(null); }} />
           </div>
         : <>
             {note.properties.length > 0 && <dl className="note-properties" aria-label="Propriedades">
@@ -168,7 +178,7 @@ export default function AthenaNote(props: Props) {
                   : <span key={v} className="property-chip">{v}</span>)
                 : <span className="property-empty">vazio</span>}</dd></div>)}
             </dl>}
-            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} onTag={props.onTag} attachmentUrl={fileUrl} onAttachment={props.onAttachment} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
+            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} onTag={props.onTag} media={fileMedia} onAttachment={props.onAttachment} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
             {backlinks.length > 0 && <section className="athena-backlinks"><h2>Mencionada em</h2>{backlinks.map(b => <button key={b.path} className="link-button" onClick={() => props.onOpen(b.path)}>{b.title}</button>)}</section>}
           </>}
     </article>

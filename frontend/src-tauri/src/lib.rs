@@ -165,7 +165,23 @@ pub fn run() {
             let app = context.app_handle().clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let response = match app.try_state::<Core>() {
-                    Some(core) => core::services::athena_file(&core, request.uri().path()),
+                    Some(core) => core::services::athena_file(&core, &request),
+                    None => Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Vec::new()).unwrap_or_default(),
+                };
+                responder.respond(response);
+            });
+        })
+        // Iris: imagens, vídeos e PDFs guardados na Ayla (anexos do chat e imagens geradas).
+        .register_asynchronous_uri_scheme_protocol("iris-file", |context, request, responder| {
+            use tauri::http::{Response, StatusCode};
+            if context.webview_label() != "main" {
+                responder.respond(Response::builder().status(StatusCode::FORBIDDEN).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = match app.try_state::<Core>() {
+                    Some(core) => core::services::iris_file(&core, &request),
                     None => Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Vec::new()).unwrap_or_default(),
                 };
                 responder.respond(response);
@@ -300,8 +316,9 @@ pub fn run() {
             core::services::athena_search,
             core::services::athena_open_folder,
             core::services::athena_trash_folder,
-            core::services::athena_open_attachment,
+            core::services::media_open,
             core::services::athena_move_file,
+            core::services::iris_library,
             core::services::athena_open_obsidian,
             core::services::athena_git_status,
             core::services::athena_git_sync,

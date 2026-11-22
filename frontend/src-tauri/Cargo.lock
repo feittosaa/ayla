@@ -104,6 +104,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
+ "gdk-pixbuf",
  "getrandom 0.3.4",
  "hound",
  "kamadak-exif",

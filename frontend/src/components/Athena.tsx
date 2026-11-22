@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { BookIcon, ChevronRightIcon, FileIcon, ImageIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { BookIcon, ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
-import { folderOf, isAttachment, titleOf } from '../services/Wiki';
+import { preloadPdf } from '../services/PdfJs';
+import { VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[] };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
@@ -97,11 +98,16 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   const [tree, setTree] = useState<Tree | null>(null); const [expanded, setExpanded] = useState<string[]>(['ayla|']);
   const [query, setQuery] = useState(''); const [hits, setHits] = useState<Hit[] | null>(null);
   const [error, setError] = useState(''); const [adding, setAdding] = useState<Adding | null>(null); const [name, setName] = useState('');
+  useEffect(() => { if (active) preloadPdf(); }, [active]);
+  /** Nota recém-criada que abre pedindo o título. */
+  const [fresh, setFresh] = useState<string | null>(null);
   const [folderEdit, setFolderEdit] = useState<{ root: string; path: string; name: string } | null>(null);
   const [tags, setTags] = useState<TagEntry[]>([]); const [tag, setTag] = useState<string | null>(null); const [showTags, setShowTags] = useState(false);
   const [focus, setFocus] = useState('ayla'); const [sidebar, setSidebar] = useState(true);
   const [workspace, setWorkspace] = useState<Workspace>(restore);
   const [statuses, setStatuses] = useState(['', '']); const [confirming, setConfirming] = useState<number | null>(null);
+  /** Nota a apagar pela lixeira da barra lateral, à espera da confirmação no modal. */
+  const [trashing, setTrashing] = useState<{ root: string; path: string; title: string } | null>(null);
   const [revision, setRevision] = useState(0); const [saved, setSaved] = useState(0);
   const [git, setGit] = useState<GitInfo | null>(null); const [syncing, setSyncing] = useState(false);
   const flushers = useRef<((() => Promise<void>) | null)[]>([null, null]);
@@ -245,14 +251,25 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   const onSaved = useCallback(() => { load(); loadTags(); setSaved(n => n + 1); }, [load, loadTags]);
   async function flushAll() { await Promise.all(flushers.current.map(f => f?.())); }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
+  /** Nova pasta: cria com o nome digitado; ao clicar fora sem nome, desiste. */
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
     if (!adding) return;
-    const { root, folder, kind } = adding; setError('');
+    const { root, folder } = adding; setError('');
+    setAdding(null); setName('');
+    if (!event && !name.trim()) return;
     try {
-      if (kind === 'folder') { const made = await native<string>('athena_mkdir', { root, parent: folder, name: name || 'Nova pasta' }); setExpanded(prev => [...prev, `${root}|${made}`, `${root}|${folder}`]); load(); }
-      else { const made = await native<string>('athena_create', { root, folder, title: name || 'Nova nota' }); load(); open(root, made, { edit: true }); }
-      setAdding(null); setName('');
+      const made = await native<string>('athena_mkdir', { root, parent: folder, name: name.trim() || 'Nova pasta' });
+      setExpanded(prev => [...prev, `${root}|${made}`, `${root}|${folder}`]); load();
+    } catch (e) { setError(errorText(e)); }
+  }
+  /** Nova nota como no Obsidian: criada na hora como "Nova nota" e aberta pedindo o título,
+   * que vira o nome do arquivo. */
+  async function newNote(root: string, folder: string) {
+    setError('');
+    try {
+      const made = await native<string>('athena_create', { root, folder, title: 'Nova nota', empty: true });
+      load(); setFresh(`${root}|${made}`); open(root, made, { edit: true });
     } catch (e) { setError(errorText(e)); }
   }
   async function today() {
@@ -261,12 +278,15 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   }
   async function remove(index: number) {
     const tab = panes[index]?.tabs[panes[index].active];
-    if (!tab) return;
+    if (tab) await trashNote(tab.root, tab.path, index);
+  }
+  /** Manda a nota para a lixeira (.trash) da raiz, gravando antes o que estiver pendente. */
+  async function trashNote(root: string, path: string, pane?: number) {
     try {
-      await flushers.current[index]?.();
-      await native('athena_trash', { root: tab.root, path: tab.path });
-      setConfirming(null); drop(t => same(t, tab.root, tab.path)); load(); loadTags();
-    } catch (e) { setError(errorText(e)); }
+      if (pane === undefined) await flushAll(); else await flushers.current[pane]?.();
+      await native('athena_trash', { root, path });
+      setConfirming(null); setTrashing(null); drop(t => same(t, root, path)); load(); loadTags();
+    } catch (e) { setTrashing(null); setError(errorText(e)); }
   }
   async function addVault(path?: string) {
     setError('');
@@ -401,7 +421,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   function addForm(root: string, folder: string, depth: number) {
     if (!adding || adding.root !== root || adding.folder !== folder) return null;
     return <form className="tree-add" style={{ paddingLeft: 12 + depth * 14 }} onSubmit={e => void submit(e)}>
-      <input autoFocus value={name} maxLength={120} placeholder={adding.kind === 'folder' ? 'Nome da pasta' : 'Título da nota'} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { setAdding(null); setName(''); } }} />
+      <input autoFocus value={name} maxLength={120} placeholder="Nome da pasta" onChange={e => setName(e.target.value)} onBlur={() => void submit()} onKeyDown={e => { if (e.key === 'Escape') { setAdding(null); setName(''); } }} />
     </form>;
   }
   async function removeFolder(root: string, folder: string) {
@@ -415,7 +435,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   function tools(root: string, folder: string): ReactNode {
     const start = (kind: Adding['kind']) => (e: { stopPropagation: () => void }) => { e.stopPropagation(); setFocus(root); setAdding({ root, folder, kind }); setName(''); setExpanded(prev => [...new Set([...prev, `${root}|${folder}`])]); };
     return <span className="tree-tools">
-      <button className="icon-button tiny" title="Nova nota aqui" aria-label="Nova nota aqui" onClick={start('note')}><PlusIcon size={14} /></button>
+      <button className="icon-button tiny" title="Nova nota aqui" aria-label="Nova nota aqui" onClick={e => { e.stopPropagation(); setFocus(root); setExpanded(prev => [...new Set([...prev, `${root}|${folder}`])]); void newNote(root, folder); }}><PlusIcon size={14} /></button>
       <button className="icon-button tiny" title="Nova pasta aqui" aria-label="Nova pasta aqui" onClick={start('folder')}>⊞</button>
       {folder && <Confirm className="icon-button tiny" title="Apagar a pasta (vai para a lixeira do cofre)" ariaLabel={`Apagar a pasta ${folder}`} question={`Apagar a pasta "${folder.slice(folder.lastIndexOf('/') + 1)}" e tudo o que tem dentro? Ela vai para a lixeira (.trash) da raiz.`} confirm="Apagar" onConfirm={() => void removeFolder(root, folder)}><TrashIcon size={13} /></Confirm>}
       {folder && <button className="icon-button tiny" title="Renomear ou mover a pasta" aria-label="Renomear ou mover a pasta" onClick={e => { e.stopPropagation(); setFolderEdit({ root, path: folder, name: folder.slice(folder.lastIndexOf('/') + 1) }); }}>✎</button>}
@@ -438,10 +458,11 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
         {folder.folders.map(child => folderNode(root, child, inner))}
         {[...folder.notes.map(n => ({ ...n, file: false })), ...folder.files.map(f => ({ ...f, file: true }))].sort((a, b) => a.title.localeCompare(b.title, 'pt-BR')).map(item => item.file
           ? <div key={item.path} role="treeitem" className="tree-row note file" aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nClique para abrir; arraste para uma pasta para mover`} onPointerDown={startDrag({ kind: 'file', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
-              <span className="tree-file-icon">{/\.pdf$/i.test(item.path) ? <FileIcon size={13} /> : <ImageIcon size={13} />}</span><span className="tree-name">{item.title.replace(/\.[^.]+$/, '')}</span><small>{item.title.slice(item.title.lastIndexOf('.') + 1).toUpperCase()}</small>
+              <span className="tree-file-icon">{/\.pdf$/i.test(item.path) ? <FileIcon size={13} /> : VIDEO.test(item.path) ? <VideoIcon size={13} /> : <ImageIcon size={13} />}</span><span className="tree-name">{item.title.replace(/\.[^.]+$/, '')}</span><small>{item.title.slice(item.title.lastIndexOf('.') + 1).toUpperCase()}</small>
             </div>
           : <div key={item.path} role="treeitem" className="tree-row note" aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nCtrl+clique ou botão do meio: abrir em nova aba. Arraste para uma pasta (mover) ou para a tela (abrir ao lado)`} onPointerDown={startDrag({ kind: 'note', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
           <span className="tree-name">{item.title}</span>
+          <button className="icon-button tiny tree-trash" title="Apagar nota" aria-label={`Apagar a nota ${item.title}`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setTrashing({ root: root.id, path: item.path, title: item.title }); }}><TrashIcon size={13} /></button>
         </div>)}
       </>}
     </div>;
@@ -469,7 +490,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     const zone = drag?.drop?.kind === 'pane' && drag.drop.pane === index ? drag.drop.side : null;
     return <section key={index} data-drop="pane" data-pane={index} className={panes.length > 1 && index === focused ? 'note-pane focused' : 'note-pane'} onMouseDownCapture={() => { if (index !== focused) { setWorkspace(ws => ({ ...ws, focused: index })); if (tab) setFocus(tab.root); } }} aria-label={panes.length > 1 ? (index ? 'Tela da direita' : 'Tela da esquerda') : 'Nota'}>
       {zone && <div className={`drop-zone ${zone}`} aria-hidden="true"><span>{zone === 'center' ? 'Abrir nesta tela' : 'Abrir ao lado'}</span></div>}
-      <header className="note-tabs">
+      <header className="note-tabs organ-bar">
         {index === 0 && !sidebar && <button className="icon-button" data-tip="Mostrar a barra lateral" aria-label="Mostrar a barra lateral" onClick={() => setSidebar(true)}><SidebarIcon size={18} /></button>}
         <div className="tab-strip" role="tablist" aria-label="Notas abertas">
           {pane.tabs.map((t, k) => <div key={`${t.root}|${t.path}`} role="tab" aria-selected={k === pane.active} className={['note-tab', k === pane.active ? 'active' : '', t.pinned ? 'pinned' : ''].join(' ')} title={`${rootOf(t.root)?.name ?? ''} / ${t.path}`} onPointerDown={startDrag({ kind: isAttachment(t.path) ? 'file' : 'note', root: t.root, path: t.path, label: titleOf(t.path), tab: { pane: index, at: k } })} onClick={() => activate(index, k)} onAuxClick={e => { if (e.button === 1 && !t.pinned) closeTab(index, k); }} onDoubleClick={() => setTab(index, k, { pinned: !t.pinned })}>
@@ -502,6 +523,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
             onOpen={path => open(tab.root, path)}
             onAttachment={target => open(tab.root, target, { newTab: true })}
             onRename={name => moveNote(index, tab, `${folderOf(tab.path) ? `${folderOf(tab.path)}/` : ''}${name}`)}
+            askTitle={fresh === `${tab.root}|${tab.path}`} onTitled={() => setFresh(null)}
             onSaved={onSaved} onTag={showTag}
             onStatus={text => setStatuses(prev => prev[index] === text ? prev : prev.map((s, k) => k === index ? text : s))}
             onError={setError}
@@ -559,8 +581,8 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   const sections: Root['kind'][] = ['ayla', 'vault', 'project'];
   return <div className={['chat-layout athena', drag ? 'dragging' : '', resizing ? 'resizing' : ''].join(' ')} onClickCapture={e => { if (swallow.current) { e.stopPropagation(); e.preventDefault(); } }}>
     {drag && <div className="drag-ghost" style={{ left: drag.x + 14, top: drag.y + 10 }}>{drag.item.kind === 'folder' ? '📁 ' : ''}{drag.item.label}{drag.drop?.kind === 'folder' && <small> → {drag.drop.path ? drag.drop.path.slice(drag.drop.path.lastIndexOf('/') + 1) : rootOf(drag.drop.root)?.name}</small>}</div>}
-    {sidebar && <aside className="sidebar athena-sidebar" aria-label="Notas da Athena" style={{ flexBasis: layout.left, width: layout.left }}>
-      <div className="brand"><BookIcon size={22} /><span className="brand-name">Athena</span><button className="icon-button athena-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
+    {sidebar && <aside className="sidebar organ-sidebar athena-sidebar" aria-label="Notas da Athena" style={{ flexBasis: layout.left, width: layout.left }}>
+      <div className="brand"><BookIcon size={22} /><span className="brand-name">Athena</span><button className="icon-button organ-hide" data-tip="Esconder a barra lateral" aria-label="Esconder a barra lateral" onClick={() => setSidebar(false)}><SidebarIcon size={18} /></button></div>
       <div className="athena-actions">
         <button className="new-chat" onClick={() => void addVault()}><PlusIcon size={18} />Abrir cofre</button>
         <button className="ghost-button" title={`Nota de hoje em ${rootOf(focus)?.name ?? 'Athena'}`} onClick={() => void today()}>Hoje</button>
@@ -571,7 +593,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
         <button className="link-button" aria-expanded={showTags} onClick={() => setShowTags(v => !v)}>{showTags ? '▾' : '▸'} Tags ({tags.length})</button>
         {showTags && <div className="tag-list">{tags.map(t => <button key={t.tag} className={tag === t.tag ? 'tag-chip active' : 'tag-chip'} onClick={() => { setTag(tag === t.tag ? null : t.tag); setQuery(''); setHits(null); }}>#{t.tag} <small>{t.notes.length}</small></button>)}</div>}
       </div>}
-      <input className="athena-search" type="search" value={query} placeholder="Buscar em todas as notas" aria-label="Buscar nas notas" onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setHits(null); }} />
+      <input className="organ-search" type="search" value={query} placeholder="Buscar em todas as notas" aria-label="Buscar nas notas" onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setHits(null); }} />
       <nav className="athena-tree" role="tree" aria-label="Pastas e notas">
         {tag && !query.trim()
           ? <>
@@ -596,5 +618,15 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     </main>
     {workspace.panel && handle('right', 'Ajustar a largura do painel do Git')}
     {workspace.panel && gitPanel()}
+    {trashing && <div className="dialog-backdrop" onClick={() => setTrashing(null)}>
+      <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="athena-trash-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') setTrashing(null); }}>
+        <h2 id="athena-trash-title">Apagar “{trashing.title}”?</h2>
+        <p>A nota vai para a lixeira (.trash) de {rootOf(trashing.root)?.name ?? 'Athena'} e sai da lista. Dá para recuperá-la de lá depois.</p>
+        <div className="row-actions">
+          <button className="danger-action" onClick={() => void trashNote(trashing.root, trashing.path)}>Apagar</button>
+          <button className="ghost-button" autoFocus onClick={() => setTrashing(null)}>Cancelar</button>
+        </div>
+      </div>
+    </div>}
   </div>;
 }

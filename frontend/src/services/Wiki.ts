@@ -7,10 +7,14 @@ export const WIKI = 'athena-link:';
 export const TAG = 'athena-tag:';
 export const IMAGE = /\.(png|jpe?g|jfif|gif|webp|bmp|svg|avif)$/i;
 export const PDF = /\.pdf$/i;
-/** Anexos que a Athena mostra: imagens e PDF (o resto continua link). */
-export const isAttachment = (target: string) => IMAGE.test(target.split('#')[0].trim()) || PDF.test(target.split('#')[0].trim());
+export const VIDEO = /\.(mp4|m4v|webm|mov|ogv|mkv)$/i;
+/** Anexos que a Athena mostra: imagens, vídeos e PDF (o resto continua link). */
+export const isAttachment = (target: string) => { const clean = target.split('#')[0].trim(); return IMAGE.test(clean) || PDF.test(clean) || VIDEO.test(clean); };
+const windows = () => typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
+/** Endereço de um arquivo guardado na Ayla (anexo do chat ou imagem gerada), pelo id. */
+export const storedUrl = (id: string, thumb = false) => `${windows() ? 'http://iris-file.localhost/' : 'iris-file://localhost/'}${encodeURIComponent(id)}${thumb ? '?miniatura' : ''}`;
 /** Endereço de um anexo de uma raiz (servido pelo núcleo, lido da pasta da nota). */
-export const attachmentUrl = (root: string, target: string) => `${typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows') ? 'http://athena-file.localhost/' : 'athena-file://localhost/'}${encodeURIComponent(root)}/${encodeURIComponent(target)}`;
+export const attachmentUrl = (root: string, target: string, thumb = false) => `${windows() ? 'http://athena-file.localhost/' : 'athena-file://localhost/'}${encodeURIComponent(root)}/${encodeURIComponent(target)}${thumb ? '?miniatura' : ''}`;
 
 /** Sintaxe do Obsidian em Markdown comum: [[nota]], [[nota|apelido]], [[nota#seção]], ![[foto.png]]
  * e ![[foto.png|300]] (imagem, com largura), ![[livro.pdf]] (PDF na nota) e #tag. Código em bloco ou em linha fica como está. */

@@ -16,18 +16,9 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
   const [providers, setProviders] = useState<CloudProvider[] | null>(null);
   const [keys, setKeys] = useState<Record<string, string>>({}); const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState<{ id: string; request?: string } | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
-  const [models, setModels] = useState<{ id: string; name: string }[] | null>(null); const [loadingModels, setLoadingModels] = useState(false);
-  const [modelText, setModelText] = useState(prefs.cloud_model);
-  useEffect(() => { setModelText(prefs.cloud_model); }, [prefs.cloud_model]);
   const load = useCallback(() => native<CloudProvider[]>('cloud_providers').then(setProviders).catch(e => setError(errorText(e))), []);
   useEffect(() => { if (enabled) void load(); }, [enabled, load]);
   const current = providers?.find(p => p.id === prefs.cloud_provider);
-  const loadModels = useCallback(async (provider: string) => {
-    setModels(null); setLoadingModels(true);
-    try { setModels(await native<{ id: string; name: string }[]>('cloud_models', { provider })); }
-    catch (e) { setError(errorText(e)); setModels([]); } finally { setLoadingModels(false); }
-  }, []);
-  useEffect(() => { if (current?.connected) void loadModels(current.id); }, [current?.id, current?.connected, loadModels]);
   // Imagens: plataforma conectada que cria imagens e o modelo escolhido.
   const imageProviders = providers?.filter(p => p.images && p.connected) ?? [];
   const imageCurrent = providers?.find(p => p.id === prefs.image_provider && p.connected);
@@ -105,18 +96,9 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
         {providers && <label className="group-row check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />Guardar chaves no cofre do sistema (senão valem só até fechar a Ayla)</label>}
       </div>
 
-      {current?.connected && <>
-        <h2 className="subgroup-title">Modelo na nuvem</h2>
-        <div className="group-card">
-          <label className="group-row stacked">
-            <span className="row-hint">Usado quando a resposta vai para {current.name}.</span>
-            {models && models.length > 0
-              ? <select value={prefs.cloud_model} disabled={saving} onChange={e => void save({ cloud_model: e.target.value })}><option value="">Escolha um modelo</option>{!models.some(m => m.id === prefs.cloud_model) && prefs.cloud_model && <option value={prefs.cloud_model}>{prefs.cloud_model}</option>}{models.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
-              : <input value={modelText} placeholder={loadingModels ? 'Carregando modelos…' : 'Nome do modelo'} disabled={loadingModels} onChange={e => setModelText(e.target.value)} onBlur={() => { if (modelText.trim() !== prefs.cloud_model) void save({ cloud_model: modelText.trim() }); }} />}
-          </label>
-          {current.login === 'chat_gpt' && <div className="group-row"><span className="row-hint">Você está usando o seu plano do ChatGPT. <button className="link-button" onClick={() => link(USAGE)}>Gerenciar uso</button></span></div>}
-        </div>
-      </>}
+      {current?.connected && current.login === 'chat_gpt' && <div className="group-card">
+        <div className="group-row"><span className="row-hint">Você está usando o seu plano do ChatGPT. <button className="link-button" onClick={() => link(USAGE)}>Gerenciar uso</button></span></div>
+      </div>}
 
       {providers && <>
         <h2 className="subgroup-title">Imagens</h2>
