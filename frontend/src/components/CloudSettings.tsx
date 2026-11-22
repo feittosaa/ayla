@@ -56,10 +56,10 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
       const result = await native<{ account: string | null; warning: string | null }>('cloud_login', { provider: provider.id, requestId: request });
       setNotice(result.warning || (provider.login === 'chat_gpt' ? 'Você está usando o seu plano do ChatGPT: pedidos elegíveis usam o limite do plano (no Plus, o limite de 5 horas é compartilhado com outros apps).' : `${provider.name} conectado.`));
       await load();
-      if (!prefs.cloud_provider) await use(provider);
+      if (!prefs.cloud_provider) await choose(provider);
     } catch (e) { setError(errorText(e)); } finally { setBusy(null); }
   }
-  async function use(provider: CloudProvider) {
+  async function choose(provider: CloudProvider) {
     await save({ cloud_provider: provider.id, cloud_model: provider.id === prefs.cloud_provider ? prefs.cloud_model : (provider.default_model ?? '') }, `${provider.name} será usada nas respostas pela nuvem.`);
   }
 
@@ -89,13 +89,13 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
               <span className="row-text"><span className="row-title">{provider.name}{selected && <span className="badge">Em uso</span>}</span>
                 <span className="row-hint">{provider.connected ? (provider.account ? `Conectado como ${provider.account}` : 'Conectado') : provider.summary}</span></span>
               {provider.connected ? <span className="row-actions">
-                {!selected && <button disabled={saving || working} onClick={() => void use(provider)}>Usar</button>}
+                {!selected && <button disabled={saving || working} onClick={() => void choose(provider)}>Usar</button>}
                 <Confirm className="ghost-button" disabled={working} question={provider.login === 'key' ? `Remover a chave de ${provider.name} deste computador?` : `Sair da conta ${provider.name}? O acesso é revogado.`} confirm={provider.login === 'key' ? 'Remover' : 'Sair'} onConfirm={() => void act(provider.id, async () => { await native('cloud_disconnect', { provider: provider.id }); if (selected) await save({ cloud_provider: '', cloud_model: '' }); return `${provider.name} desconectado.`; })}>{provider.login === 'key' ? 'Remover chave' : 'Sair'}</Confirm>
               </span> : provider.login !== 'key' && (working && busy?.request
                 ? <span className="row-actions"><span className="row-hint" role="status">Termine o login no navegador…</span><button className="ghost-button" onClick={() => void native('cancel_job', { requestId: busy.request })}>Cancelar</button></span>
                 : <button className={provider.login === 'chat_gpt' ? 'primary-action' : ''} disabled={!!busy} onClick={() => void login(provider)}>{provider.login === 'chat_gpt' ? 'Continuar com o ChatGPT' : 'Entrar com OpenRouter'}</button>)}
             </div>
-            {!provider.connected && provider.login === 'key' && <form className="key-form" onSubmit={e => { e.preventDefault(); const key = keys[provider.id] || ''; void act(provider.id, async () => { await native('cloud_connect', { provider: provider.id, key, remember }); setKeys(k => ({ ...k, [provider.id]: '' })); if (!prefs.cloud_provider) await use({ ...provider, connected: true }); return `${provider.name} conectado.`; }); }}>
+            {!provider.connected && provider.login === 'key' && <form className="key-form" onSubmit={e => { e.preventDefault(); const key = keys[provider.id] || ''; void act(provider.id, async () => { await native('cloud_connect', { provider: provider.id, key, remember }); setKeys(k => ({ ...k, [provider.id]: '' })); if (!prefs.cloud_provider) await choose({ ...provider, connected: true }); return `${provider.name} conectado.`; }); }}>
               <input type="password" autoComplete="off" aria-label={`Chave de API da ${provider.name}`} placeholder="Cole a chave de API" value={keys[provider.id] || ''} onChange={e => setKeys(k => ({ ...k, [provider.id]: e.target.value }))} />
               <button className="primary-action" disabled={working || !(keys[provider.id] || '').trim()}>Salvar</button>
               {provider.keys_url && <button type="button" className="ghost-button" onClick={() => link(provider.keys_url!)}>Obter chave</button>}

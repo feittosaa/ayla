@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
-import { DesktopSettings, quickStyle, useDesktopView } from './components/DesktopIntegration';
+import { DesktopSettings } from './components/DesktopIntegration';
+import { quickStyle, useDesktopView } from './services/DesktopView';
 import Space from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
@@ -9,7 +10,8 @@ import Reminders from './components/Reminders';
 import Confirm from './components/Confirm';
 import Athena from './components/Athena';
 import AthenaSettings from './components/AthenaSettings';
-import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace, useOrgan } from './components/Organ';
+import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
+import { useOrgan } from './services/Organ';
 import { BookIcon, ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } fro
 import Confirm from './Confirm';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { native, nativeTask, taskId, errorText, labels, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort, type Reference } from '../services/Desktop';
+import { native, nativeTask, taskId, errorText, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort, type Reference } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
 import { asksForImage } from '../services/Intent';
 import { ArrowUpIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';

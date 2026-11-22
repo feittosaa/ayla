@@ -1,31 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { errorText, native } from '../services/Desktop';
-
-/** Estado de um órgão (produto separado que a pessoa escolheu baixar), vindo do núcleo. */
-export type OrganStatus = {
-  id: string; name: string; description: string; version: string;
-  installed: boolean; task: string | null; error: string | null; engine: boolean;
-  running: boolean; container: boolean; locked: boolean; contract_ok: boolean;
-  standalone: boolean; downloaded: boolean; icon: string | null;
-};
-
-/** Página da Moneta servida pela camada de compatibilidade da Ayla (protocolo próprio do núcleo). */
-export const monetaPage = navigator.userAgent.includes('Windows') ? 'http://moneta.localhost/' : 'moneta://localhost/';
-
-export function useOrgan() {
-  const [status, setStatus] = useState<OrganStatus | null>(null);
-  const refresh = useCallback(async () => {
-    try { setStatus(await native<OrganStatus>('organ_status')); } catch { /* sem núcleo: o órgão só não aparece */ }
-  }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
-  // Acompanha downloads e inícios enquanto houver uma etapa em andamento.
-  useEffect(() => {
-    if (!status?.task) return;
-    const timer = setInterval(() => void refresh(), 1500);
-    return () => clearInterval(timer);
-  }, [status?.task, refresh]);
-  return { status, refresh };
-}
+import { monetaPage, type OrganStatus } from '../services/Organ';
 
 export function OrganIcon({ status, size = 26 }: { status: OrganStatus; size?: number }) {
   return status.icon ? <img src={status.icon} width={size} height={size} alt="" /> : <span className="avatar" style={{ width: size, height: size, background: '#d8b45a' }}>{status.name.slice(0, 1)}</span>;

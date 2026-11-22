@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
-import AthenaNote, { AttachmentView, folderOf, titleOf, type Note, type Tab } from './AthenaNote';
+import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
 import { BookIcon, ChevronRightIcon, FileIcon, ImageIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
-import { isAttachment } from '../services/Wiki';
+import { folderOf, isAttachment, titleOf } from '../services/Wiki';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[] };
 type Tree = { roots: Root[]; suggested: string[]; git_enabled: boolean };
