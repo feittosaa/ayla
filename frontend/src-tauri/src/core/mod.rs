@@ -20,6 +20,7 @@ pub mod preferences;
 
 pub mod models;
 pub mod organs;
+pub mod pad;
 pub mod notify;
 pub mod runtime;
 pub mod services;

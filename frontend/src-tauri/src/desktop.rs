@@ -11,12 +11,16 @@ pub enum Launch {
     App,
     Quick,
     Login,
+    /// Athena sozinha, como bloco de notas (com os arquivos da fila `ATHENA_QUEUE`).
+    Athena,
 }
 impl Launch {
     pub fn from_args() -> Self {
-        match std::env::args().nth(1).as_deref() {
+        let mut args = std::env::args().skip(1);
+        match args.next().as_deref() {
             Some("--quick") => Self::Quick,
             Some("--background") => Self::Login,
+            Some("--abrir") if args.next().as_deref() == Some("athena") => Self::Athena,
             _ => Self::App,
         }
     }
@@ -30,6 +34,67 @@ pub struct OpenRequest {
 }
 /// Pedidos ainda não lidos pela interface (ela os busca ao montar e a cada aviso `open-files`).
 static OPEN_QUEUE: Mutex<Vec<OpenRequest>> = Mutex::new(Vec::new());
+/// Arquivos para a janela da Athena; ela os busca ao montar e a cada aviso `athena-open`.
+static ATHENA_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Entrega (uma vez) os arquivos pedidos à Athena.
+pub fn athena_requests() -> Vec<String> {
+    std::mem::take(&mut *ATHENA_QUEUE.lock().unwrap())
+}
+/// Guarda o pedido na fila certa e diz como abrir: a Athena tem janela própria.
+fn enqueue(request: OpenRequest) -> Launch {
+    if request.target == "athena" {
+        ATHENA_QUEUE.lock().unwrap().extend(request.paths);
+        Launch::Athena
+    } else {
+        OPEN_QUEUE.lock().unwrap().push(request);
+        Launch::App
+    }
+}
+pub const ATHENA_WINDOW: &str = "athena";
+
+/// Mostra (ou cria) a janela da Athena e avisa que há arquivos na fila.
+pub fn show_athena(app: &AppHandle) -> Result<(), String> {
+    let window = match app.get_webview_window(ATHENA_WINDOW) {
+        Some(window) => window,
+        None => {
+            let window = tauri::WebviewWindowBuilder::new(app, ATHENA_WINDOW, tauri::WebviewUrl::App("index.html".into()))
+                .title("Athena")
+                .inner_size(900.0, 720.0)
+                .min_inner_size(360.0, 320.0)
+                // Sem a barra do sistema: o header da Athena faz esse papel, como no GNOME Text Editor.
+                .decorations(false)
+                .build()
+                .map_err(|e| e.to_string())?;
+            // Arquivos arrastados para a janela abrem em abas (liberados aqui, pelo evento do sistema).
+            let handle = app.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                    let files: Vec<String> = paths.iter().filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned()).collect();
+                    if files.is_empty() { return; }
+                    ATHENA_QUEUE.lock().unwrap().extend(files);
+                    let _ = handle.emit_to(ATHENA_WINDOW, "athena-open", ());
+                }
+            });
+            window
+        }
+    };
+    // Corretor ortográfico do WebKitGTK (dicionários do sistema; os ausentes são ignorados).
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::{WebContextExt, WebViewExt};
+        if let Some(context) = webview.inner().context() {
+            context.set_spell_checking_enabled(true);
+            context.set_spell_checking_languages(&["pt_BR", "pt_PT", "en_US"]);
+        }
+    });
+    window.show().map_err(|e| e.to_string())?;
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    if !ATHENA_QUEUE.lock().unwrap().is_empty() {
+        app.emit_to(ATHENA_WINDOW, "athena-open", ()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 impl OpenRequest {
     pub fn from_args() -> Option<Self> {
@@ -43,7 +108,8 @@ impl OpenRequest {
         let target = args.next().filter(|t| matches!(t.as_str(), "ayla" | "athena" | "iris"))?;
         let paths: Vec<String> = args.filter_map(|arg| gio::File::for_commandline_arg(arg).path())
             .map(|p| p.to_string_lossy().into_owned()).collect();
-        (!paths.is_empty()).then_some(Self { target, paths })
+        // A Athena abre também sem arquivos (pelo menu), como um bloco de notas.
+        (!paths.is_empty() || target == "athena").then_some(Self { target, paths })
     }
 }
 
@@ -200,8 +266,7 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
     let sender = tx.clone();
     action.connect_activate(move |_, parameter| {
         let Some(request) = parameter.and_then(|p| p.str()).and_then(|text| serde_json::from_str::<OpenRequest>(text).ok()) else { return };
-        OPEN_QUEUE.lock().unwrap().push(request);
-        let _ = sender.send(Launch::App);
+        let _ = sender.send(enqueue(request));
     });
     instance.add_action(&action);
     instance.register(gio::Cancellable::NONE).map_err(|e| e.to_string())?;
@@ -217,7 +282,8 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
         return Ok(None);
     }
     if let Some(request) = open {
-        OPEN_QUEUE.lock().unwrap().push(request);
+        // Primeira instância aberta pela Athena: `Launch::Athena` mostra só a janela dela.
+        enqueue(request);
     }
     Ok(Some((instance, rx)))
 }
@@ -540,6 +606,9 @@ pub fn launch(app: &AppHandle, mode: Launch) -> Result<(), String> {
         let view = state.lock().unwrap();
         (view.quick, view.pending_show.is_some())
     };
+    if mode == Launch::Athena {
+        return show_athena(app);
+    }
     match mode {
         Launch::Login if app.state::<Core>().prefs()?.desktop.background => Ok(()),
         Launch::Quick if quick && (pending || window.is_visible().unwrap_or(false)) => close(app, &window),
