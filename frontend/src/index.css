@@ -11,7 +11,8 @@ html, body, #root {
 }
 
 body {
-  background-color: var(--ayla-bg);
+  /* Fundo da janela (translúcido quando a pessoa escolhe transparência em Aparência). */
+  background-color: var(--ayla-window, var(--ayla-bg));
   color: var(--ayla-text);
   font-family: var(--ayla-font-main);
   font-size: 15px;

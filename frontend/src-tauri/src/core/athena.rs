@@ -38,6 +38,138 @@ pub fn safe_relative(relative: &str) -> Option<PathBuf> {
     ok.then(|| path.to_path_buf())
 }
 
+/// Caminho seguro de um texto que a Athena abre e edita: nota `.md` ou arquivo `.txt`.
+pub fn safe_text(relative: &str) -> Option<PathBuf> {
+    safe_relative(relative).or_else(|| {
+        let path = Path::new(relative);
+        let ok = !relative.is_empty() && relative.len() <= 1024
+            && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+            && path.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.')));
+        ok.then(|| path.to_path_buf())
+    })
+}
+
+pub fn is_txt(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+}
+
+/// Arquivos `.txt` da raiz (abrem como texto na Athena), dos mais recentes aos mais antigos.
+pub fn texts(root: &Path) -> Vec<Note> {
+    let mut out = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else { continue };
+            if name.starts_with('.') {
+                continue;
+            }
+            let relative = dir.join(&name);
+            if kind.is_dir() {
+                pending.push(relative);
+            } else if kind.is_file() && is_txt(&relative) {
+                let Ok(meta) = entry.metadata() else { continue };
+                out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
+                if out.len() >= MAX_NOTES {
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// Texto de um arquivo importado: UTF-8 (sem BOM) ou, se não for, Latin-1/Windows-1252.
+pub fn decode_text(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().map(|&b| match b {
+            0x80 => '€', 0x91 => '‘', 0x92 => '’', 0x93 => '“', 0x94 => '”', 0x96 => '–', 0x97 => '—', 0x85 => '…',
+            other => other as char,
+        }).collect(),
+    }
+}
+
+/// Notas a importar de arquivos ou pastas fora da Athena: caminho relativo de destino (com as
+/// subpastas da pasta de origem, sem extensão) e o texto. Pastas e arquivos ocultos e links
+/// simbólicos ficam de fora; arquivos grandes demais são contados como ignorados.
+pub fn collect_imports(sources: &[PathBuf]) -> (Vec<(String, String)>, usize) {
+    let mut out = Vec::new();
+    let mut skipped = 0;
+    // `None`: não é .md nem .txt; `Some(None)`: ignorado (grande demais ou ilegível).
+    let one = |path: &Path, relative: &Path| -> Option<Option<(String, String)>> {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if ext != "md" && ext != "txt" {
+            return None;
+        }
+        let small = fs::metadata(path).is_ok_and(|m| m.len() <= MAX_NOTE_BYTES);
+        Some(small.then(|| fs::read(path).ok()).flatten().map(|bytes| {
+            let target = relative.with_extension("").components().map(|c| file_name(&c.as_os_str().to_string_lossy())).collect::<Vec<_>>().join("/");
+            (target, decode_text(&bytes))
+        }))
+    };
+    let mut add = |found: Option<Option<(String, String)>>, out: &mut Vec<(String, String)>| match found {
+        Some(Some(note)) => out.push(note),
+        Some(None) => skipped += 1,
+        None => {}
+    };
+    for source in sources {
+        let Ok(meta) = fs::symlink_metadata(source) else { add(Some(None), &mut out); continue };
+        let Some(name) = source.file_name() else { continue };
+        if meta.is_file() {
+            add(one(source, Path::new(name)), &mut out);
+            continue;
+        }
+        if !meta.is_dir() {
+            continue;
+        }
+        let mut pending = vec![PathBuf::from(name)];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(source.parent().unwrap_or(Path::new("/")).join(&dir)) else { continue };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                let Ok(kind) = entry.file_type() else { continue };
+                if entry_name.starts_with('.') || kind.is_symlink() {
+                    continue;
+                }
+                let relative = dir.join(&entry_name);
+                if kind.is_dir() {
+                    pending.push(relative);
+                } else if kind.is_file() {
+                    add(one(&entry.path(), &relative), &mut out);
+                }
+            }
+            if out.len() >= MAX_NOTES {
+                break;
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    (out, skipped)
+}
+
+/// Importa as notas coletadas para a pasta da raiz, sem sobrescrever (nomes repetidos ganham " 2").
+pub fn import_into(root: &Path, folder: &str, notes: &[(String, String)]) -> Result<usize, String> {
+    let folder = safe_folder(folder).ok_or("Pasta inválida")?;
+    let mut count = 0;
+    for (relative, content) in notes {
+        let base = folder.join(relative);
+        let mut target = base.with_extension("md");
+        let mut n = 2;
+        while root.join(&target).exists() {
+            target = PathBuf::from(format!("{} {n}.md", base.to_string_lossy()));
+            n += 1;
+        }
+        write(root, &relative_string(&target), content, None)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn modified(meta: &fs::Metadata) -> i64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -83,6 +215,11 @@ pub fn list(root: &Path) -> Vec<Note> {
 
 /// Anexos que a Athena mostra (imagens e PDF), para a árvore, como o explorador do Obsidian.
 pub fn attachments(root: &Path) -> Vec<Note> {
+    scan_attachments(root, Some(MAX_NOTES)).0
+}
+
+pub fn scan_attachments(root: &Path, limit: Option<usize>) -> (Vec<Note>, Vec<String>) {
+    let mut folders = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     let mut pending = vec![PathBuf::new()];
     while let Some(dir) = pending.pop() {
@@ -98,8 +235,13 @@ pub fn attachments(root: &Path) -> Vec<Note> {
                 pending.push(relative);
             } else if kind.is_file() && attachment_mime(&relative).is_some() {
                 let Ok(meta) = entry.metadata() else { continue };
+                if !dir.as_os_str().is_empty() && folders.insert(relative_string(&dir)) {
+                    for parent in dir.ancestors().skip(1).take_while(|parent| !parent.as_os_str().is_empty()) {
+                        if !folders.insert(relative_string(parent)) { break; }
+                    }
+                }
                 out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
-                if out.len() >= MAX_NOTES {
+                if limit.is_some_and(|max| out.len() >= max) {
                     pending.clear();
                     break;
                 }
@@ -107,13 +249,13 @@ pub fn attachments(root: &Path) -> Vec<Note> {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
+    (out, folders.into_iter().collect())
 }
 
 /// Move um anexo para outra pasta da mesma raiz (sem sobrescrever). Links pelo nome continuam
 /// valendo, porque os anexos são procurados pelo nome.
 pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, String> {
-    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some()).ok_or("Arquivo inválido")?;
+    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some() || is_txt(p)).ok_or("Arquivo inválido")?;
     let name = from_path.file_name().ok_or("Arquivo inválido")?;
     let to_path = safe_folder(folder).ok_or("Pasta inválida")?.join(name);
     if !root.join(&from_path).is_file() {
@@ -170,7 +312,7 @@ pub fn mkdir(root: &Path, parent: &str, name: &str) -> Result<String, String> {
 
 /// Conteúdo e data de modificação de uma nota.
 pub fn read(root: &Path, relative: &str) -> Result<(String, i64), String> {
-    let path = root.join(safe_relative(relative).ok_or("Nota inválida")?);
+    let path = root.join(safe_text(relative).ok_or("Nota inválida")?);
     let meta = fs::metadata(&path).map_err(|_| "Nota não encontrada")?;
     if meta.len() > MAX_NOTE_BYTES {
         return Err("Esta nota é grande demais para abrir aqui".into());
@@ -182,7 +324,7 @@ pub fn read(root: &Path, relative: &str) -> Result<(String, i64), String> {
 /// Grava uma nota. Com `expected`, recusa se o arquivo mudou por fora (ex.: no Obsidian) desde
 /// que foi aberto. Devolve a nova data de modificação.
 pub fn write(root: &Path, relative: &str, content: &str, expected: Option<i64>) -> Result<i64, String> {
-    let path = root.join(safe_relative(relative).ok_or("Nota inválida")?);
+    let path = root.join(safe_text(relative).ok_or("Nota inválida")?);
     if content.len() as u64 > MAX_NOTE_BYTES {
         return Err("Nota grande demais".into());
     }
@@ -254,6 +396,36 @@ pub fn wiki_targets(text: &str) -> Vec<String> {
     out
 }
 
+/// Alvos de links entre notas, ignorando exemplos de código.
+pub fn graph_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut fenced = false;
+    for (code, part) in code_spans(text) {
+        if code { continue; }
+        for line in part.lines() {
+            if line.trim_start().starts_with("~~~") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced { continue; }
+            targets.extend(wiki_targets(line));
+            for (start, _) in line.match_indices("](") {
+                let tail = &line[start + 2..];
+                let raw = if let Some(angle) = tail.strip_prefix('<') {
+                    angle.split_once('>').map(|(url, _)| url)
+                } else {
+                    tail.split_once(')').map(|(url, _)| url.split_ascii_whitespace().next().unwrap_or(""))
+                };
+                let Some(url) = raw.and_then(|url| percent_decode(url.split('#').next().unwrap_or(""))) else { continue };
+                if url.to_ascii_lowercase().ends_with(".md") && !url.starts_with('/') && !url.contains(':') {
+                    targets.push(url.trim_start_matches("./").to_string());
+                }
+            }
+        }
+    }
+    targets
+}
+
 /// O alvo de um link aponta para esta nota? Pelo nome (como o Obsidian) ou pelo caminho sem `.md`.
 pub fn links_to(target: &str, note_path: &str) -> bool {
     let target = target.trim().trim_end_matches(".md").to_lowercase();
@@ -264,7 +436,8 @@ pub fn links_to(target: &str, note_path: &str) -> bool {
 
 /// Move a nota para `.trash/` (lixeira do Obsidian) em vez de apagar.
 pub fn trash(root: &Path, relative: &str) -> Result<(), String> {
-    let relative = safe_relative(relative).ok_or("Nota inválida")?;
+    let relative = safe_text(relative).ok_or("Nota inválida")?;
+    let extension = relative.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "md".into());
     let source = root.join(&relative);
     if !source.is_file() {
         return Err("Nota não encontrada".into());
@@ -272,10 +445,10 @@ pub fn trash(root: &Path, relative: &str) -> Result<(), String> {
     let bin = root.join(".trash");
     fs::create_dir_all(&bin).map_err(|_| "Não foi possível criar a lixeira")?;
     let stem = relative.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let mut target = bin.join(format!("{stem}.md"));
+    let mut target = bin.join(format!("{stem}.{extension}"));
     let mut n = 2;
     while target.exists() {
-        target = bin.join(format!("{stem} {n}.md"));
+        target = bin.join(format!("{stem} {n}.{extension}"));
         n += 1;
     }
     fs::rename(&source, &target).map_err(|_| "Não foi possível mover a nota para a lixeira".into())
@@ -633,10 +806,8 @@ pub fn tags(text: &str) -> Vec<String> {
 
 pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "svg", "avif"];
 pub const MAX_ATTACHMENT: u64 = 15 * 1024 * 1024;
-/// PDFs aparecem na nota (![[arquivo.pdf]]) e abrem numa aba, até este tamanho.
-pub const MAX_PDF: u64 = 80 * 1024 * 1024;
 
-/// Tipo do anexo que a Athena mostra (imagens e PDF); outros arquivos não são servidos.
+/// Tipo do anexo que a Athena e a Iris mostram (imagens, vídeos e PDF); outros arquivos não são servidos.
 pub fn attachment_mime(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_string_lossy().to_lowercase();
     Some(match extension.as_str() {
@@ -648,8 +819,141 @@ pub fn attachment_mime(path: &Path) -> Option<&'static str> {
         "svg" => "image/svg+xml",
         "avif" => "image/avif",
         "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        "mkv" => "video/x-matroska",
         _ => return None,
     })
+}
+
+/// Guarda uma imagem colada e grava a referência na nota na mesma operação.
+pub fn paste_image(root: &Path, note: &str, before: &str, after: &str, expected: i64, bytes: &[u8]) -> Result<(String, i64), String> {
+    let (target, _, modified) = save_note_image(root, note, expected, bytes, |target| format!("{before}![[{target}]]{after}"))?;
+    Ok((format!("![[{target}]]"), modified))
+}
+
+/// Usa como banner uma imagem que já está na mesma raiz da nota (cofre, projeto ou Athena).
+pub fn set_banner(root: &Path, note: &str, content: &str, expected: i64, image: &str) -> Result<(String, i64), String> {
+    let root = root.canonicalize().map_err(|_| "Pasta da nota indisponível")?;
+    let note_path = root.join(safe_relative(note).ok_or("Nota inválida")?);
+    if !note_path.is_file() {
+        return Err("Nota não encontrada na pasta da Athena".into());
+    }
+    let image = image.trim().trim_start_matches("./");
+    let relative = Path::new(image);
+    let inside = !image.is_empty()
+        && relative.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.')))
+        && attachment_mime(relative).is_some_and(|mime| mime.starts_with("image/"));
+    let found = root.join(relative).canonicalize().ok().filter(|path| inside && path.starts_with(&root) && path.is_file());
+    if found.is_none() {
+        return Err("Escolha uma imagem desta mesma pasta".into());
+    }
+    let updated = with_banner(content, &relative_string(relative));
+    let modified = write(&root, note, &updated, Some(expected))?;
+    Ok((updated, modified))
+}
+
+/// Altura dos banners no make-md do cofre ("Cover Height"; 200 px quando não configurada).
+pub fn make_md_banner_height(root: &Path) -> Option<u32> {
+    let file = root.join(".obsidian/plugins/make-md/data.json");
+    let settings: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    let height = settings.get("bannerHeight").and_then(|h| h.as_f64().or_else(|| h.as_str()?.trim().parse().ok())).unwrap_or(200.0);
+    (height.is_finite() && height > 0.0).then(|| height.round().clamp(80.0, 600.0) as u32)
+}
+
+/// Texto em YAML como o make-md grava (`Imagens/capa.png`, sem aspas); com aspas só quando o
+/// valor seria lido de outro jeito.
+fn yaml_text(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.trim() == value
+        && !value.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
+        && !value.contains(": ") && !value.contains(" #") && !value.ends_with(':')
+        && !value.chars().any(char::is_control)
+        && !matches!(value.to_ascii_lowercase().as_str(), "true" | "false" | "null" | "yes" | "no" | "~")
+        && value.parse::<f64>().is_err();
+    if plain { value.to_string() } else { format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")) }
+}
+
+pub fn with_banner(content: &str, target: &str) -> String {
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let banner = format!("banner: {}{newline}", yaml_text(target));
+    let mut lines = content.split_inclusive('\n');
+    if let Some(opening) = lines.next().filter(|line| line.trim_end() == "---") {
+        let mut updated = String::with_capacity(content.len() + banner.len());
+        updated.push_str(opening);
+        let mut offset = opening.len();
+        for line in lines {
+            if line.trim_end() == "---" {
+                updated.push_str(&banner);
+                updated.push_str(&content[offset..]);
+                return updated;
+            }
+            if !line.starts_with("banner:") { updated.push_str(line); }
+            offset += line.len();
+        }
+    }
+    format!("---{newline}{banner}---{newline}{newline}{content}")
+}
+
+/// Extensão de uma imagem colada, pelo conteúdo (não pelo nome).
+pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    Some(match bytes {
+        [137, 80, 78, 71, 13, 10, 26, 10, ..] => "png",
+        [255, 216, 255, ..] => "jpg",
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => "gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
+        [b'B', b'M', ..] => "bmp",
+        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f' | b's', ..] => "avif",
+        _ => return None,
+    })
+}
+
+fn save_note_image(root: &Path, note: &str, expected: i64, bytes: &[u8], content: impl FnOnce(&str) -> String) -> Result<(String, String, i64), String> {
+    if bytes.len() as u64 > MAX_ATTACHMENT {
+        return Err("A imagem passa de 15 MB".into());
+    }
+    let extension = image_extension(bytes).ok_or("Formato de imagem incompatível")?;
+    let relative = safe_relative(note).ok_or("Nota inválida")?;
+    let root = root.canonicalize().map_err(|_| "Pasta da nota indisponível")?;
+    let path = root.join(&relative);
+    if path.canonicalize().ok().as_ref() != Some(&path) || !path.is_file() {
+        return Err("Nota não encontrada na pasta da Athena".into());
+    }
+    let title = relative.file_stem().ok_or("Nota inválida")?;
+    let images = root.join("Imagens");
+    let folder = images.join(title);
+    for dir in [&images, &folder] {
+        match fs::create_dir(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) => {}
+            Err(_) => return Err("Não foi possível criar a pasta de imagens da nota".into()),
+        }
+    }
+
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| "Não foi possível gerar o nome da imagem")?;
+    let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = format!("Imagem-{id}.{extension}");
+    let image = folder.join(&name);
+    let title = title.to_string_lossy();
+    // Referências por caminho abrem direto. Títulos com sintaxe wiki usam o nome único.
+    let target = if title.contains(['[', ']', '#', '|', '\n', '\r', '\\']) {
+        name
+    } else {
+        format!("Imagens/{title}/{name}")
+    };
+    let mut file = fs::File::create_new(&image).map_err(|_| "Não foi possível criar a imagem")?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let content = content(&target);
+    let result = written.map_err(|_| "Não foi possível salvar a imagem".to_string())
+        .and_then(|_| write(&root, note, &content, Some(expected)));
+    if result.is_err() {
+        let _ = fs::remove_file(&image);
+    }
+    result.map(|modified| (target, content, modified))
 }
 
 /// Decodifica `%XX` de um trecho de URL (nomes com espaço e acentos).
@@ -807,6 +1111,132 @@ mod tests {
     }
 
     #[test]
+    fn colar_imagem_grava_na_pasta_da_nota_e_preserva_o_texto() {
+        let root = temp();
+        let note = create_in(&root, "Sessões", "Mapa da região", "Antes depois").unwrap();
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let (_, stamp) = read(&root, &note).unwrap();
+        let (embed, stamp) = paste_image(&root, &note, "Antes ", " depois", stamp, png).unwrap();
+        let target = &embed[3..embed.len() - 2];
+        assert!(target.starts_with("Imagens/Mapa da região/"));
+        assert_eq!(fs::read(root.join(target)).unwrap(), png);
+        assert_eq!(read(&root, &note).unwrap().0, format!("Antes {embed} depois"));
+        assert_eq!(find_attachment(&root, target), Some(root.join(target)));
+
+        let (another, stamp) = paste_image(&root, &note, &embed, "", stamp, png).unwrap();
+        assert_ne!(another, embed);
+        assert!(paste_image(&root, &note, "fora", "", stamp - 10, png).is_err());
+        assert!(paste_image(&root, &note, "fora", "", stamp, b"texto").is_err());
+        assert_eq!(read(&root, &note).unwrap().0, format!("{embed}{another}"));
+        assert_eq!(attachments(&root).len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn txt_abre_e_importacao_traz_txt_e_md_como_notas() {
+        let root = temp();
+        let outside = temp();
+        fs::write(root.join("lista.txt"), "compras").unwrap();
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::write(root.join(".obsidian/x.txt"), "oculto").unwrap();
+        assert_eq!(texts(&root).iter().map(|n| n.path.as_str()).collect::<Vec<_>>(), ["lista.txt"]);
+        assert!(list(&root).is_empty(), "txt não vira nota na lista de notas");
+        let (text, stamp) = read(&root, "lista.txt").unwrap();
+        assert_eq!(text, "compras");
+        write(&root, "lista.txt", "compras e mais", Some(stamp)).unwrap();
+        assert!(read(&root, "../fora.txt").is_err() && read(&root, ".oculto.txt").is_err());
+
+        // Pasta de fora: .txt e .md com subpastas; outros tipos, ocultos e links ficam de fora.
+        let src = outside.join("Antigas");
+        fs::create_dir_all(src.join("Viagens/2019")).unwrap();
+        fs::create_dir_all(src.join(".git")).unwrap();
+        fs::write(src.join("Ideias.md"), "# Ideias\n[[Link]]").unwrap();
+        fs::write(src.join("Viagens/2019/Roma.txt"), b"\xEF\xBB\xBFRoma").unwrap();
+        fs::write(src.join("Viagens/acentos.txt"), b"Caf\xe9 \x93antigo\x94").unwrap();
+        fs::write(src.join("foto.png"), b"png").unwrap();
+        fs::write(src.join(".git/HEAD"), "ref").unwrap();
+        fs::write(src.join("grande.txt"), vec![b'a'; MAX_NOTE_BYTES as usize + 1]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("Antigas/Ideias.md"), src.join("atalho.md")).unwrap();
+        let (notes, skipped) = collect_imports(&[src.clone(), outside.join("ausente.txt")]);
+        let paths: Vec<&str> = notes.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["Antigas/Ideias", "Antigas/Viagens/2019/Roma", "Antigas/Viagens/acentos"]);
+        assert_eq!(skipped, 2, "o grande e o ausente");
+        assert_eq!(notes[1].1, "Roma", "sem BOM");
+        assert_eq!(notes[2].1, "Café “antigo”", "Windows-1252");
+        fs::create_dir_all(root.join("Importadas/Antigas")).unwrap();
+        fs::write(root.join("Importadas/Antigas/Ideias.md"), "já existia").unwrap();
+        assert_eq!(import_into(&root, "Importadas", &notes).unwrap(), 3);
+        assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias.md")).unwrap(), "já existia", "não sobrescreve");
+        assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias 2.md")).unwrap(), "# Ideias\n[[Link]]");
+        assert!(root.join("Importadas/Antigas/Viagens/2019/Roma.md").is_file());
+        assert_eq!(fs::read_to_string(src.join("Ideias.md")).unwrap(), "# Ideias\n[[Link]]", "original intacto");
+        let (single, _) = collect_imports(&[src.join("Viagens/acentos.txt")]);
+        assert_eq!(single[0].0, "acentos");
+        trash(&root, "lista.txt").unwrap();
+        assert!(root.join(".trash/lista.txt").is_file());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn banner_usa_imagem_da_mesma_raiz_sem_copiar() {
+        let root = temp();
+        let outside = temp();
+        let source = "---\r\nbanner: \"\"\r\ntags: [mapa]\r\n---\r\nTexto com [[Link]].";
+        let note = create_in(&root, "", "Nota", source).unwrap();
+        fs::create_dir_all(root.join("Mapas")).unwrap();
+        fs::write(root.join("Mapas/Norte.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(root.join("texto.pdf"), b"%PDF").unwrap();
+        fs::write(outside.join("fora.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let (_, modified) = read(&root, &note).unwrap();
+        for wrong in ["", "texto.pdf", "Ausente.png", "../fora.png", "/etc/hostname.png", ".obsidian/x.png"] {
+            assert!(set_banner(&root, &note, source, modified, wrong).is_err(), "{wrong}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("fora.png"), root.join("atalho.png")).unwrap();
+            assert!(set_banner(&root, &note, source, modified, "atalho.png").is_err(), "link para fora da raiz");
+        }
+        assert_eq!(read(&root, &note).unwrap().0, source, "recusas não alteram a nota");
+        let before = attachments(&root).len();
+        let (updated, _) = set_banner(&root, &note, source, modified, "Mapas/Norte.png").unwrap();
+        assert_eq!(updated, "---\r\ntags: [mapa]\r\nbanner: Mapas/Norte.png\r\n---\r\nTexto com [[Link]].", "mesmo formato do make-md");
+        assert_eq!(read(&root, &note).unwrap().0, updated);
+        assert_eq!(attachments(&root).len(), before, "nada foi copiado");
+        assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: mapa.png\n---\n\nTexto");
+        assert_eq!(yaml_text("Imagens/Personagens/As 6 Faces/Tauri.png"), "Imagens/Personagens/As 6 Faces/Tauri.png");
+        assert_eq!(yaml_text("Ganchos/G5/_358c1d1b.jpg"), "Ganchos/G5/_358c1d1b.jpg");
+        assert_eq!(yaml_text("#capa: a.png"), "\"#capa: a.png\"");
+        assert_eq!(yaml_text("[x] \"a\".png"), "\"[x] \\\"a\\\".png\"");
+        assert_eq!(yaml_text("2024"), "\"2024\"");
+        assert_eq!(make_md_banner_height(&root), None, "sem make-md");
+        fs::create_dir_all(root.join(".obsidian/plugins/make-md")).unwrap();
+        fs::write(root.join(".obsidian/plugins/make-md/data.json"), "{}").unwrap();
+        assert_eq!(make_md_banner_height(&root), Some(200));
+        fs::write(root.join(".obsidian/plugins/make-md/data.json"), r#"{"bannerHeight": "260"}"#).unwrap();
+        assert_eq!(make_md_banner_height(&root), Some(260));
+        assert!(set_banner(&root, &note, &updated, i64::MIN, "Mapas/Norte.png").is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn colar_imagem_recusa_pasta_com_link_simbolico() {
+        let root = temp();
+        let outside = temp();
+        let note = create(&root, "Mapa", "").unwrap();
+        let (_, stamp) = read(&root, &note).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Imagens")).unwrap();
+        assert!(paste_image(&root, &note, "", "", stamp, b"\x89PNG\r\n\x1a\nfixture").is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(read(&root, &note).unwrap().0, "");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
     fn pastas_e_links() {
         let root = temp();
         assert_eq!(mkdir(&root, "", "RPG").unwrap(), "RPG");
@@ -856,12 +1286,17 @@ mod tests {
         fs::write(root.join("Livros/script.sh"), "x").unwrap();
         let found: Vec<String> = attachments(&root).into_iter().map(|n| n.path).collect();
         assert_eq!(found, vec!["Livros/Regras.pdf".to_string()]);
+        fs::create_dir_all(root.join("Livros/Acervo/Vazio")).unwrap();
+        let (media, folders) = scan_attachments(&root, Some(MAX_NOTES));
+        assert_eq!(media.len(), 1);
+        assert_eq!(folders, ["Livros"]);
         assert_eq!(move_attachment(&root, "Livros/Regras.pdf", "").unwrap(), "Regras.pdf");
         assert!(root.join("Regras.pdf").is_file());
         assert!(move_attachment(&root, "Livros/script.sh", "").is_err() && move_attachment(&root, "../x.pdf", "").is_err());
         assert_eq!(attachment_mime(Path::new("a/Foto.JFIF")), Some("image/jpeg"));
         assert_eq!(attachment_mime(Path::new("livro.pdf")), Some("application/pdf"));
         assert_eq!(attachment_mime(Path::new("script.sh")), None);
+        assert_eq!(attachment_mime(Path::new("Sessão 1.MP4")), Some("video/mp4"));
         assert_eq!(percent_decode("Minha%20foto%C3%A9.png").as_deref(), Some("Minha fotoé.png"));
         assert_eq!(percent_decode("quebrado%2"), None);
         let _ = fs::remove_dir_all(&root);

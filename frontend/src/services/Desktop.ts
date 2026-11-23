@@ -12,6 +12,7 @@ export type Preferences = {
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
   athena_folder: string; athena_vaults: string[]; athena_git: boolean;
   response_source: '' | 'local' | 'auto' | 'cloud';
+  appearance: { mode: 'escuro' | 'claro' | 'sistema'; accent: string; dark_background: string; light_background: string; roundness: number; opacity: number; icon_ayla: number; icon_athena: number };
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
 export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };

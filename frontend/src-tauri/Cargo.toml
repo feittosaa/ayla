@@ -47,10 +47,20 @@ keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust",
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Data em que a foto foi tirada (EXIF), para a Iris comparar fotos ao longo do tempo (BSD-2, Rust puro).
 kamadak-exif = "0.6"
+# Pastas protegidas da Athena: chave derivada da senha (Argon2id) e arquivos cifrados
+# (XChaCha20-Poly1305). RustCrypto, MIT/Apache, Rust puro.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = "1"
+# Chave de recuperação global das pastas e arquivos protegidos: cada item guarda uma cópia da
+# chave dele cifrada para a chave pública global; só o código anotado abre (BSD-3, Rust puro).
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 
 # Mesma versão usada pelo Tauri (wry): libera o microfone na janela da Ayla no Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+# Miniaturas da Iris: mesma versão que o GTK do Tauri já usa (sem dependência nova na prática).
+gdk-pixbuf = "=0.18.5"
 
 # Verificação SHA-256 de modelos (GBs) lenta sem otimização; só afeta builds de desenvolvimento.
 [profile.dev.package.sha2]
