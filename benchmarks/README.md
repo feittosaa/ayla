@@ -29,6 +29,22 @@ Nos quatro modelos, a continuação reaproveitou 7.423 dos 7.440 tokens enviados
 
 O 9B merece nova avaliação para extração estruturada. O 4B acertou mais bases de SQL usando menos RAM. Nenhum resolveu a mudança de requisito em todas as bases. Para avaliar o perfil principal da Ayla, a próxima comparação é repetir texto e SQL na RX 9060 XT com Vulkan, com mais de uma passagem por modelo, e confrontar os resultados com os testes anteriores de conversa e visão. [Consultas produzidas e verificações por base](2026-11-20-cpu-sql.jsonl)
 
+## Resultados de 23/11/2026 na RX 9060 XT (Vulkan)
+
+Mesma máquina e mesmo llama.cpp b12531, agora com a GPU detectada (RADV GFX1200, 16 GB), reserva de 3 GiB de VRAM para o sistema e todas as camadas na placa. A rodada segue o artigo de referência: um MoE grande em 2 bits com MTP contra modelos densos menores. [Velocidade e JSON](2026-11-23-vulkan.jsonl) · [SQL](2026-11-23-vulkan-sql.jsonl)
+
+| Modelo e quantização | 1º token, 7.168 | Leitura a 7.168 (tok/s) | Geração (tok/s) | JSON | SQL (4 bases × 2) | VRAM com visão e 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.5 4B Q4_K_M | 2,09 s | 3.437 | 70 | 2/4 | 7/8 | 4,35 GiB |
+| Gemma 4 E4B QAT Q4_0 | 1,20 s | 5.963 | 71 | 0/4 (blocos Markdown) | 6/8 | 4,35 GiB |
+| Qwen3.5 9B Q4_K_M | 3,48 s | 2.060 | 47 | 4/4 | 5/8 | — |
+| Qwen3.6 35B-A3B UD-Q2_K_XL | 3,25 s | 2.211 | 88 (133 com MTP) | 4/4 | 8/8 | 11,66 GiB com MTP |
+
+- **Qwen3.6 35B-A3B Q2** (MoE, 3B ativos, 12,6 GB com projetor): único a acertar o SQL inteiro, inclusive a mudança de requisito. Com MTP do próprio GGUF (`--spec-type draft-mtp`), a geração em três respostas reais de chat foi de 92,7 para 132,7 tok/s com 2 tokens especulados (aceitação 67–86%), 130,0 com 3 e 119,5 com 4. Com reserva de 8 GiB, parte dos especialistas foi para a CPU e a geração caiu para 38 tok/s, com um ponto de 2 tok/s: como no artigo, o modelo precisa caber na placa.
+- **Cache de KV em q8_0** (exige Flash Attention): de 0 a 4% mais lento e economia pequena nestes modelos, porque Qwen3.5 e Gemma 4 já têm cache compacto (120 MiB a 8K; 240–470 MiB a 32K). A continuação da conversa continuou reaproveitando o cache no llama-server. Não adotado.
+- **Rascunho Qwen3.5 0.8B para o 9B**: aceitação de 17–41%, geração de 48,6 para 32,5 tok/s. Não adotado. N-gramas (`ngram-mod`): +4%, dentro do ruído. O GGUF da Unsloth do 9B não tem as camadas MTP.
+- **Contexto de 32K**: 0,4–0,8 GB a mais que 8K nos modelos do catálogo; o tempo extra só aparece quando o texto longo é usado.
+
 ## Protocolo
 
 - Um worker por modelo, uma requisição de cada vez, contexto de 8.192 tokens, sete threads, sem warmup e sem projetor de visão. A carga mede o intervalo até o worker responder ao health check. “Frio” na tabela significa que o worker já carregou o modelo e precisa ler o prompt inteiro. O cache de arquivos do Linux é compartilhado entre processos.

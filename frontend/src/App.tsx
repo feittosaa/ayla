@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import AppearanceSettings from './components/AppearanceSettings';
 import BrandMark from './components/BrandMark';
 import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, palette, useMode, useSystemIcon, type Appearance } from './services/Appearance';
 import { DesktopSettings } from './components/DesktopIntegration';
 import { quickStyle, useDesktopView } from './services/DesktopView';
-import Space from './components/Space';
+import Space, { type Incoming } from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
@@ -14,6 +15,8 @@ import Confirm from './components/Confirm';
 import Athena from './components/Athena';
 import Iris from './components/Iris';
 import AthenaSettings from './components/AthenaSettings';
+import BasesSettings from './components/BasesSettings';
+import ImageSearchSettings from './components/ImageSearchSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
 import { shareAppearance, useOrgan } from './services/Organ';
 import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
@@ -28,11 +31,36 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
 ];
 const sections = [
   { id: 'desktop', label: 'Integração com o sistema' }, { id: 'aparencia', label: 'Aparência' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
-  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
+  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'bases', label: 'Bases de dados' }, { id: 'imagens', label: 'Imagens e pesquisa' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
 type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena' | 'iris';
+/** "Abrir com" do gerenciador de arquivos, entregue pelo núcleo. */
+type OpenRequest = { target: 'ayla' | 'athena' | 'iris'; paths: string[] };
+let openCounter = 0;
+
+/** Leva até uma seção de Configurações e a mantém no topo enquanto as seções de cima terminam de
+ * carregar (elas crescem depois e empurrariam a seção para baixo). Para se a pessoa rolar. */
+function revealSection(id: string, frames = 90) {
+  const target = document.getElementById(id);
+  const content = target?.closest('.settings-main');
+  // A tela de Configurações pode ainda estar montando: espera a seção aparecer (até ~1,5 s).
+  if (!target || !content) { if (frames > 0) requestAnimationFrame(() => revealSection(id, frames - 1)); return; }
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  const align = () => { if (!stopped) target.scrollIntoView({ block: 'start' }); };
+  align();
+  const observer = new ResizeObserver(align);
+  observer.observe(content.querySelector('.settings-content') ?? content);
+  content.addEventListener('wheel', stop, { once: true, passive: true });
+  content.addEventListener('touchstart', stop, { once: true, passive: true });
+  window.addEventListener('keydown', stop, { once: true });
+  setTimeout(() => { observer.disconnect(); content.removeEventListener('wheel', stop); content.removeEventListener('touchstart', stop); window.removeEventListener('keydown', stop); }, 2000);
+  target.classList.remove('section-reveal');
+  void target.offsetWidth;
+  target.classList.add('section-reveal');
+}
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -99,13 +127,29 @@ export default function App() {
     if (id === 'athena') setAthenaVisited(true);
     if (id === 'iris') setIrisVisited(true);
   }
+  // "Abrir com": Ayla anexa numa conversa nova; Iris mostra a mídia; Athena abre o texto.
+  const [opened, setOpened] = useState<Partial<Record<OpenRequest['target'], Incoming>>>({});
+  const openFiles = useRef<(request: OpenRequest) => void>(() => {});
+  openFiles.current = request => {
+    const incoming = { id: ++openCounter, paths: request.paths };
+    if (request.target === 'ayla') showProject(null); else openSpace(request.target);
+    setOpened(prev => ({ ...prev, [request.target]: incoming }));
+  };
+  useEffect(() => {
+    const take = () => void native<OpenRequest[]>('open_requests').then(list => list.forEach(r => openFiles.current(r))).catch(e => setDesktopError(errorText(e)));
+    take();
+    const stop = listen('open-files', take);
+    return () => { void stop.then(unlisten => unlisten()); };
+  }, []);
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
     if (id) setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
   }
   function go(next: Page, section?: string) {
     setSpace('settings'); setPage(next); setNotice(''); setError('');
-    if (section) setTimeout(() => document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    if (section) setTimeout(() => revealSection(section), 0);
+    // Subpáginas (Modelos, Recursos) começam no topo, sem herdar a rolagem das Configurações.
+    else setTimeout(() => document.querySelector('.settings-main')?.scrollTo({ top: 0 }), 0);
   }
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
   /** Salva na hora uma mudança simples (interruptores e perfil), sem mexer no que está em edição. */
@@ -165,22 +209,22 @@ export default function App() {
 
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
-        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
-          projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
+        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
+          projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} incoming={opened.ayla} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
       {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
-        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} />
+        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} external={opened.athena} />
       </div>}
       {irisVisited && !view.quick && <div className="page" hidden={space !== 'iris'}>
-        <Iris active={space === 'iris'} />
+        <Iris active={space === 'iris'} external={opened.iris} />
       </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
@@ -264,6 +308,10 @@ export default function App() {
 
             <OrganSettings status={organ.status} refresh={organ.refresh} />
 
+            <BasesSettings />
+
+            <ImageSearchSettings />
+
             <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
               <div className="group-card">
                 <button className="group-row link-row" onClick={() => go('models')}><span className="row-text"><span className="row-title">Modelos e componentes</span><span className="row-hint">Baixar, importar e remover modelos e motores</span></span><ChevronRightIcon size={18} /></button>
@@ -279,7 +327,8 @@ export default function App() {
                 </div>
                 <div className="advanced-block"><h3>Limites técnicos</h3>
                   <label>Limite personalizado de memória (%)<input type="number" min={5} max={90} value={draft.resource_percent ?? profiles.find(p => p.id === profile)?.percent ?? 50} onChange={e => update({ resource_percent: Number(e.target.value) })} /></label>
-                  <label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} value={draft.context_tokens} onChange={e => update({ context_tokens: Number(e.target.value) })} /></label>
+                  <label className="check"><input type="checkbox" checked={draft.context_auto ?? draft.context_tokens === 8192} onChange={e => update(e.target.checked ? { context_auto: true, context_tokens: 8192 } : { context_auto: false })} /> Contexto automático: 32.768 tokens com placa de vídeo, 8.192 sem</label>
+                  <label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} disabled={draft.context_auto ?? draft.context_tokens === 8192} value={draft.context_tokens} onChange={e => update({ context_auto: false, context_tokens: Number(e.target.value) })} /></label>
                   <label>Liberar modelo após inatividade (segundos)<input type="number" min={0} max={3600} value={draft.idle_seconds} onChange={e => update({ idle_seconds: Number(e.target.value) })} /></label>
                   <label>Mensagens recentes no contexto<input type="number" min={2} max={200} value={draft.history_messages} onChange={e => update({ history_messages: Number(e.target.value) })} /></label>
                   <label>Limite de caracteres do histórico<input type="number" min={1000} max={200000} value={draft.history_chars} onChange={e => update({ history_chars: Number(e.target.value) })} /></label>
@@ -308,7 +357,7 @@ export default function App() {
                 <div className="advanced-block"><h3>Medições locais</h3>
                   <p>Tempo até o primeiro trecho, duração e quantidade de trechos das últimas respostas.</p>
                   {!snapshot.metrics.length && <p>Ainda sem medições.</p>}
-                  {snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.cancelled ? ' · interrompida' : ''}</p>)}
+                  {snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.prompt_tps != null ? ` · leitura: ${Math.round(m.prompt_tps)} tok/s (${m.prompt_tokens ?? 0} novos${m.cache_tokens ? `, ${m.cache_tokens} do cache` : ''})` : ''}{m.decode_tps != null ? ` · geração: ${m.decode_tps.toFixed(1)} tok/s` : ''}{m.cancelled ? ' · interrompida' : ''}</p>)}
                 </div>
               </details>
             </section>

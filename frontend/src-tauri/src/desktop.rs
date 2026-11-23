@@ -22,18 +22,50 @@ impl Launch {
     }
 }
 
+/// "Abrir com" do gerenciador de arquivos: `ayla --abrir <ayla|athena|iris> <arquivos…>`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OpenRequest {
+    pub target: String,
+    pub paths: Vec<String>,
+}
+/// Pedidos ainda não lidos pela interface (ela os busca ao montar e a cada aviso `open-files`).
+static OPEN_QUEUE: Mutex<Vec<OpenRequest>> = Mutex::new(Vec::new());
+
+impl OpenRequest {
+    pub fn from_args() -> Option<Self> {
+        Self::parse(std::env::args().skip(1))
+    }
+    /// Caminhos absolutos, resolvidos aqui: o processo que recebe o pedido tem outra pasta atual.
+    fn parse(mut args: impl Iterator<Item = String>) -> Option<Self> {
+        if args.next().as_deref() != Some("--abrir") {
+            return None;
+        }
+        let target = args.next().filter(|t| matches!(t.as_str(), "ayla" | "athena" | "iris"))?;
+        let paths: Vec<String> = args.filter_map(|arg| gio::File::for_commandline_arg(arg).path())
+            .map(|p| p.to_string_lossy().into_owned()).collect();
+        (!paths.is_empty()).then_some(Self { target, paths })
+    }
+}
+
+/// Entrega os pedidos de abertura pendentes (cada um uma única vez).
+#[tauri::command]
+pub fn open_requests() -> Vec<OpenRequest> {
+    std::mem::take(&mut *OPEN_QUEUE.lock().unwrap())
+}
+
 fn xdg(var: &str, relative: &str) -> PathBuf {
     std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute())
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(relative))
 }
 
-/// Ícone da Ayla no menu de aplicativos (o mesmo caminho que o instalador usa). `None` num
-/// perfil separado (`AYLA_DATA_DIR`), para testes não trocarem o ícone real do usuário.
-pub fn menu_icon_path() -> Option<PathBuf> {
+/// Pasta dos ícones da Ayla e das entradas do menu (os mesmos caminhos que o instalador usa).
+/// `None` num perfil separado (`AYLA_DATA_DIR`), para testes não trocarem o ícone real do usuário.
+fn system_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
     if std::env::var_os("AYLA_DATA_DIR").is_some() {
         return None;
     }
-    Some(xdg("XDG_DATA_HOME", ".local/share").join("icons/hicolor/512x512/apps/dev.feit.ayla.png"))
+    let data = xdg("XDG_DATA_HOME", ".local/share");
+    Some((data.join("icons/hicolor/512x512/apps"), data.join("applications"), xdg("XDG_CONFIG_HOME", ".config").join("autostart")))
 }
 
 /// Valida o PNG do ícone (base64, até 2 MB, 512×512) e devolve os bytes e os pixels RGBA.
@@ -57,26 +89,88 @@ fn decode_icon(png: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
 }
 const ICON_SIDE: i32 = 512;
 
-/// Ícone escolhido em Aparência: PNG 512×512 desenhado pela interface. Vira o ícone da
-/// janela e do menu de aplicativos; só regrava o arquivo quando ele muda.
+/// Ícones escolhidos em Aparência: PNGs 512×512 desenhados pela interface. O da Ayla vira o
+/// ícone da janela; os três vão para o menu e o "Abrir com" (Ayla, Athena e Iris).
 #[tauri::command]
-pub fn appearance_icon(window: WebviewWindow, png: String) -> Result<(), String> {
+pub fn appearance_icon(window: WebviewWindow, png: String, athena: Option<String>, iris: Option<String>) -> Result<(), String> {
     let (bytes, rgba) = decode_icon(&png)?;
     let side = ICON_SIDE as u32;
     window.set_icon(tauri::image::Image::new_owned(rgba, side, side)).map_err(|_| "Não foi possível trocar o ícone da janela")?;
-    let Some(path) = menu_icon_path() else { return Ok(()) };
-    if fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
-        return Ok(());
+    let Some((icons, applications, autostart)) = system_dirs() else { return Ok(()) };
+    let mut changed = false;
+    let mut install = |base: &str, bytes: &[u8], entries: &[PathBuf]| -> Result<(), String> {
+        let (name, fresh) = install_icon(&icons, base, bytes)?;
+        changed |= fresh;
+        // Caminho absoluto: barras e menus leem o arquivo direto, sem depender do cache do tema.
+        let path = icons.join(format!("{name}.png"));
+        for entry in entries {
+            changed |= set_entry_icon(entry, &path.to_string_lossy())?;
+        }
+        Ok(())
+    };
+    install(ICON_BASE, &bytes, &[applications.join("dev.feit.ayla.desktop"), applications.join("dev.feit.ayla-login.desktop"), autostart.join("dev.feit.ayla.desktop")])?;
+    for (organ, png) in [("athena", athena), ("iris", iris)] {
+        let Some(png) = png else { continue };
+        let (bytes, _) = decode_icon(&png)?;
+        install(&format!("{ICON_BASE}.{organ}"), &bytes, &[applications.join(format!("{ICON_BASE}.{organ}.desktop"))])?;
     }
-    let dir = path.parent().ok_or("Pasta de ícones indisponível")?;
-    fs::create_dir_all(dir).map_err(|_| "Não foi possível guardar o ícone")?;
-    let temporary = dir.join(".dev.feit.ayla.png.tmp");
-    fs::write(&temporary, &bytes).and_then(|()| fs::rename(&temporary, &path)).map_err(|_| "Não foi possível guardar o ícone")?;
-    // Avisa os menus de que o tema de ícones mudou (a pasta do tema é a referência de cache).
-    if let Some(theme) = dir.ancestors().nth(2) {
-        let _ = fs::File::open(theme).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if changed {
+        refresh_icon_cache(&icons);
     }
     Ok(())
+}
+const ICON_BASE: &str = "dev.feit.ayla";
+
+/// Grava o ícone com um nome que muda junto com o conteúdo (`<base>-<hash>.png`): barras e menus
+/// guardam ícones pelo nome, então um nome novo é a forma segura de trocar o desenho sem
+/// reiniciá-los. Remove as versões anteriores. Devolve o nome e se algo mudou no disco.
+fn install_icon(dir: &Path, base: &str, bytes: &[u8]) -> Result<(String, bool), String> {
+    let name = format!("{base}-{}", &format!("{:x}", Sha256::digest(bytes))[..8]);
+    let path = dir.join(format!("{name}.png"));
+    let mut changed = false;
+    if fs::read(&path).ok().as_deref() != Some(bytes) {
+        fs::create_dir_all(dir).map_err(|_| "Não foi possível guardar o ícone")?;
+        let temporary = dir.join(format!(".{name}.png.tmp"));
+        fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, &path)).map_err(|_| "Não foi possível guardar o ícone")?;
+        changed = true;
+    }
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let old = file.strip_suffix(".png").and_then(|f| f.strip_prefix(base)).and_then(|f| f.strip_prefix('-'))
+            .is_some_and(|hash| hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        if old && file != format!("{name}.png") {
+            changed |= fs::remove_file(entry.path()).is_ok();
+        }
+    }
+    Ok((name, changed))
+}
+
+/// Troca o `Icon=` de uma entrada instalada (se existir). Devolve se mudou.
+fn set_entry_icon(entry: &Path, icon: &str) -> Result<bool, String> {
+    let Ok(text) = fs::read_to_string(entry) else { return Ok(false) };
+    let updated: String = text.lines().map(|line| if line.starts_with("Icon=") { format!("Icon={icon}\n") } else { format!("{line}\n") }).collect();
+    if updated == text {
+        return Ok(false);
+    }
+    let temporary = entry.with_extension("desktop.tmp");
+    fs::write(&temporary, updated).and_then(|()| fs::rename(&temporary, entry)).map_err(|_| "Não foi possível atualizar o menu de aplicativos")?;
+    Ok(true)
+}
+
+/// Um `icon-theme.cache` antigo na pasta de ícones do usuário (criado por outros programas)
+/// esconde dos menus e da barra os ícones que não estavam nele. Avisa que a pasta mudou e refaz
+/// o cache; sem a ferramenta, remove-o (os menus voltam a ler a pasta).
+fn refresh_icon_cache(icons: &Path) {
+    let Some(theme) = icons.ancestors().nth(2) else { return };
+    let _ = fs::File::open(theme).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    let cache = theme.join("icon-theme.cache");
+    if cache.exists() {
+        let rebuilt = Command::new("gtk-update-icon-cache").args(["-q", "-f", "-t"]).arg(theme)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !rebuilt {
+            let _ = fs::remove_file(&cache);
+        }
+    }
 }
 
 /// Pasta de dados da Ayla, a mesma que o Tauri usa (`app_data_dir`).
@@ -86,7 +180,7 @@ pub fn data_root() -> PathBuf {
 }
 
 // GApplication encaminha as ativações à instância dona do nome no D-Bus da sessão.
-pub fn register(launch: Launch) -> Result<Option<(gio::Application, mpsc::Receiver<Launch>)>, String> {
+pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio::Application, mpsc::Receiver<Launch>)>, String> {
     let root = data_root();
     if launch == Launch::Login && !PreferenceStore::new(&root).load().map_err(|e| e.to_string())?.desktop.autostart {
         return Ok(None);
@@ -102,13 +196,28 @@ pub fn register(launch: Launch) -> Result<Option<(gio::Application, mpsc::Receiv
         action.connect_activate(move |_, _| { let _ = sender.send(mode); });
         instance.add_action(&action);
     }
+    let action = gio::SimpleAction::new("open-files", Some(webkit2gtk::glib::VariantTy::STRING));
+    let sender = tx.clone();
+    action.connect_activate(move |_, parameter| {
+        let Some(request) = parameter.and_then(|p| p.str()).and_then(|text| serde_json::from_str::<OpenRequest>(text).ok()) else { return };
+        OPEN_QUEUE.lock().unwrap().push(request);
+        let _ = sender.send(Launch::App);
+    });
+    instance.add_action(&action);
     instance.register(gio::Cancellable::NONE).map_err(|e| e.to_string())?;
     if instance.is_remote() {
-        if launch != Launch::Login {
+        if let Some(request) = open {
+            let text = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+            instance.activate_action("open-files", Some(&text.to_variant()));
+            if let Some(bus) = instance.dbus_connection() { bus.flush_sync(gio::Cancellable::NONE).map_err(|e| e.to_string())?; }
+        } else if launch != Launch::Login {
             instance.activate_action(if launch == Launch::Quick { "quick" } else { "show" }, None);
             if let Some(bus) = instance.dbus_connection() { bus.flush_sync(gio::Cancellable::NONE).map_err(|e| e.to_string())?; }
         }
         return Ok(None);
+    }
+    if let Some(request) = open {
+        OPEN_QUEUE.lock().unwrap().push(request);
     }
     Ok(Some((instance, rx)))
 }
@@ -435,7 +544,11 @@ pub fn launch(app: &AppHandle, mode: Launch) -> Result<(), String> {
         Launch::Login if app.state::<Core>().prefs()?.desktop.background => Ok(()),
         Launch::Quick if quick && (pending || window.is_visible().unwrap_or(false)) => close(app, &window),
         _ => set_mode(app, mode == Launch::Quick),
+    }?;
+    if mode == Launch::App && !OPEN_QUEUE.lock().unwrap().is_empty() {
+        app.emit("open-files", ()).map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 fn close(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
@@ -526,6 +639,47 @@ mod icon_tests {
         pixbuf.fill(0xff9f43ff);
         let bytes = pixbuf.save_to_bufferv("png", &[]).unwrap();
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn icone_versionado_troca_o_nome_e_a_entrada() {
+        let base = std::env::temp_dir().join(format!("ayla-icones-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let icons = base.join("hicolor/512x512/apps");
+        fs::create_dir_all(&icons).unwrap();
+        fs::write(icons.join("dev.feit.ayla.png"), b"instalador").unwrap();
+        fs::write(icons.join("dev.feit.ayla.iris-0badf00d.png"), b"iris").unwrap();
+        let (first, changed) = install_icon(&icons, "dev.feit.ayla", b"um").unwrap();
+        assert!(changed && first.starts_with("dev.feit.ayla-") && first.len() == "dev.feit.ayla-".len() + 8);
+        assert_eq!(install_icon(&icons, "dev.feit.ayla", b"um").unwrap(), (first.clone(), false), "mesmo desenho, nada muda");
+        let (second, _) = install_icon(&icons, "dev.feit.ayla", b"dois").unwrap();
+        assert_ne!(first, second);
+        assert!(!icons.join(format!("{first}.png")).exists(), "versão anterior removida");
+        assert!(icons.join("dev.feit.ayla.png").exists() && icons.join("dev.feit.ayla.iris-0badf00d.png").exists(), "outros ícones ficam");
+
+        let entry = base.join("dev.feit.ayla.desktop");
+        fs::write(&entry, "[Desktop Entry]\nName=Ayla\nIcon=dev.feit.ayla\nExec=ayla\n").unwrap();
+        assert!(set_entry_icon(&entry, &second).unwrap());
+        assert_eq!(fs::read_to_string(&entry).unwrap(), format!("[Desktop Entry]\nName=Ayla\nIcon={second}\nExec=ayla\n"));
+        assert!(!set_entry_icon(&entry, &second).unwrap());
+        assert!(!set_entry_icon(&base.join("ausente.desktop"), &second).unwrap());
+
+        fs::write(base.join("hicolor/icon-theme.cache"), b"velho").unwrap();
+        refresh_icon_cache(&icons);
+        let cache = fs::read(base.join("hicolor/icon-theme.cache")).ok();
+        assert_ne!(cache.as_deref(), Some(&b"velho"[..]), "cache antigo refeito ou removido");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn abrir_com_le_o_alvo_e_caminhos_absolutos() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter();
+        assert_eq!(OpenRequest::parse(args(&["--quick"])), None);
+        assert_eq!(OpenRequest::parse(args(&["--abrir", "ayla"])), None, "sem arquivo, abre normal");
+        assert_eq!(OpenRequest::parse(args(&["--abrir", "outro", "/tmp/a.md"])), None);
+        let request = OpenRequest::parse(args(&["--abrir", "athena", "/tmp/a b.md", "file:///tmp/c%20d.txt", "rel.md"])).unwrap();
+        let cwd = std::env::current_dir().unwrap().join("rel.md").to_string_lossy().into_owned();
+        assert_eq!(request, OpenRequest { target: "athena".into(), paths: vec!["/tmp/a b.md".into(), "/tmp/c d.txt".into(), cwd] });
     }
 
     #[test]

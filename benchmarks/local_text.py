@@ -47,7 +47,7 @@ def post(base, key, path, payload):
 
 
 @contextmanager
-def server(binary, model, threads, device, reserve_mib):
+def server(binary, model, threads, device, reserve_mib, extra=()):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -58,6 +58,7 @@ def server(binary, model, threads, device, reserve_mib):
     flags = ["--offline", "--no-webui", "--no-warmup", "--no-slots", "--parallel", "1",
              "--host", "127.0.0.1", "--port", str(port), "-c", str(CONTEXT),
              "-t", str(threads), "-tb", str(threads)]
+    flags += list(extra)
     if device:
         flags += ["--device", device, "-ngl", "auto", "--split-mode", "none", "--fit-target", str(reserve_mib)]
     else:
@@ -204,7 +205,7 @@ def sql_canary(base, key):
 
 
 def measure(args, model):
-    with server(args.server, model, args.threads, args.device, args.reserve_mib) as (base, key, pid, load):
+    with server(args.server, model, args.threads, args.device, args.reserve_mib, args.server_arg) as (base, key, pid, load):
         if args.suite == "sql":
             return dict(model=model.name, sql=sql_canary(base, key))
         text = "".join(f"Registro {i}: a equipe revisou o documento e confirmou a entrega.\n" for i in range(1000))
@@ -233,6 +234,8 @@ def main():
     parser.add_argument("--threads", type=int, default=max(1, len(os.sched_getaffinity(0)) - 1))
     parser.add_argument("--device", help="Dispositivo informado por llama-server --list-devices, ex.: Vulkan0")
     parser.add_argument("--reserve-mib", type=int, default=8192, help="Reserva de memória no modo GPU")
+    parser.add_argument("--server-arg", action="append", default=[],
+                        help="Argumento extra do llama-server (repetível), ex.: --server-arg=-fa --server-arg=on")
     parser.add_argument("models", nargs="+", type=Path)
     args = parser.parse_args()
     args.server = args.server.resolve(strict=True)
@@ -253,7 +256,7 @@ def main():
             parser.error(f"Dispositivo {args.device} ausente no runtime: {devices.strip()}")
     version = re.search(r"^version: (.+)$", runtime_info("--version"), re.MULTILINE)
     report = dict(cpu=cpu, gpu_requested=bool(args.device), device=device_info, threads=args.threads,
-                  reserve_mib=args.reserve_mib if args.device else None, context=CONTEXT, seed=42,
+                  reserve_mib=args.reserve_mib if args.device else None, server_args=args.server_arg, context=CONTEXT, seed=42,
                   runtime=version.group(1) if version else "unknown")
     # Uma linha por modelo permite acompanhar a rodada e preservar resultados parciais.
     with args.out.open("x") as output:

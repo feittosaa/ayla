@@ -35,6 +35,10 @@ pub struct Preferences {
     pub history_messages: usize,
     pub history_chars: usize,
     pub context_tokens: u32,
+    /// Contexto automático: 32K nos modelos do catálogo com placa de vídeo, `context_tokens` no resto.
+    /// Ausente em arquivos antigos: automático se o contexto ainda é o padrão (8192).
+    #[serde(default)]
+    pub context_auto: Option<bool>,
     pub idle_seconds: u64,
     /// Memória longa automática; desligar pausa novas extrações sem apagar nada.
     pub memory_auto: bool,
@@ -58,6 +62,10 @@ pub struct Preferences {
     /// Modo de resposta escolhido na conversa ("local", "auto" ou "cloud"); vale para as
     /// próximas conversas até ser trocado. Vazio: segue o modo de uso.
     pub response_source: String,
+    /// Fontes tiradas da barra de Bases ("imagens:pinterest", "academico:arxiv", "base:<id>"): somem da
+    /// barra e não são consultadas, até voltarem pelo "+". Não é um bloqueio permanente.
+    #[serde(default)]
+    pub hidden_sources: Vec<String>,
     /// Aparência da Ayla: modo, cores, quinas, transparência e ícones.
     pub appearance: Appearance,
 }
@@ -142,6 +150,9 @@ impl Default for Notifications {
 /// v2: contexto padrão 2048 → 8192 (modelos com raciocínio esgotavam o limite).
 const VERSION: u32 = 2;
 const V1_DEFAULT_CONTEXT: u32 = 2048;
+const DEFAULT_CONTEXT: u32 = 8192;
+/// Contexto automático com placa de vídeo: medido em 23/11/2026, custa 0,4–0,8 GB a mais que 8K nos modelos do catálogo.
+pub const GPU_CONTEXT: u32 = 32768;
 
 impl Default for Preferences {
     fn default() -> Self {
@@ -161,6 +172,7 @@ impl Default for Preferences {
             history_messages: 10,
             history_chars: 12000,
             context_tokens: 8192,
+            context_auto: None,
             idle_seconds: 120,
             memory_auto: true,
             voice: Some(true),
@@ -173,6 +185,7 @@ impl Default for Preferences {
             library_folders: Vec::new(),
             athena_git: true,
             response_source: String::new(),
+            hidden_sources: Vec::new(),
             appearance: Appearance::default(),
         }
     }
@@ -180,6 +193,12 @@ impl Default for Preferences {
 impl Preferences {
     pub fn initial() -> Self {
         Self::default()
+    }
+    pub fn source_shown(&self, id: &str) -> bool {
+        !self.hidden_sources.iter().any(|h| h == id)
+    }
+    pub fn context_is_auto(&self) -> bool {
+        self.context_auto.unwrap_or(self.context_tokens == DEFAULT_CONTEXT)
     }
     pub fn percent(&self) -> u8 {
         self.resource_percent.unwrap_or(match self.profile {
@@ -269,6 +288,8 @@ impl Preferences {
             || self.context_tokens > 32768
             || self.idle_seconds > 3600
             || !["", "local", "auto", "cloud"].contains(&self.response_source.as_str())
+            || self.hidden_sources.len() > 200
+            || self.hidden_sources.iter().any(|s| s.is_empty() || s.len() > 200 || s.chars().any(char::is_control))
             || !self.appearance.valid()
         {
             return Err(io::Error::other("Configuração fora dos limites suportados"));
@@ -498,6 +519,17 @@ mod tests {
         fs::write(&store.path, r#"{"version":3}"#).unwrap();
         assert!(store.load().is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn context_is_automatic_unless_someone_chose_a_value() {
+        let mut prefs = Preferences::default();
+        assert!(prefs.context_is_auto());
+        prefs.context_tokens = 4096;
+        assert!(!prefs.context_is_auto(), "valor personalizado em arquivo antigo continua valendo");
+        let old: Preferences = serde_json::from_str(r#"{"version":2,"context_tokens":8192}"#).unwrap();
+        assert!(old.context_is_auto());
+        let chosen: Preferences = serde_json::from_str(r#"{"version":2,"context_tokens":8192,"context_auto":false}"#).unwrap();
+        assert!(!chosen.context_is_auto(), "8K escolhido à mão");
     }
     #[test]
     fn microphone_is_on_by_default_and_only_an_explicit_choice_turns_it_off() {

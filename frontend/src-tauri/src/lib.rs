@@ -132,7 +132,7 @@ pub fn run() {
         std::process::exit(code);
     }
     let initial = desktop::Launch::from_args();
-    let (instance, requests) = match desktop::register(initial) {
+    let (instance, requests) = match desktop::register(initial, desktop::OpenRequest::from_args()) {
         Ok(Some(primary)) => primary,
         Ok(None) => return,
         Err(error) => { eprintln!("Falha ao registrar a Ayla na sessão: {error}"); return; }
@@ -208,6 +208,21 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             let core = Core::open(directory.clone()).map_err(io::Error::other)?;
+            // Workers de uma Ayla que caiu sem encerrar continuariam ocupando RAM e VRAM.
+            let reaped = core.runtime.reap_orphans();
+            if reaped > 0 { eprintln!("Ayla: {reaped} modelo(s) local(is) de uma execução anterior encerrado(s)."); }
+            // SIGTERM (pkill, fim da sessão), SIGHUP e SIGINT saem pelo caminho normal, que encerra
+            // os modelos locais e o contêiner da Moneta.
+            #[cfg(unix)]
+            {
+                let exit = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup()), signal(SignalKind::interrupt())) else { return };
+                    tokio::select! { _ = term.recv() => {}, _ = hup.recv() => {}, _ = int.recv() => {} }
+                    exit.exit(0);
+                });
+            }
             let weak = std::sync::Arc::downgrade(&core.runtime);
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -269,6 +284,18 @@ pub fn run() {
             desktop::desktop_view,
             desktop::quick_ready,
             desktop::desktop_action,
+            desktop::open_requests,
+            core::services::athena_open_external,
+            core::services::bases_list,
+            core::services::bases_install,
+            core::services::bases_remove,
+            core::services::bases_validate,
+            core::services::bases_approve,
+            core::services::bases_discard,
+            core::services::image_keys_status,
+            core::services::image_key_set,
+            core::services::image_save,
+            core::services::iris_open_external,
             backend_connection,
             core::services::desktop_snapshot,
             core::services::save_preferences,
@@ -295,6 +322,7 @@ pub fn run() {
             core::services::export_file,
             core::services::add_file,
             core::services::add_file_data,
+            core::services::capture_screen,
             core::services::remove_file,
             core::services::project_files,
             core::services::create_project,
@@ -381,6 +409,8 @@ pub fn run() {
             core::research::suggests_web_search,
             core::research::automatic_check,
             core::services::set_response_source,
+            core::services::source_remove,
+            core::services::source_restore,
             core::version::app_version
         ])
         .build(tauri::generate_context!())
