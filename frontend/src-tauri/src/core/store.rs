@@ -74,6 +74,15 @@ pub struct Reminder {
     pub due: i64,
     pub repeat: String,
     pub conversation_id: Option<String>,
+    /// Início da série (primeira ocorrência), em segundos Unix.
+    pub start: i64,
+    pub all_day: bool,
+    /// Avisa por notificação (é um lembrete); sem aviso, é só um evento do calendário.
+    pub notify: bool,
+    /// Único que já avisou: continua no calendário, sem novo aviso.
+    pub fired: bool,
+    /// Antecedências dos avisos, em minutos (0 = na hora). Vazio quando não avisa.
+    pub alerts: Vec<i64>,
 }
 /// Trecho de um arquivo guardado (Iris).
 #[derive(Clone, Debug, Serialize)]
@@ -88,7 +97,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 10;
+const SCHEMA: u32 = 12;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -199,6 +208,23 @@ impl Store {
             tx.execute_batch("ALTER TABLE metrics ADD COLUMN prompt_tokens INTEGER; ALTER TABLE metrics ADD COLUMN cache_tokens INTEGER;
                 ALTER TABLE metrics ADD COLUMN prompt_ms REAL; ALTER TABLE metrics ADD COLUMN decode_tokens INTEGER;
                 ALTER TABLE metrics ADD COLUMN decode_ms REAL; PRAGMA user_version=10;")?;
+            tx.commit()?;
+        }
+        // v11: calendário da Athena. Lembretes viram itens do calendário: início da série (`start`),
+        // dia todo, aviso opcional (`notify`) e `fired` para o único que já avisou (fica no
+        // calendário em vez de sair da tabela). `due` continua sendo o próximo aviso.
+        if version <= 10 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE reminders ADD COLUMN start INTEGER; ALTER TABLE reminders ADD COLUMN all_day INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE reminders ADD COLUMN notify INTEGER NOT NULL DEFAULT 1; ALTER TABLE reminders ADD COLUMN fired INTEGER NOT NULL DEFAULT 0;
+                UPDATE reminders SET start=due; PRAGMA user_version=11;")?;
+            tx.commit()?;
+        }
+        // v12: vários avisos por item (antecedência em minutos; 0 = na hora), em JSON.
+        if version <= 11 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE reminders ADD COLUMN alerts TEXT;
+                UPDATE reminders SET alerts=CASE notify WHEN 1 THEN '[0]' ELSE '[]' END; PRAGMA user_version=12;")?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -603,17 +629,44 @@ impl Store {
         }
         Ok(out)
     }
+    /// Lembrete pedido na conversa: avisa em `due`, que também é o início da série.
     pub fn add_reminder(&self, text: &str, due: i64, repeat: &str, conversation: Option<&str>) -> rusqlite::Result<Reminder> {
-        let reminder = Reminder { id: id(), text: text.to_string(), due, repeat: repeat.to_string(), conversation_id: conversation.map(String::from) };
-        self.conn.execute("INSERT INTO reminders VALUES(?1,?2,?3,?4,?5,?6)", params![reminder.id, reminder.text, reminder.due, reminder.repeat, now(), reminder.conversation_id])?;
+        let reminder = Reminder { id: id(), text: text.to_string(), due, repeat: repeat.to_string(), conversation_id: conversation.map(String::from), start: due, all_day: false, notify: true, fired: false, alerts: vec![0] };
+        self.save_event(&reminder)?;
         Ok(reminder)
     }
-    /// Lembretes em ordem de horário; com `until`, só os que já venceram.
-    pub fn reminders(&self, until: Option<i64>) -> rusqlite::Result<Vec<Reminder>> {
+    /// Cria ou substitui um item do calendário (mantém a data de criação e a conversa de origem).
+    pub fn save_event(&self, item: &Reminder) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO reminders(id,text,due,repeat,created_at,conversation_id,start,all_day,notify,fired,alerts) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET text=excluded.text, due=excluded.due, repeat=excluded.repeat, start=excluded.start,
+               all_day=excluded.all_day, notify=excluded.notify, fired=excluded.fired, alerts=excluded.alerts",
+            params![item.id, item.text, item.due, item.repeat, now(), item.conversation_id, item.start, item.all_day, !item.alerts.is_empty(), item.fired,
+                serde_json::to_string(&item.alerts).unwrap_or_else(|_| "[]".into())],
+        )?;
+        Ok(())
+    }
+    fn read_reminders(&self, filter: &str, until: Option<i64>) -> rusqlite::Result<Vec<Reminder>> {
         self.conn
-            .prepare("SELECT id,text,due,repeat,conversation_id FROM reminders WHERE ?1 IS NULL OR due<=?1 ORDER BY due, rowid")?
-            .query_map([until], |r| Ok(Reminder { id: r.get(0)?, text: r.get(1)?, due: r.get(2)?, repeat: r.get(3)?, conversation_id: r.get(4)? }))?
+            .prepare(&format!("SELECT id,text,due,repeat,conversation_id,COALESCE(start,due),all_day,notify,fired,alerts FROM reminders WHERE {filter} ORDER BY due, rowid"))?
+            .query_map([until], |r| Ok(Reminder {
+                id: r.get(0)?, text: r.get(1)?, due: r.get(2)?, repeat: r.get(3)?, conversation_id: r.get(4)?,
+                start: r.get(5)?, all_day: r.get(6)?, notify: r.get(7)?, fired: r.get(8)?,
+                alerts: r.get::<_, Option<String>>(9)?.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default(),
+            }))?
             .collect()
+    }
+    /// Lembretes com aviso pendente, em ordem de horário; com `until`, só os que já venceram.
+    pub fn reminders(&self, until: Option<i64>) -> rusqlite::Result<Vec<Reminder>> {
+        self.read_reminders("notify=1 AND fired=0 AND (?1 IS NULL OR due<=?1)", until)
+    }
+    /// Todos os itens do calendário (eventos, lembretes e os únicos que já avisaram).
+    pub fn events(&self) -> rusqlite::Result<Vec<Reminder>> {
+        self.read_reminders("?1 IS NULL", None)
+    }
+    /// O único que avisou fica no calendário, sem novo aviso.
+    pub fn mark_fired(&self, id: &str) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute("UPDATE reminders SET fired=1 WHERE id=?1", [id])? > 0)
     }
     pub fn reschedule_reminder(&self, id: &str, due: i64) -> rusqlite::Result<bool> {
         Ok(self.conn.execute("UPDATE reminders SET due=?2 WHERE id=?1", params![id, due])? > 0)
@@ -1081,6 +1134,18 @@ mod tests {
         assert!(db.delete_reminder(&soon.id).unwrap());
         assert!(db.reminders(Some(5_000)).unwrap().is_empty());
         assert_eq!(db.reminders(None).unwrap()[0].due, 90_000);
+        // Calendário: o único que avisou continua nos eventos; o evento sem aviso nunca avisa.
+        let once = db.add_reminder("dentista", 3_000, "none", None).unwrap();
+        assert!(db.mark_fired(&once.id).unwrap());
+        let quiet = Reminder { id: id(), text: "feriado".into(), due: 1_000, repeat: "yearly".into(), conversation_id: None, start: 1_000, all_day: true, notify: false, fired: false, alerts: vec![] };
+        db.save_event(&quiet).unwrap();
+        assert_eq!(db.reminders(Some(10_000)).unwrap().iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), Vec::<&str>::new());
+        let all = db.events().unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|r| r.id == once.id && r.fired && r.start == 3_000));
+        let edited = Reminder { text: "feriado nacional".into(), ..quiet.clone() };
+        db.save_event(&edited).unwrap();
+        assert_eq!(db.events().unwrap().iter().filter(|r| r.id == quiet.id).map(|r| r.text.as_str()).collect::<Vec<_>>(), ["feriado nacional"]);
         drop(db);
         for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
@@ -1114,6 +1179,24 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
     #[test]
+    fn migracao_v11_mantem_lembretes_como_itens_do_calendario() {
+        let root = std::env::temp_dir().join(format!("ayla-v11-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("ayla.db");
+        {
+            let db = Store::open(&path).unwrap();
+            db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired;
+                INSERT INTO reminders VALUES('r1','regar as plantas',5000,'daily',1,NULL); PRAGMA user_version=10;").unwrap();
+        }
+        let db = Store::open(&path).unwrap();
+        assert_eq!(db.version().unwrap(), SCHEMA);
+        let item = db.reminders(None).unwrap().pop().unwrap();
+        assert_eq!((item.start, item.due, item.notify, item.fired, item.all_day, item.alerts), (5000, 5000, true, false, false, vec![0]), "início = próximo aviso; aviso na hora");
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v12-")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn extras_da_resposta_voltam_ao_reabrir_e_migracao_v9_preserva_conversas() {
         let root = std::env::temp_dir().join(format!("ayla-extras-{}", id()));
         std::fs::create_dir(&root).unwrap();
@@ -1121,10 +1204,10 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
         db.save_turn(&chat.id, "antes", "resposta antiga", true, &[], &[], None).unwrap();
-        db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
+        db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
-        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v10-")), "backup antes da migração");
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v12-")), "backup antes da migração");
         db.save_turn(&chat.id, "busca imagens de gato", "Encontrei 1 imagem", true, &[], &[], None).unwrap();
         db.set_last_reply_extras(&chat.id, r#"{"images":{"query":"gato","items":[{"id":"1"}],"links":[]},"sources":[{"id":"artigo:0","name":"[1] X","pages":[],"url":"https://doi.org/1"}]}"#).unwrap();
         drop(db);
@@ -1144,7 +1227,7 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
         db.save_turn(&chat.id,"a","b",true,&[],&[],None).unwrap();
-        db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
+        db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
         db.save_turn(&chat.id,"c","d",true,&[],&[],Some("cloud_search")).unwrap();

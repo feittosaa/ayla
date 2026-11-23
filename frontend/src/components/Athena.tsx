@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, ImportIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { CalendarIcon, ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, ImportIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
 import { IMAGE, VIDEO, folderOf, isAttachment, titleOf } from '../services/Wiki';
@@ -14,6 +15,7 @@ import AthenaReader from './AthenaReader';
 import { bookRoot, isBookRoot, readingKey, seriesOf, sourceOf, useLibrary } from '../services/Library';
 import { LockDialog, LockedView, UNLOCK_GRACE_MS, type LockMode, type LockResult } from './AthenaLock';
 import AthenaGraph, { type NoteGraph } from './AthenaGraph';
+import AthenaCalendar from './AthenaCalendar';
 
 type Root = { id: string; kind: 'ayla' | 'vault' | 'project'; name: string; path: string; available: boolean; obsidian: boolean; git: boolean; folders: string[]; notes: Note[]; files?: Note[]; texts?: Note[]; bannerHeight?: number | null; protected?: Lock[]; lockedFiles?: FileLock[] };
 /** Pasta protegida da raiz: aberta nesta execução (desde `since`, em segundos) ou bloqueada. */
@@ -30,13 +32,14 @@ type GitStatus = { repo: boolean; branch: string; changes: number; files: Change
 type GitInfo = { enabled: boolean; obsidian: boolean; status: GitStatus; last: { at: number; outcome: Outcome } | null };
 type Adding = { root: string; folder: string; kind: 'note' | 'folder' };
 type Folder = { name: string; path: string; folders: Folder[]; notes: Note[]; files: Note[]; locked: FileLock[] };
-type TagEntry = { tag: string; notes: NoteGraph['nodes'] };
-type Overview = { tags: TagEntry[]; graph: NoteGraph };
+type Overview = { graph: NoteGraph };
 type Pane = { tabs: Tab[]; active: number };
 type NoteLocation = Pick<Tab, 'root' | 'path'>;
 const noteKey = ({ root, path }: NoteLocation) => JSON.stringify([root, path]);
+/** Chave de seleção de uma pasta (não se confunde com a de uma nota). */
+const folderKey = ({ root, path }: NoteLocation) => JSON.stringify([root, path, 'pasta']);
 /** O que está sendo arrastado: nota ou pasta da árvore, ou uma aba. */
-type DragItem = { kind: 'note' | 'file' | 'folder'; root: string; path: string; label: string; tab?: { pane: number; at: number }; notes?: NoteLocation[] };
+type DragItem = { kind: 'note' | 'file' | 'folder'; root: string; path: string; label: string; tab?: { pane: number; at: number }; notes?: NoteLocation[]; folders?: NoteLocation[] };
 /** Onde soltar: numa pasta (move o arquivo) ou numa tela (abre a nota; nas laterais, divide a tela). */
 type Drop = { kind: 'folder'; root: string; path: string } | { kind: 'pane'; pane: number; side: 'center' | 'left' | 'right' };
 /** Abas abertas (até duas telas lado a lado), a tela em foco e o painel do Git: ficam salvos neste computador. */
@@ -81,9 +84,36 @@ const WORKSPACE = 'ayla-athena-workspace';
 const empty: Workspace = { panes: [{ tabs: [], active: 0 }], focused: 0, panel: false };
 /** Texto aberto pelo "Abrir com Athena" fora das raízes: vale só enquanto a Ayla estiver aberta. */
 const isExternal = (root: string) => root.startsWith('aberto:');
-function restore(): Workspace {
+/** Notas e Biblioteca têm abas e telas separadas: uma nota não aparece na Biblioteca e vice-versa. */
+type View = 'notas' | 'biblioteca';
+type Spaces = Record<View, Workspace>;
+const SPACES = 'ayla-athena-workspaces';
+/** Só as abas de um lado (livros ou notas), sem telas vazias além da primeira. */
+function only(ws: Workspace, books: boolean): Workspace {
+  let panes = ws.panes.map(p => {
+    const current = p.tabs[p.active];
+    const tabs = p.tabs.filter(t => isBookRoot(t.root) === books);
+    const kept = current ? tabs.indexOf(current) : -1;
+    return { tabs, active: kept >= 0 ? kept : Math.max(0, Math.min(p.active, tabs.length - 1)) };
+  });
+  if (panes.length > 1) panes = panes.filter(p => p.tabs.length);
+  if (!panes.length) panes = [{ tabs: [], active: 0 }];
+  return { ...ws, panes, focused: Math.min(ws.focused, panes.length - 1) };
+}
+function restoreSpaces(): Spaces {
   try {
-    const saved = JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null') as Workspace | null;
+    const saved = JSON.parse(localStorage.getItem(SPACES) ?? 'null') as Partial<Spaces> | null;
+    if (saved) return { notas: only(parse(saved.notas), false), biblioteca: only(parse(saved.biblioteca), true) };
+  } catch { /* volta ao formato antigo */ }
+  // Antes, notas e livros dividiam as mesmas abas: separa.
+  const old = restore();
+  return { notas: only(old, false), biblioteca: { ...only(old, true), panel: false } };
+}
+function restore(): Workspace {
+  try { return parse(JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null')); } catch { return empty; }
+}
+function parse(saved: Workspace | null | undefined): Workspace {
+  try {
     if (!saved || !Array.isArray(saved.panes) || !saved.panes.length) return empty;
     const panes = saved.panes.slice(0, 2).map(p => {
       const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string' && !isExternal(t.root)).map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: !isAttachment(t.path) }));
@@ -144,8 +174,21 @@ function ago(seconds: number) {
 /** Athena: notas em Markdown em árvore — notas da Athena, cofres (ex.: do Obsidian) e projetos —, com
  * abas (fixáveis), duas notas lado a lado, links entre notas, busca, nota do dia e painel do Git. */
 export default function Athena({ active, onOpenSettings, external }: { active: boolean; onOpenSettings: () => void; external?: { id: number; paths: string[] } }) {
-  const [workspace, setWorkspace] = useState<Workspace>(restore);
-  const opened = shownTab(workspace);
+  /** Barra lateral: notas ou Biblioteca (livros e mangás), lembrada neste computador. */
+  const [view, setView] = useState<View>(() => localStorage.getItem('ayla-athena-view') === 'biblioteca' ? 'biblioteca' : 'notas');
+  useEffect(() => { localStorage.setItem('ayla-athena-view', view); }, [view]);
+  const viewRef = useRef(view); viewRef.current = view;
+  const [spaces, setSpaces] = useState<Spaces>(restoreSpaces);
+  const spacesRef = useRef(spaces); spacesRef.current = spaces;
+  const workspace = spaces[view];
+  /** Abas e telas do lado à vista (ou do lado pedido). */
+  const setWorkspace = useCallback((update: (ws: Workspace) => Workspace, target?: View) => setSpaces(prev => {
+    const key = target ?? viewRef.current;
+    return { ...prev, [key]: update(prev[key]) };
+  }), []);
+  /** Renomear, mover e apagar valem para os dois lados. */
+  const setEveryWorkspace = useCallback((update: (ws: Workspace) => Workspace) => setSpaces(prev => ({ notas: update(prev.notas), biblioteca: update(prev.biblioteca) })), []);
+  const opened = shownTab(spaces.notas);
   const [tree, setTree] = useState<Tree | null>(null);
   const [expanded, setExpanded] = useState<string[]>(() => ['ayla|', ...(opened ? ancestors(opened.root, opened.path) : [])]);
   const [query, setQuery] = useState(''); const [hits, setHits] = useState<Hit[] | null>(null);
@@ -157,8 +200,6 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   const [overview, setOverview] = useState<Overview | null>(null);
   const [graphError, setGraphError] = useState('');
   const overviewRequest = useRef(0);
-  const tags = overview?.tags ?? [];
-  const [tag, setTag] = useState<string | null>(null); const [showTags, setShowTags] = useState(false);
   /** Raiz em foco: a da nota aberta ao entrar na Athena (não sempre a Athena). */
   const [focus, setFocus] = useState(() => opened?.root ?? 'ayla'); const [sidebar, setSidebar] = useState(true);
   const [statuses, setStatuses] = useState(['', '']); const [confirming, setConfirming] = useState<number | null>(null);
@@ -172,9 +213,6 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   /** Diálogo de senha de uma pasta protegida. */
   const [lockDialog, setLockDialog] = useState<{ mode: LockMode; root: string; path: string; file: boolean } | null>(null);
   const [clock, setClock] = useState(() => Date.now());
-  /** Barra lateral: notas ou Biblioteca (livros e mangás), lembrada neste computador. */
-  const [view, setView] = useState<'notas' | 'biblioteca'>(() => localStorage.getItem('ayla-athena-view') === 'biblioteca' ? 'biblioteca' : 'notas');
-  useEffect(() => { localStorage.setItem('ayla-athena-view', view); }, [view]);
   const { library, load: loadLibrary, saveProgress, saveMode, markBooks } = useLibrary();
   /** Importar notas (.txt/.md) para uma pasta. */
   const [importing, setImporting] = useState<{ root: string; folder: string } | null>(null);
@@ -228,6 +266,24 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     const note = selectableNotes.get(key);
     return note ? [note] : [];
   });
+  // Pastas selecionáveis: as visíveis de cada raiz disponível, menos as protegidas e bloqueadas.
+  const selectableFolders = useMemo(() => {
+    const folders = new Map<string, NoteLocation>();
+    for (const root of tree?.roots ?? []) {
+      if (!root.available) continue;
+      for (const path of root.folders) {
+        if (root.protected?.some(l => !l.unlocked && (path === l.folder || path.startsWith(`${l.folder}/`)))) continue;
+        folders.set(folderKey({ root: root.id, path }), { root: root.id, path });
+      }
+    }
+    return folders;
+  }, [tree]);
+  const selectedFolders = selected.flatMap(key => {
+    const folder = selectableFolders.get(key);
+    return folder ? [folder] : [];
+  });
+  const selectionCount = selectedNotes.length + selectedFolders.length;
+  const selectionLabel = [selectedNotes.length && `${selectedNotes.length} ${selectedNotes.length === 1 ? 'nota' : 'notas'}`, selectedFolders.length && `${selectedFolders.length} ${selectedFolders.length === 1 ? 'pasta' : 'pastas'}`].filter(Boolean).join(' e ');
   /** Item protegido que contém o caminho (pasta) ou é ele (arquivo), nas Notas ou na Biblioteca. */
   const lockOf = useCallback((root: string, path: string): Guard | undefined => {
     if (root === 'biblioteca' || isBookRoot(root)) {
@@ -243,7 +299,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   const expand = useCallback((root: string, path: string) => {
     setExpanded(prev => [...new Set([...prev, ...ancestors(root, path)])]);
   }, []);
-  useEffect(() => { localStorage.setItem(WORKSPACE, JSON.stringify(workspace)); }, [workspace]);
+  useEffect(() => { localStorage.setItem(SPACES, JSON.stringify(spaces)); }, [spaces]);
   useEffect(() => { if (active) { load(); loadOverview(); } }, [active, load, loadOverview]);
 
   const panes = workspace.panes;
@@ -251,11 +307,15 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   const activeTab = panes[focused].tabs[panes[focused].active] as Tab | undefined;
   // A raiz em foco acompanha a nota que passa a ficar visível (trocar de aba, fechar, abrir pela conversa).
   const activeRoot = activeTab?.root;
+  // Calendário no lugar das notas; abrir uma nota (pela lateral, conversa ou calendário) volta às notas.
+  const [calendar, setCalendar] = useState(false);
+  const activeKey = activeTab ? `${activeTab.root}|${activeTab.path}` : '';
+  useEffect(() => { if (activeKey) setCalendar(false); }, [activeKey]);
   useEffect(() => { if (activeRoot && !isBookRoot(activeRoot) && !isExternal(activeRoot)) setFocus(activeRoot); }, [activeRoot]);
   // A Biblioteca carrega quando aparece na lateral ou quando há um livro aberto.
-  const readingBook = workspace.panes.some(p => p.tabs.some(t => isBookRoot(t.root)));
-  /** Modo Biblioteca: a lateral na Biblioteca ou um livro à vista. */
-  const libraryMode = view === 'biblioteca' || Boolean(activeTab && isBookRoot(activeTab.root));
+  const readingBook = spaces.biblioteca.panes.some(p => p.tabs.length > 0);
+  /** Modo Biblioteca: a lateral na Biblioteca (só os livros ficam nas abas). */
+  const libraryMode = view === 'biblioteca';
   useEffect(() => {
     if (active && !library && (view === 'biblioteca' || readingBook)) void loadLibrary().catch(e => setError(errorText(e)));
   }, [active, library, view, readingBook, loadLibrary]);
@@ -288,6 +348,9 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     setError('');
     // Livros abrem em abas como as notas, mas não mudam a raiz de notas em foco.
     if (!isBookRoot(root) && !isExternal(root)) { setFocus(root); expand(root, path); }
+    // Livro abre na Biblioteca; nota, em Notas (trocando o lado à vista, se preciso).
+    const target: View = isBookRoot(root) ? 'biblioteca' : 'notas';
+    if (target !== viewRef.current) { viewRef.current = target; setView(target); }
     setWorkspace(ws => {
       const index = Math.min(ws.focused, ws.panes.length - 1);
       const pane = ws.panes[index];
@@ -301,8 +364,8 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         else { at = pane.active; tabs = tabs.map((t, k) => k === at ? tab : t); }
       }
       return { ...ws, focused: index, panes: ws.panes.map((p, k) => k === index ? { tabs, active: at } : p) };
-    });
-  }, [expand]);
+    }, target);
+  }, [expand, setWorkspace]);
   const updatePane = (index: number, change: (pane: Pane) => Pane) => setWorkspace(ws => {
     const next = ws.panes.map((p, k) => k === index ? change(p) : p);
     if (next.length > 1 && !next[index].tabs.length) { const rest = next.filter((_, k) => k !== index); return { ...ws, panes: rest, focused: 0 }; }
@@ -335,11 +398,24 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     setWorkspace(ws => ({ ...ws, focused: index, panes: ws.panes.map((p, k) => k === index ? { ...p, active: at } : p) }));
   };
   /** Troca o caminho de notas abertas (renomear ou mover nota ou pasta). */
-  const retarget = (root: string, from: string, to: string, folder = false) => setWorkspace(ws => ({ ...ws, panes: ws.panes.map(p => ({ ...p, tabs: p.tabs.map(t => t.root !== root ? t
+  // Notas fixadas no topo da lateral: só nas notas da própria Athena (cofres e projetos não).
+  const [pinnedNotes, setPinnedNotes] = useState<string[]>(() => { try { const v = JSON.parse(localStorage.getItem('ayla-athena-pinned') ?? '[]'); return Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string') : []; } catch { return []; } });
+  useEffect(() => { try { localStorage.setItem('ayla-athena-pinned', JSON.stringify(pinnedNotes)); } catch { /* sem armazenamento */ } }, [pinnedNotes]);
+  const togglePinned = (path: string) => setPinnedNotes(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+  // Pastas fixadas no topo, também só nas notas da Athena.
+  const [pinnedFolders, setPinnedFolders] = useState<string[]>(() => { try { const v = JSON.parse(localStorage.getItem('ayla-athena-pinned-folders') ?? '[]'); return Array.isArray(v) ? v.filter((p): p is string => typeof p === 'string') : []; } catch { return []; } });
+  useEffect(() => { try { localStorage.setItem('ayla-athena-pinned-folders', JSON.stringify(pinnedFolders)); } catch { /* sem armazenamento */ } }, [pinnedFolders]);
+  const togglePinnedFolder = (path: string) => setPinnedFolders(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+  const moved = (from: string, to: string, folder: boolean) => (p: string) => folder && (p === from || p.startsWith(`${from}/`)) ? `${to}${p.slice(from.length)}` : !folder && p === from ? to : p;
+  const retarget = (root: string, from: string, to: string, folder = false) => {
+    if (root === 'ayla') { setPinnedNotes(prev => prev.map(moved(from, to, folder))); if (folder) setPinnedFolders(prev => prev.map(moved(from, to, true))); }
+    retargetTabs(root, from, to, folder);
+  };
+  const retargetTabs = (root: string, from: string, to: string, folder = false) => setEveryWorkspace(ws => ({ ...ws, panes: ws.panes.map(p => ({ ...p, tabs: p.tabs.map(t => t.root !== root ? t
     : folder && t.path.startsWith(`${from}/`) ? { ...t, path: `${to}${t.path.slice(from.length)}` }
     : !folder && t.path === from ? { ...t, path: to } : t) })) }));
   /** Fecha as abas que não existem mais (nota apagada, cofre fechado). */
-  const drop = (gone: (tab: Tab) => boolean) => setWorkspace(ws => {
+  const drop = (gone: (tab: Tab) => boolean) => setEveryWorkspace(ws => {
     let next = ws.panes.map(p => {
       const current = p.tabs[p.active];
       const tabs = p.tabs.filter(t => !gone(t));
@@ -377,6 +453,16 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   };
   const split = () => setWorkspace(ws => ws.panes.length > 1 ? { ...ws, panes: [ws.panes[0]], focused: 0 } : { ...ws, panes: [...ws.panes, { tabs: [], active: 0 }], focused: 1 });
 
+  // Nota salva na Athena separada (outra janela): as abas com ela releem (sem alterações pendentes).
+  useEffect(() => {
+    let me = 'main';
+    try { me = getCurrentWebviewWindow().label; } catch { /* fora do Tauri */ }
+    const stop = listen<{ root: string; path: string; from: string }>('note-saved', event => {
+      const { root, path, from } = event.payload;
+      if (from !== me && Object.values(spacesRef.current).some(ws => ws.panes.some(p => p.tabs.some(t => same(t, root, path))))) setRevision(r => r + 1);
+    });
+    return () => { void stop.then(off => off()); };
+  }, []);
   useEffect(() => {
     const stop = listen<{ root?: string; path?: string }>('notes-updated', event => {
       load(); loadOverview(); setRevision(r => r + 1);
@@ -431,6 +517,13 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     const root = rootOf(focus)?.available ? focus : 'ayla';
     try { const daily = await native<string>('athena_daily', { root }); load(); loadOverview(); open(root, daily); } catch (e) { setError(errorText(e)); }
   }
+  /** Nota de um dia do calendário (só nas notas da Athena), criada se ainda não existe. */
+  async function openDay(date: string) {
+    try {
+      const daily = await native<string>('athena_daily', { root: 'ayla', date });
+      load(); loadOverview(); setCalendar(false); open('ayla', daily);
+    } catch (e) { setError(errorText(e)); }
+  }
   async function remove(index: number) {
     const tab = panes[index]?.tabs[panes[index].active];
     if (tab) await trashNote(tab.root, tab.path, index);
@@ -478,16 +571,37 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
       setStatuses(prev => prev.map((s, k) => k === index ? text : s));
     } catch (e) { setError(errorText(e)); }
   }
-  async function changeSelected(notes: NoteLocation[], destination?: Extract<Drop, { kind: 'folder' }>) {
+  async function changeSelected(notes: NoteLocation[], destination?: Extract<Drop, { kind: 'folder' }>, folders: NoteLocation[] = []) {
     if (batchBusy) return;
     setBatchBusy(true); setBatchNotice(''); setError('');
     const handled = new Set<string>();
     const moved = new Map<string, string>();
     const failed: string[] = [];
     let count = 0;
+    let folderCount = 0;
     try {
       await flushAll();
-      for (const note of notes) {
+      // Pastas primeiro (só as de cima: a de dentro vai junto). As notas dentro delas também vão junto.
+      const top = folders.filter(f => !folders.some(o => o.root === f.root && f.path.startsWith(`${o.path}/`)));
+      const inside = (item: NoteLocation) => top.some(f => f.root === item.root && item.path.startsWith(`${f.path}/`));
+      for (const folder of top) {
+        const key = folderKey(folder);
+        try {
+          if (destination) {
+            if (folderOf(folder.path) === destination.path) { handled.add(key); continue; }
+            if (destination.path === folder.path || destination.path.startsWith(`${folder.path}/`)) { failed.push(`${folder.path} — não dá para mover uma pasta para dentro dela mesma`); continue; }
+            const name = folder.path.slice(folder.path.lastIndexOf('/') + 1);
+            const result = await native<{ path: string }>('athena_rename_folder', { root: folder.root, path: folder.path, to: destination.path ? `${destination.path}/${name}` : name });
+            retarget(folder.root, folder.path, result.path, true);
+          } else {
+            await native('athena_trash_folder', { root: folder.root, path: folder.path });
+            drop(t => t.root === folder.root && t.path.startsWith(`${folder.path}/`));
+          }
+          handled.add(key); folderCount++;
+        } catch (e) { failed.push(`${folder.path} — ${errorText(e)}`); }
+      }
+      for (const folder of folders.filter(f => !top.includes(f))) handled.add(folderKey(folder));
+      for (const note of notes.filter(n => { if (inside(n)) { handled.add(noteKey(n)); return false; } return true; })) {
         const { root, path } = note;
         const key = noteKey(note);
         if (destination?.path === folderOf(path)) { handled.add(key); continue; }
@@ -507,7 +621,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         } catch (e) { failed.push(`${path} — ${errorText(e)}`); }
       }
       if (destination) {
-        setWorkspace(ws => ({ ...ws, panes: ws.panes.map(pane => ({ ...pane, tabs: pane.tabs.map(tab => {
+        setEveryWorkspace(ws => ({ ...ws, panes: ws.panes.map(pane => ({ ...pane, tabs: pane.tabs.map(tab => {
           const path = moved.get(noteKey(tab));
           return path ? { ...tab, path } : tab;
         }) })) }));
@@ -518,13 +632,14 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
       }
       setSelected(previous => previous.filter(key => !handled.has(key)));
       selectionAnchor.current = null;
-      if (count) {
+      if (count || folderCount) {
         setRevision(r => r + 1);
-        const noteCount = count === 1 ? '1 nota' : `${count} notas`;
-        const action = destination ? (count === 1 ? 'movida' : 'movidas') : (count === 1 ? 'enviada à lixeira' : 'enviadas à lixeira');
-        setBatchNotice(`${noteCount} ${action}.`);
+        const total = count + folderCount;
+        const what = [count && (count === 1 ? '1 nota' : `${count} notas`), folderCount && (folderCount === 1 ? '1 pasta' : `${folderCount} pastas`)].filter(Boolean).join(' e ');
+        const action = destination ? (total === 1 ? 'movida' : 'movidas') : (total === 1 ? 'enviada à lixeira' : 'enviadas à lixeira');
+        setBatchNotice(`${what} ${action}.`);
       }
-      if (failed.length) setError(`Falha em ${failed.length} ${failed.length === 1 ? 'nota' : 'notas'}. ${failed[0]}`);
+      if (failed.length) setError(`Falha em ${failed.length} ${failed.length === 1 ? 'item' : 'itens'}. ${failed[0]}`);
       load(); loadOverview();
     } catch (e) { setError(errorText(e)); } finally { setBatchBusy(false); }
   }
@@ -547,12 +662,16 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     if (!el) return null;
     if (el.dataset.drop === 'folder') {
       const root = el.dataset.root ?? ''; const path = el.dataset.path ?? '';
-      if (item.notes) return item.notes.every(note => note.root === root) && item.notes.some(note => folderOf(note.path) !== path) ? { kind: 'folder', root, path } : null;
+      if (item.notes || item.folders) {
+        const items = [...(item.notes ?? []), ...(item.folders ?? [])];
+        const intoItself = (item.folders ?? []).some(f => path === f.path || path.startsWith(`${f.path}/`));
+        return !intoItself && items.every(i => i.root === root) && items.some(i => folderOf(i.path) !== path) ? { kind: 'folder', root, path } : null;
+      }
       if (root !== item.root || folderOf(item.path) === path || (item.kind === 'note' && isAttachment(item.path))) return null;
       if (item.kind === 'folder' && (path === item.path || path.startsWith(`${item.path}/`))) return null;
       return { kind: 'folder', root, path };
     }
-    if (el.dataset.drop === 'pane' && item.kind !== 'folder' && !item.notes) {
+    if (el.dataset.drop === 'pane' && item.kind !== 'folder' && !item.notes && !item.folders) {
       const pane = Number(el.dataset.pane); const box = el.getBoundingClientRect();
       let side: 'center' | 'left' | 'right' = 'center';
       if (panes.length === 1 && panes[0].tabs.length && !(item.tab && panes[0].tabs.length === 1)) {
@@ -565,7 +684,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   }
   async function dropItem(item: DragItem, drop: Drop) {
     if (drop.kind === 'pane') { openAt(item.root, item.path, drop, item.tab); return; }
-    if (item.notes) { await changeSelected(item.notes, drop); return; }
+    if (item.notes || item.folders) { await changeSelected(item.notes ?? [], drop, item.folders ?? []); return; }
     const name = item.path.slice(item.path.lastIndexOf('/') + 1);
     const to = drop.path ? `${drop.path}/${name}` : name;
     if (item.kind === 'file') {
@@ -610,13 +729,13 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   const dropping = (root: string, path: string) => drag?.drop?.kind === 'folder' && drag.drop.root === root && drag.drop.path === path;
   const isSelected = (root: string, path: string) => selected.includes(noteKey({ root, path }));
   function startNoteDrag(item: DragItem) {
-    if (!isSelected(item.root, item.path)) return startDrag(item);
-    const count = selectedNotes.length;
-    return startDrag({ ...item, notes: selectedNotes, label: count === 1 ? item.label : `${count} notas` });
+    const chosen = item.kind === 'folder' ? selected.includes(folderKey(item)) : isSelected(item.root, item.path);
+    if (!chosen) return startDrag(item);
+    return startDrag({ ...item, notes: selectedNotes, folders: selectedFolders, label: selectionCount === 1 ? item.label : selectionLabel });
   }
-  function selectDot(root: string, path: string, title: string) {
-    const key = noteKey({ root, path });
-    if (!selectableNotes.has(key)) return null;
+  function selectDot(root: string, path: string, title: string, folder = false) {
+    const key = folder ? folderKey({ root, path }) : noteKey({ root, path });
+    if (!(folder ? selectableFolders.has(key) : selectableNotes.has(key))) return null;
     const checked = selected.includes(key);
     const label = checked ? `Tirar ${title} da seleção` : `Selecionar ${title}`;
     return <button type="button" className="select-dot" role="checkbox" aria-checked={checked} aria-label={label} title={label}
@@ -650,7 +769,6 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
       load(); loadOverview(); open(tab.root, made, { edit: true });
     } catch (e) { setError(errorText(e)); }
   }
-  const showTag = (t: string) => { setTag(t); setShowTags(true); setQuery(''); setHits(null); setSidebar(true); };
   const openFromTree = (root: string, path: string) => (e: ReactMouseEvent) => { if (e.button === 1 || e.ctrlKey || e.metaKey) e.preventDefault(); open(root, path, { newTab: e.button === 1 || e.ctrlKey || e.metaKey }); };
 
   const toggle = (key: string) => setExpanded(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
@@ -691,9 +809,12 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
       setExpanded(prev => prev.filter(key => key !== `${root}|${path}` && !key.startsWith(`${root}|${path}/`)));
     } else if (mode === 'unlock') {
       await unlockItem(root, path, secret);
+      // Arquivo protegido: abre logo depois da senha certa (na Biblioteca, no leitor).
+      if (file) open(root === 'biblioteca' ? bookRoot('ayla') : root, path);
     } else if (mode === 'recover') {
       await native('athena_recover', { root, path, code: secret, password: next });
       showOpened(root, path);
+      if (file) open(root === 'biblioteca' ? bookRoot('ayla') : root, path);
     } else if (mode === 'password') {
       await native('athena_change_password', { root, path, current: secret, password: next });
     } else {
@@ -755,24 +876,19 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         ? <form className="tree-add" style={{ paddingLeft: 4 + depth * 14 }} onSubmit={e => void renameFolder(e)}>
             <input autoFocus value={folderEdit.name} maxLength={200} title="Novo nome, ou caminho (ex.: Jogos/RPG) para mover" onChange={e => setFolderEdit({ ...folderEdit, name: e.target.value })} onKeyDown={e => { if (e.key === 'Escape') setFolderEdit(null); }} />
           </form>
-        : <div className="tree-row folder" style={{ paddingLeft: 4 + depth * 14 }} onPointerDown={startDrag({ kind: 'folder', root: root.id, path: folder.path, label: folder.name })} onClick={() => { setFocus(root.id); toggle(key); }} role="treeitem" aria-expanded={shown}>
-            <span className={shown ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span><span className="tree-name">{folder.name}</span>{lock && <span className="tree-lock" title="Pasta protegida, aberta"><UnlockIcon size={12} /></span>}{tools(root.id, folder.path)}
+        : <div className={`tree-row folder${selected.includes(folderKey({ root: root.id, path: folder.path })) ? ' checked' : ''}${root.kind === 'ayla' && pinnedFolders.includes(folder.path) ? ' pinned' : ''}`} style={{ paddingLeft: 4 + depth * 14 }} onPointerDown={startNoteDrag({ kind: 'folder', root: root.id, path: folder.path, label: folder.name })} onClick={() => { setFocus(root.id); toggle(key); }} role="treeitem" aria-expanded={shown} aria-selected={selected.includes(folderKey({ root: root.id, path: folder.path }))}>
+            <span className={shown ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span><span className="tree-name">{folder.name}</span>{lock && <span className="tree-lock" title="Pasta protegida, aberta"><UnlockIcon size={12} /></span>}{tools(root.id, folder.path)}{root.kind === 'ayla' && pinButton(folder.name, pinnedFolders.includes(folder.path), () => togglePinnedFolder(folder.path))}{selectDot(root.id, folder.path, folder.name, true)}
           </div>)}
       {shown && <>
         {addForm(root.id, folder.path, inner)}
-        {folder.folders.map(child => folderNode(root, child, inner))}
-        {[...folder.notes.map(n => ({ ...n, file: false })), ...folder.files.map(f => ({ ...f, file: true }))].sort((a, b) => a.title.localeCompare(b.title, 'pt-BR')).map(item => item.file
+        {folder.folders.filter(child => root.kind !== 'ayla' || !pinnedFolders.includes(child.path)).map(child => folderNode(root, child, inner))}
+        {[...folder.notes.filter(n => root.kind !== 'ayla' || !pinnedNotes.includes(n.path)).map(n => ({ ...n, file: false })), ...folder.files.map(f => ({ ...f, file: true }))].sort((a, b) => a.title.localeCompare(b.title, 'pt-BR')).map(item => item.file
           ? <div key={item.path} role="treeitem" className={`tree-row note file${isSelected(root.id, item.path) ? ' checked' : ''}`} aria-selected={/\.txt$/i.test(item.path) ? isSelected(root.id, item.path) : undefined} aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nClique para abrir; arraste para uma pasta para mover`} onPointerDown={startNoteDrag({ kind: 'file', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
               <span className="tree-file-icon">{/\.(pdf|txt)$/i.test(item.path) ? <FileIcon size={13} /> : VIDEO.test(item.path) ? <VideoIcon size={13} /> : <ImageIcon size={13} />}</span><span className="tree-name">{item.title.replace(/\.[^.]+$/, '')}</span><small>{item.title.slice(item.title.lastIndexOf('.') + 1).toUpperCase()}</small>
               {/\.txt$/i.test(item.path) && !lockOf(root.id, item.path) && <button className="icon-button tiny tree-trash tree-protect" title="Proteger com senha" aria-label={`Proteger ${item.title} com senha`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setLockDialog({ mode: 'protect', root: root.id, path: item.path, file: true }); }}><LockIcon size={13} /></button>}
               {selectDot(root.id, item.path, item.title)}
             </div>
-          : <div key={item.path} role="treeitem" className={`tree-row note${isSelected(root.id, item.path) ? ' checked' : ''}`} aria-selected={isSelected(root.id, item.path)} aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nCtrl+clique ou botão do meio: abrir em nova aba. Arraste para uma pasta (mover) ou para a tela (abrir ao lado)`} onPointerDown={startNoteDrag({ kind: 'note', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
-          <span className="tree-name">{item.title}</span>
-          {!lockOf(root.id, item.path) && <button className="icon-button tiny tree-trash tree-protect" title="Proteger com senha" aria-label={`Proteger ${item.title} com senha`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setLockDialog({ mode: 'protect', root: root.id, path: item.path, file: true }); }}><LockIcon size={13} /></button>}
-          <button className="icon-button tiny tree-trash" title="Apagar nota" aria-label={`Apagar a nota ${item.title}`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setTrashing({ root: root.id, path: item.path, title: item.title }); }}><TrashIcon size={13} /></button>
-          {selectDot(root.id, item.path, item.title)}
-        </div>)}
+          : noteRow(root, item, inner))}
         {/* Arquivos protegidos sozinhos: bloqueados, o clique pede a senha; abertos, abrem como nota. */}
         {folder.locked.map(file => {
           const name = file.path.slice(file.path.lastIndexOf('/') + 1);
@@ -791,6 +907,27 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
       </>}
     </div>;
   }
+  /** Pasta pelo caminho, dentro da árvore montada. */
+  function findFolder(folder: Folder, path: string): Folder | undefined {
+    if (folder.path === path) return folder;
+    for (const child of folder.folders) { if (path === child.path || path.startsWith(`${child.path}/`)) return findFolder(child, path); }
+    return undefined;
+  }
+  /** Pino de fixar no topo: sempre no mesmo lugar (antes da bolinha de seleção), em notas e pastas. */
+  function pinButton(title: string, pinned: boolean, toggle: () => void): ReactNode {
+    return <button className="icon-button tiny tree-trash tree-pin" title={pinned ? 'Desafixar do topo' : 'Fixar no topo'} aria-label={pinned ? `Desafixar ${title}` : `Fixar ${title} no topo`} aria-pressed={pinned}
+      onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); toggle(); }}><PinIcon size={12} /></button>;
+  }
+  /** Linha de uma nota na árvore (também usada pelas fixadas no topo da Athena). */
+  function noteRow(root: Root, item: { path: string; title: string }, inner: number, pinned = false): ReactNode {
+    return <div key={item.path} role="treeitem" className={`tree-row note${isSelected(root.id, item.path) ? ' checked' : ''}${pinned ? ' pinned' : ''}`} aria-selected={isSelected(root.id, item.path)} aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nCtrl+clique ou botão do meio: abrir em nova aba. Arraste para uma pasta (mover) ou para a tela (abrir ao lado)`} onPointerDown={startNoteDrag({ kind: 'note', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
+          <span className="tree-name">{item.title}</span>
+          {!lockOf(root.id, item.path) && <button className="icon-button tiny tree-trash tree-protect" title="Proteger com senha" aria-label={`Proteger ${item.title} com senha`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setLockDialog({ mode: 'protect', root: root.id, path: item.path, file: true }); }}><LockIcon size={13} /></button>}
+          <button className="icon-button tiny tree-trash" title="Apagar nota" aria-label={`Apagar a nota ${item.title}`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setTrashing({ root: root.id, path: item.path, title: item.title }); }}><TrashIcon size={13} /></button>
+          {root.kind === 'ayla' && pinButton(item.title, pinned, () => togglePinned(item.path))}
+          {selectDot(root.id, item.path, item.title)}
+        </div>;
+  }
   function rootNode(root: Root): ReactNode {
     const key = `${root.id}|`;
     const shown = expanded.includes(key);
@@ -804,6 +941,8 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         {/* Fechar o cofre: só com o mouse em cima, como as outras ferramentas da linha. */}
         {root.kind === 'vault' && <span className="tree-tools"><Confirm className="icon-button tiny" title="Fechar cofre (os arquivos ficam onde estão)" ariaLabel={`Fechar o cofre ${root.name}`} question="Fechar este cofre na Athena? Os arquivos ficam onde estão." confirm="Fechar" onConfirm={() => void closeVault(root)}>×</Confirm></span>}
       </div>
+      {shown && root.available && root.kind === 'ayla' && pinnedFolders.map(path => findFolder(build(root), path)).filter((f): f is Folder => Boolean(f)).map(f => folderNode(root, f, 1))}
+      {shown && root.available && root.kind === 'ayla' && root.notes.filter(n => pinnedNotes.includes(n.path)).sort((a, b) => pinnedNotes.indexOf(a.path) - pinnedNotes.indexOf(b.path)).map(n => noteRow(root, { path: n.path, title: n.title ?? titleOf(n.path) }, 1, true))}
       {shown && root.available && folderNode(root, build(root), 1)}
     </div>;
   }
@@ -838,9 +977,9 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         {index === 0 && !sidebar && <button className="icon-button" data-tip="Mostrar a barra lateral" aria-label="Mostrar a barra lateral" onClick={() => setSidebar(true)}><SidebarIcon size={18} /></button>}
         <div className="tab-strip" role="tablist" aria-label="Notas abertas">
           {pane.tabs.map((t, k) => <div key={`${t.root}|${t.path}`} role="tab" aria-selected={k === pane.active} className={['note-tab', k === pane.active ? 'active' : '', t.pinned ? 'pinned' : ''].join(' ')} title={`${rootOf(t.root)?.name ?? outside[t.root] ?? ''} / ${t.path}`} onPointerDown={startDrag({ kind: isAttachment(t.path) ? 'file' : 'note', root: t.root, path: t.path, label: titleOf(t.path), tab: { pane: index, at: k } })} onClick={() => activate(index, k)} onAuxClick={e => { if (e.button === 1 && !t.pinned) closeTab(index, k); }} onDoubleClick={() => setTab(index, k, { pinned: !t.pinned })}>
-            {t.pinned && <span className="tab-pin" aria-label="Fixada"><PinIcon size={12} /></span>}
+            {/* O pino fica sempre à esquerda do título: fixa (com o mouse em cima) e mostra a aba fixada. */}
+            <button className="tab-button tab-pin-button" aria-label={t.pinned ? 'Desafixar' : 'Fixar'} aria-pressed={t.pinned} data-tip={t.pinned ? 'Desafixar' : 'Fixar'} onClick={e => { e.stopPropagation(); setTab(index, k, { pinned: !t.pinned }); }}><PinIcon size={12} /></button>
             <span className="tab-title">{isBookRoot(t.root) ? bookTitle(t.path) : titleOf(t.path)}</span>
-            <button className="tab-button" aria-label={t.pinned ? 'Desafixar' : 'Fixar'} data-tip={t.pinned ? 'Desafixar' : 'Fixar'} onClick={e => { e.stopPropagation(); setTab(index, k, { pinned: !t.pinned }); }}><PinIcon size={12} /></button>
             {!t.pinned && <button className="tab-button" aria-label="Fechar aba" data-tip="Fechar" onClick={e => { e.stopPropagation(); closeTab(index, k); }}><CloseIcon size={12} /></button>}
           </div>)}
         </div>
@@ -878,18 +1017,18 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
             onAttachment={target => open(tab.root, target, { newTab: true })}
             onRename={name => moveNote(index, tab, `${folderOf(tab.path) ? `${folderOf(tab.path)}/` : ''}${name}`)}
             askTitle={fresh === `${tab.root}|${tab.path}`} onTitled={() => setFresh(null)}
-            onSaved={onSaved} onTag={showTag}
+            onSaved={onSaved}
             onStatus={text => setStatuses(prev => prev[index] === text ? prev : prev.map((s, k) => k === index ? text : s))}
             onError={setError}
             register={flush => { flushers.current[index] = flush; }} />
-        : index === 0
+        : index === 0 && view === 'notas'
         ? <div className="athena-welcome">
             <h1>Athena</h1>
             <p>Suas notas em Markdown, em pastas, como no Obsidian: as notas da Athena, os seus cofres e uma pasta para cada projeto da Ayla. Links como [[nota]] funcionam entre as notas.</p>
             <p>Clique numa nota para abrir; Ctrl+clique abre em nova aba. Arraste uma nota para uma pasta para movê-la, ou para a lateral da tela para ver duas notas lado a lado. Fixe uma aba para ela continuar aberta.</p>
             <div className="row-actions"><button className="primary-action" onClick={() => void addVault()}>Abrir cofre</button><button onClick={() => void today()}>Nota de hoje</button><button className="ghost-button" onClick={onOpenSettings}>Configurações</button></div>
           </div>
-        : <div className="athena-welcome"><p>Escolha uma nota na barra lateral para abrir nesta tela.</p></div>}
+        : <div className="athena-welcome"><p>{view === 'biblioteca' ? 'Escolha um livro na Biblioteca para ler nesta tela.' : 'Escolha uma nota na barra lateral para abrir nesta tela.'}</p></div>}
     </section>;
   }
 
@@ -948,24 +1087,15 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
             onGuard={(mode, path, file) => setLockDialog({ mode, root: 'biblioteca', path, file })} onLockNow={path => void lockItem('biblioteca', path)} />
         : <>
       <div className="athena-actions">
-        <button className="new-chat" onClick={() => void addVault()}><PlusIcon size={18} />Abrir cofre</button>
+        <button className="ghost-button athena-import" title="Abrir um cofre do Obsidian ou uma pasta de notas" onClick={() => void addVault()}><PlusIcon size={16} />Abrir cofre</button>
         <button className="ghost-button athena-import" title={`Copiar arquivos .txt e .md para ${rootOf(focus)?.name ?? 'Athena'} como notas .md`} onClick={() => setImporting({ root: rootOf(focus)?.available ? focus : 'ayla', folder: '' })}><ImportIcon size={16} />Importar</button>
-        <button className="ghost-button" title={`Nota de hoje em ${rootOf(focus)?.name ?? 'Athena'}`} onClick={() => void today()}>Hoje</button>
+        <button className={calendar ? 'ghost-button athena-import active' : 'ghost-button athena-import'} aria-pressed={calendar} title="Calendário: notas do dia, eventos e lembretes" onClick={() => setCalendar(v => !v)}><CalendarIcon size={16} />Calendário</button>
       </div>
       <p className="athena-focus">Novas notas em <b>{rootOf(focus)?.name ?? 'Athena'}</b></p>
       {tree?.suggested.map(path => <div key={path} className="athena-suggest"><span title={path}>Cofre do Obsidian: <b>{path.slice(path.lastIndexOf('/') + 1)}</b></span><button className="link-button" onClick={() => void addVault(path)}>Abrir</button></div>)}
-      {tags.length > 0 && <div className="athena-tags">
-        <button className="link-button" aria-expanded={showTags} onClick={() => setShowTags(v => !v)}>{showTags ? '▾' : '▸'} Tags ({tags.length})</button>
-        {showTags && <div className="tag-list">{tags.map(t => <button key={t.tag} className={tag === t.tag ? 'tag-chip active' : 'tag-chip'} onClick={() => { setTag(tag === t.tag ? null : t.tag); setQuery(''); setHits(null); }}>#{t.tag} <small>{t.notes.length}</small></button>)}</div>}
-      </div>}
       <input className="organ-search" type="search" value={query} placeholder="Buscar em todas as notas" aria-label="Buscar nas notas" onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setHits(null); }} />
-      <nav className={selectedNotes.length ? 'athena-tree selecting' : 'athena-tree'} role="tree" aria-label="Pastas e notas" aria-multiselectable="true" inert={batchBusy}>
-        {tag && !query.trim()
-          ? <>
-              <div className="tree-filter"><span>#{tag}</span><button className="link-button" onClick={() => setTag(null)}>Limpar</button></div>
-              {(tags.find(t => t.tag === tag)?.notes ?? []).map(noteHit)}
-            </>
-          : query.trim() && hits
+      <nav className={selectionCount ? 'athena-tree selecting' : 'athena-tree'} role="tree" aria-label="Pastas e notas" aria-multiselectable="true" inert={batchBusy}>
+        {query.trim() && hits
           ? (hits.length ? hits.map(noteHit) : <p className="sidebar-label">Nada encontrado.</p>)
           : sections.map(kind => {
             const group = roots.filter(r => r.kind === kind);
@@ -974,14 +1104,14 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
           })}
       </nav>
       {batchNotice && <p className="athena-focus" role="status">{batchNotice}</p>}
-      {selectedNotes.length > 0 && <div className="athena-selection" role="toolbar" aria-label="Notas selecionadas" aria-busy={batchBusy}>
-        <span>{selectedNotes.length} {selectedNotes.length === 1 ? 'nota selecionada' : 'notas selecionadas'}</span>
-        <span>{selectedNotes.every(note => note.root === selectedNotes[0].root)
-          ? 'Arraste a seleção para uma pasta da mesma raiz.' : 'Para mover, selecione notas de uma única raiz.'}</span>
+      {selectionCount > 0 && <div className="athena-selection" role="toolbar" aria-label="Itens selecionados" aria-busy={batchBusy}>
+        <span>{selectionLabel} {selectionCount === 1 ? 'selecionada' : 'selecionadas'}</span>
+        <span>{[...selectedNotes, ...selectedFolders].every(item => item.root === (selectedNotes[0] ?? selectedFolders[0]).root)
+          ? 'Arraste a seleção para uma pasta da mesma raiz.' : 'Para mover, selecione itens de uma única raiz.'}</span>
         <div className="athena-actions">
-          <Confirm className="ghost-button" disabled={batchBusy} ariaLabel="Apagar notas selecionadas"
-            question={`Mover ${selectedNotes.length} ${selectedNotes.length === 1 ? 'nota selecionada' : 'notas selecionadas'} para a lixeira (.trash)?`}
-            confirm="Apagar" onConfirm={() => void changeSelected(selectedNotes)}>Apagar</Confirm>
+          <Confirm className="ghost-button" disabled={batchBusy} ariaLabel="Apagar os itens selecionados"
+            question={`Mover ${selectionLabel} para a lixeira (.trash)?${selectedFolders.length ? ' As pastas vão com tudo o que têm dentro.' : ''}`}
+            confirm="Apagar" onConfirm={() => void changeSelected(selectedNotes, undefined, selectedFolders)}>Apagar</Confirm>
           <button className="ghost-button" disabled={batchBusy} aria-label="Limpar a seleção" title="Limpar a seleção" onClick={() => { setSelected([]); selectionAnchor.current = null; }}>×</button>
         </div>
       </div>}
@@ -990,7 +1120,9 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     {sidebar && handle('left', 'Ajustar a largura da barra lateral')}
     <main className="athena-main">
       {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
-      <div className="note-panes" inert={batchBusy}>{panes.map(paneView)}</div>
+      {calendar
+        ? <AthenaCalendar onClose={() => setCalendar(false)} onOpenDay={date => void openDay(date)} />
+        : <div className="note-panes" inert={batchBusy}>{panes.map(paneView)}</div>}
     </main>
     {/* Na Biblioteca (ou lendo um livro), sem o painel do Git e o grafo das notas. */}
     {!libraryMode && handle('right', 'Ajustar a largura do painel direito')}

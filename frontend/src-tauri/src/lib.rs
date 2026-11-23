@@ -127,6 +127,9 @@ fn install_organ_cli() -> Option<i32> {
     })
 }
 
+/// Janelas abertas quando a Ayla foi encerrada por sinal (lido por quem a reinicia).
+const OPEN_WINDOWS: &str = "janelas-abertas.json";
+
 pub fn run() {
     if let Some(code) = install_organ_cli() {
         std::process::exit(code);
@@ -208,6 +211,11 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             let core = Core::open(directory.clone()).map_err(io::Error::other)?;
+            // Reinício: as janelas voltam ao workspace e ao monitor em que estavam (Hyprland).
+            if let Some(saved) = std::fs::read_to_string(directory.join(OPEN_WINDOWS)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+                desktop::restore_places(saved["places"].clone());
+            }
+            let _ = std::fs::remove_file(directory.join(OPEN_WINDOWS));
             // Workers de uma Ayla que caiu sem encerrar continuariam ocupando RAM e VRAM.
             let reaped = core.runtime.reap_orphans();
             if reaped > 0 { eprintln!("Ayla: {reaped} modelo(s) local(is) de uma execução anterior encerrado(s)."); }
@@ -220,6 +228,12 @@ pub fn run() {
                     use tokio::signal::unix::{signal, SignalKind};
                     let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup()), signal(SignalKind::interrupt())) else { return };
                     tokio::select! { _ = term.recv() => {}, _ = hup.recv() => {}, _ = int.recv() => {} }
+                    // Anota as janelas abertas (ex.: a Athena separada) para quem reiniciar a Ayla
+                    // poder reabri-las; o arquivo some na próxima abertura.
+                    let open: Vec<&str> = ["main", desktop::ATHENA_WINDOW].into_iter()
+                        .filter(|label| exit.get_webview_window(label).is_some_and(|w| w.is_visible().unwrap_or(false))).collect();
+                    let saved = serde_json::json!({"windows": open, "places": desktop::window_places()});
+                    let _ = std::fs::write(exit.state::<Core>().root.join(OPEN_WINDOWS), saved.to_string());
                     exit.exit(0);
                 });
             }
@@ -263,6 +277,7 @@ pub fn run() {
             });
             app.manage(core::organs::Organ::moneta(&directory));
             app.manage(core);
+            app.manage(core::pad::Pad::default());
             app.manage(ManagedBackend::default());
             app.manage(Mutex::new(desktop::View::default()));
             desktop::launch(app.handle(), initial).map_err(io::Error::other)?;
@@ -410,6 +425,16 @@ pub fn run() {
             core::research::automatic_check,
             core::services::set_response_source,
             core::services::source_remove,
+            core::services::calendar_range,
+            core::services::calendar_save,
+            core::pad::pad_open_dialog,
+            core::pad::pad_save_dialog,
+            core::pad::pad_read,
+            core::pad::pad_write,
+            core::pad::pad_modified,
+            core::pad::pad_requests,
+            core::pad::pad_session_load,
+            core::pad::pad_session_save,
             core::services::source_restore,
             core::version::app_version
         ])
@@ -422,6 +447,15 @@ pub fn run() {
                         api.prevent_close();
                         app.state::<Mutex<desktop::View>>().lock().map(|mut v| v.cancel_placement()).ok();
                     }
+                }
+            }
+            // Athena aberta sozinha: fechar a janela dela encerra a Ayla se a conversa não estiver
+            // aberta e o segundo plano estiver desligado (senão o processo ficaria invisível).
+            if let tauri::RunEvent::WindowEvent { ref label, event: tauri::WindowEvent::Destroyed, .. } = event {
+                if label == desktop::ATHENA_WINDOW {
+                    let main_hidden = app.get_webview_window("main").is_none_or(|w| !w.is_visible().unwrap_or(false));
+                    let background = app.state::<Core>().prefs().is_ok_and(|p| p.desktop.background);
+                    if main_hidden && !background { app.exit(0); }
                 }
             }
             if let tauri::RunEvent::Exit = event {

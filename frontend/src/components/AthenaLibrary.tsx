@@ -224,7 +224,7 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onMov
 
   return <>
     <div className="athena-actions">
-      <button className="new-chat" disabled={busy} title="Ler uma pasta no lugar, sem copiar (ex.: a biblioteca do MAD)" onClick={() => void connect()}><PlusIcon size={18} />Conectar pasta</button>
+      <button className="ghost-button athena-import" disabled={busy} title="Ler uma pasta no lugar, sem copiar (ex.: a biblioteca do MAD)" onClick={() => void connect()}><PlusIcon size={16} />Conectar pasta</button>
       <button className="ghost-button athena-import" disabled={busy} title="Copiar arquivos .epub e .cbz para a Biblioteca" onClick={() => setImporting(true)}><ImportIcon size={16} />Importar</button>
     </div>
     <p className={error ? 'athena-focus lock-error' : 'athena-focus'} role={error ? 'alert' : 'status'}>

@@ -1327,8 +1327,16 @@ pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: Stri
 
 /// Grava a nota; recusa se ela mudou fora da Ayla desde `expected`. Devolve a nova data.
 #[tauri::command]
-pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
-    if let Some(dir) = external_text(&state, &root, &path)? {
+pub async fn athena_write(window: tauri::WebviewWindow, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
+    use tauri::Emitter;
+    let modified = athena_write_to(&state, &root, &path, content, expected).await?;
+    // A mesma nota pode estar aberta na Athena da Ayla e na Athena separada: a outra janela relê.
+    let _ = window.emit("note-saved", json!({"root": root, "path": path, "modified": modified, "from": window.label()}));
+    Ok(modified)
+}
+async fn athena_write_to(state: &Core, root: &str, path: &str, content: String, expected: Option<i64>) -> Result<i64, String> {
+    let (root, path) = (root.to_string(), path.to_string());
+    if let Some(dir) = external_text(state, &root, &path)? {
         return athena::write(&dir, &path, &content, expected);
     }
     let dir = state.athena_path(&state.prefs()?, &root)?;
@@ -1745,9 +1753,14 @@ pub async fn athena_mkdir(state: tauri::State<'_, Core>, root: String, parent: O
 
 /// Nota de hoje (AAAA-MM-DD.md) na raiz indicada, criada se ainda não existir.
 #[tauri::command]
-pub async fn athena_daily(state: tauri::State<'_, Core>, root: String) -> Result<String, String> {
+pub async fn athena_daily(state: tauri::State<'_, Core>, root: String, date: Option<String>) -> Result<String, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
-    athena::daily(&dir, reminders::now_local().date())
+    // Sem data, a de hoje; o calendário pede a nota de qualquer dia.
+    let day = match date {
+        Some(text) => chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d").map_err(|_| "Data inválida")?,
+        None => reminders::now_local().date(),
+    };
+    athena::daily(&dir, day)
 }
 
 /// Move a nota para a lixeira da raiz (`.trash`).
@@ -1844,8 +1857,7 @@ pub async fn athena_overview(state: tauri::State<'_, Core>) -> Result<Value, Str
 }
 
 fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
-    let mut tags = BTreeMap::<String, Vec<Value>>::new();
+    use std::collections::{BTreeSet, HashMap};
     let mut nodes = Vec::new();
     let mut edges = BTreeSet::new();
     for root in roots {
@@ -1869,9 +1881,6 @@ fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
         }
         for (index, note) in notes.iter().enumerate() {
             let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
-            for tag in athena::tags(&text) {
-                tags.entry(tag).or_default().push(nodes[base + index].clone());
-            }
             for target in athena::graph_targets(&text) {
                 let target = target.to_lowercase();
                 if let Some(&other) = paths.get(target.trim_end_matches(".md")).filter(|&&other| other != index) {
@@ -1880,8 +1889,7 @@ fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
             }
         }
     }
-    let tags: Vec<_> = tags.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect();
-    json!({"tags": tags, "graph": {"nodes": nodes, "edges": edges}})
+    json!({"graph": {"nodes": nodes, "edges": edges}})
 }
 
 /// Imagem anexada a uma nota (![[foto.png]]), procurada pelo nome na raiz, como data URL.
@@ -3294,7 +3302,7 @@ pub async fn chat(
         let mut system=prefs.system_prompt().to_string();
         system.push_str(OPTIONS_GUIDE);
         if !use_cloud{
-            system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
+            system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você vê a agenda da pessoa (calendário da Athena, com eventos, lembretes e avisos) quando ela pergunta, e cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
             let project = {
                 let db = state.store.lock().map_err(|_| "Dados ocupados")?;
                 db.conversation_project(&request.conversation).ok().flatten()
@@ -3324,6 +3332,13 @@ pub async fn chat(
                 }
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
                 None=>{}
+            }
+            // Agenda (calendário da Athena): só em respostas neste computador, de ontem até 30 dias.
+            if plan.agenda{
+                let items=state.store.lock().map_err(|_|"Dados ocupados")?.events().unwrap_or_default().into_iter()
+                    .map(|r|(r.text,reminders::from_unix(r.start),reminders::Repeat::parse(&r.repeat),r.all_day,r.alerts)).collect::<Vec<_>>();
+                system.push_str(&reminders::agenda_block(&items,reminders::now_local(),30));
+                let _=events.send(json!({"type":"routing","text":"Agenda da Athena consultada · resposta neste computador"}));
             }
             if let Some((works,query,scholar))=&academic{system.push_str(&super::academic::context_block(works,query,*scholar));}
             for (entry,installed) in chosen_bases.iter().filter(|_|plan.consult){
@@ -4215,18 +4230,26 @@ pub async fn reminder_tick(app: &tauri::AppHandle) {
     if due.is_empty() {
         return;
     }
+    let local_now = reminders::from_unix(now);
     for reminder in due {
-        notify::reminder(app, &prefs, &reminder.text, now - reminder.due > 180);
         let repeat = reminders::Repeat::parse(&reminder.repeat);
+        let start = reminders::from_unix(reminder.start);
+        // Aviso antes do evento: diz quando ele é ("Dentista · hoje às 15:00"). Adiado, só o texto.
+        let firing = reminders::next_alert(start, repeat, &reminder.alerts, reminders::from_unix(reminder.due) - chrono::Duration::seconds(1))
+            .filter(|(alert, occurrence)| reminders::to_unix(*alert) == reminder.due && occurrence != alert);
+        let body = match firing {
+            Some((_, occurrence)) if reminder.all_day => format!("{} · {}", reminder.text, reminders::describe(occurrence, local_now).split(" às ").next().unwrap_or_default()),
+            Some((_, occurrence)) => format!("{} · {}", reminder.text, reminders::describe(occurrence, local_now)),
+            None => reminder.text.clone(),
+        };
+        notify::reminder(app, &prefs, &body, now - reminder.due > 180);
         let Ok(db) = state.store.lock() else { return };
-        if repeat == reminders::Repeat::None {
-            let _ = db.delete_reminder(&reminder.id);
-        } else {
-            let mut next = reminders::from_unix(reminder.due);
-            while reminders::to_unix(next) <= now {
-                next = reminders::next(next, repeat);
-            }
-            let _ = db.reschedule_reminder(&reminder.id, reminders::to_unix(next));
+        // Próximo aviso (outro aviso da mesma ocorrência ou da próxima repetição, contada do
+        // início). Sem mais avisos, o item fica no calendário da Athena, sem novo aviso.
+        let next = reminders::next_alert(start, repeat, &reminder.alerts, local_now).map(|(alert, _)| alert);
+        match next {
+            Some(next) => { let _ = db.reschedule_reminder(&reminder.id, reminders::to_unix(next)); }
+            None => { let _ = db.mark_fired(&reminder.id); }
         }
     }
     let _ = app.emit("reminders-updated", ());
@@ -4251,6 +4274,97 @@ pub fn reminders_list(state: tauri::State<'_, Core>) -> Result<Vec<ReminderView>
         let label = format!("{}{}", reminders::describe(when, now), reminders::repeat_label(reminders::Repeat::parse(&r.repeat), when));
         ReminderView { id: r.id, text: r.text, due: r.due, repeat: r.repeat, label }
     }).collect())
+}
+
+/// Item do calendário num dia (uma ocorrência; os que repetem aparecem em cada dia).
+#[derive(serde::Serialize)]
+pub struct CalendarItem {
+    pub id: String,
+    pub text: String,
+    /// Dia desta ocorrência (AAAA-MM-DD) e hora (HH:MM; vazia no dia todo).
+    pub date: String,
+    pub time: Option<String>,
+    pub repeat: String,
+    pub notify: bool,
+    /// Já avisou (único) ou ocorrência passada.
+    pub past: bool,
+    /// Início da série, para editar.
+    pub start_date: String,
+    /// "(todo dia)", "(toda segunda)"…
+    pub repeat_label: String,
+    /// Antecedências dos avisos, em minutos (0 = na hora).
+    pub alerts: Vec<i64>,
+}
+
+/// Calendário da Athena entre `from` e `to` (AAAA-MM-DD): eventos e lembretes, e os dias com nota
+/// do dia nas notas da própria Athena (os cofres e projetos ficam de fora).
+#[tauri::command]
+pub fn calendar_range(state: tauri::State<'_, Core>, from: String, to: String) -> Result<Value, String> {
+    let day = |text: &str| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| "Data inválida".to_string());
+    let (from, to) = (day(&from)?, day(&to)?);
+    if to < from || (to - from).num_days() > 400 {
+        return Err("Período inválido".into());
+    }
+    let now = reminders::now_local();
+    let list = state.store.lock().map_err(|_| "Dados ocupados")?.events().map_err(|_| "Falha ao consultar o calendário")?;
+    let mut items = Vec::new();
+    for item in list {
+        let start = reminders::from_unix(item.start);
+        let repeat = reminders::Repeat::parse(&item.repeat);
+        for when in reminders::occurrences(start, repeat, from, to) {
+            items.push(CalendarItem {
+                id: item.id.clone(), text: item.text.clone(), date: when.format("%Y-%m-%d").to_string(),
+                time: (!item.all_day).then(|| when.format("%H:%M").to_string()), repeat: item.repeat.clone(), notify: item.notify,
+                past: when < now, start_date: start.format("%Y-%m-%d").to_string(), repeat_label: reminders::repeat_label(repeat, start).trim().to_string(), alerts: item.alerts.clone(),
+            });
+        }
+    }
+    items.sort_by(|a, b| (&a.date, a.time.is_some(), &a.time).cmp(&(&b.date, b.time.is_some(), &b.time)));
+    let notes_dir = state.athena_path(&state.prefs()?, "ayla")?;
+    let notes: Vec<String> = from.iter_days().take_while(|d| *d <= to).map(|d| d.format("%Y-%m-%d").to_string())
+        .filter(|d| notes_dir.join(format!("{d}.md")).is_file()).collect();
+    Ok(json!({"items": items, "notes": notes}))
+}
+
+/// Cria (sem `id`) ou edita um item do calendário. Com avisos, é um lembrete: cada aviso é uma
+/// antecedência em minutos (0 = na hora; no dia todo, contada das 9h), em cada repetição. Editar vale
+/// para a série inteira.
+#[tauri::command]
+pub fn calendar_save(app: tauri::AppHandle, state: tauri::State<'_, Core>, id: Option<String>, text: String, date: String, time: Option<String>, repeat: String, alerts: Vec<i64>) -> Result<(), String> {
+    use tauri::Emitter;
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 200 {
+        return Err("Escreva o que é (até 200 caracteres)".into());
+    }
+    let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|_| "Data inválida")?;
+    let all_day = time.as_deref().is_none_or(str::is_empty);
+    let clock = if all_day { chrono::NaiveTime::from_hms_opt(9, 0, 0) } else { chrono::NaiveTime::parse_from_str(time.as_deref().unwrap_or_default(), "%H:%M").ok() }
+        .ok_or("Hora inválida")?;
+    let kind = reminders::Repeat::parse(&repeat);
+    if kind.as_str() != repeat {
+        return Err("Repetição inválida".into());
+    }
+    let mut alerts = alerts;
+    alerts.sort_unstable();
+    alerts.dedup();
+    if alerts.len() > 5 || alerts.iter().any(|m| !(0..=reminders::MAX_ALERT_MINUTES).contains(m)) {
+        return Err("Avisos inválidos (até 5, de na hora até 365 dias antes)".into());
+    }
+    let start = date.and_time(clock);
+    let next = reminders::next_alert(start, kind, &alerts, reminders::now_local() - chrono::Duration::seconds(1)).map(|(alert, _)| alert);
+    let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+    let previous = match &id {
+        Some(id) => Some(db.events().map_err(|_| "Falha ao consultar o calendário")?.into_iter().find(|r| &r.id == id).ok_or("Item não encontrado")?),
+        None => None,
+    };
+    let item = store::Reminder {
+        id: id.unwrap_or_else(store::id), text: text.to_string(), due: reminders::to_unix(next.unwrap_or(start)), repeat: kind.as_str().into(),
+        conversation_id: previous.and_then(|p| p.conversation_id), start: reminders::to_unix(start), all_day, notify: !alerts.is_empty(),
+        fired: !alerts.is_empty() && next.is_none(), alerts,
+    };
+    db.save_event(&item).map_err(|_| "Não foi possível guardar no calendário")?;
+    let _ = app.emit("reminders-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -4862,8 +4976,6 @@ mod tests {
         ]);
         assert_eq!(overview["graph"]["nodes"].as_array().unwrap().len(), 5);
         assert_eq!(overview["graph"]["edges"], json!([[0, 1], [0, 3]]));
-        assert_eq!(overview["tags"][0]["tag"], "aventura");
-        assert_eq!(overview["tags"][0]["notes"][0]["root"], "one");
         fs::remove_dir_all(tmp).unwrap();
     }
 

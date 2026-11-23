@@ -11,12 +11,16 @@ pub enum Launch {
     App,
     Quick,
     Login,
+    /// Athena sozinha, como bloco de notas (com os arquivos da fila `ATHENA_QUEUE`).
+    Athena,
 }
 impl Launch {
     pub fn from_args() -> Self {
-        match std::env::args().nth(1).as_deref() {
+        let mut args = std::env::args().skip(1);
+        match args.next().as_deref() {
             Some("--quick") => Self::Quick,
             Some("--background") => Self::Login,
+            Some("--abrir") if args.next().as_deref() == Some("athena") => Self::Athena,
             _ => Self::App,
         }
     }
@@ -30,6 +34,67 @@ pub struct OpenRequest {
 }
 /// Pedidos ainda não lidos pela interface (ela os busca ao montar e a cada aviso `open-files`).
 static OPEN_QUEUE: Mutex<Vec<OpenRequest>> = Mutex::new(Vec::new());
+/// Arquivos para a janela da Athena; ela os busca ao montar e a cada aviso `athena-open`.
+static ATHENA_QUEUE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Entrega (uma vez) os arquivos pedidos à Athena.
+pub fn athena_requests() -> Vec<String> {
+    std::mem::take(&mut *ATHENA_QUEUE.lock().unwrap())
+}
+/// Guarda o pedido na fila certa e diz como abrir: a Athena tem janela própria.
+fn enqueue(request: OpenRequest) -> Launch {
+    if request.target == "athena" {
+        ATHENA_QUEUE.lock().unwrap().extend(request.paths);
+        Launch::Athena
+    } else {
+        OPEN_QUEUE.lock().unwrap().push(request);
+        Launch::App
+    }
+}
+pub const ATHENA_WINDOW: &str = "athena";
+
+/// Mostra (ou cria) a janela da Athena e avisa que há arquivos na fila.
+pub fn show_athena(app: &AppHandle) -> Result<(), String> {
+    let window = match app.get_webview_window(ATHENA_WINDOW) {
+        Some(window) => window,
+        None => {
+            let window = tauri::WebviewWindowBuilder::new(app, ATHENA_WINDOW, tauri::WebviewUrl::App("index.html".into()))
+                .title("Athena")
+                .inner_size(900.0, 720.0)
+                .min_inner_size(360.0, 320.0)
+                // Sem a barra do sistema: o header da Athena faz esse papel, como no GNOME Text Editor.
+                .decorations(false)
+                .build()
+                .map_err(|e| e.to_string())?;
+            // Arquivos arrastados para a janela abrem em abas (liberados aqui, pelo evento do sistema).
+            let handle = app.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                    let files: Vec<String> = paths.iter().filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned()).collect();
+                    if files.is_empty() { return; }
+                    ATHENA_QUEUE.lock().unwrap().extend(files);
+                    let _ = handle.emit_to(ATHENA_WINDOW, "athena-open", ());
+                }
+            });
+            window
+        }
+    };
+    // Corretor ortográfico do WebKitGTK (dicionários do sistema; os ausentes são ignorados).
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::{WebContextExt, WebViewExt};
+        if let Some(context) = webview.inner().context() {
+            context.set_spell_checking_enabled(true);
+            context.set_spell_checking_languages(&["pt_BR", "pt_PT", "en_US"]);
+        }
+    });
+    window.show().map_err(|e| e.to_string())?;
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    if !ATHENA_QUEUE.lock().unwrap().is_empty() {
+        app.emit_to(ATHENA_WINDOW, "athena-open", ()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 impl OpenRequest {
     pub fn from_args() -> Option<Self> {
@@ -43,7 +108,8 @@ impl OpenRequest {
         let target = args.next().filter(|t| matches!(t.as_str(), "ayla" | "athena" | "iris"))?;
         let paths: Vec<String> = args.filter_map(|arg| gio::File::for_commandline_arg(arg).path())
             .map(|p| p.to_string_lossy().into_owned()).collect();
-        (!paths.is_empty()).then_some(Self { target, paths })
+        // A Athena abre também sem arquivos (pelo menu), como um bloco de notas.
+        (!paths.is_empty() || target == "athena").then_some(Self { target, paths })
     }
 }
 
@@ -200,8 +266,7 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
     let sender = tx.clone();
     action.connect_activate(move |_, parameter| {
         let Some(request) = parameter.and_then(|p| p.str()).and_then(|text| serde_json::from_str::<OpenRequest>(text).ok()) else { return };
-        OPEN_QUEUE.lock().unwrap().push(request);
-        let _ = sender.send(Launch::App);
+        let _ = sender.send(enqueue(request));
     });
     instance.add_action(&action);
     instance.register(gio::Cancellable::NONE).map_err(|e| e.to_string())?;
@@ -217,7 +282,8 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
         return Ok(None);
     }
     if let Some(request) = open {
-        OPEN_QUEUE.lock().unwrap().push(request);
+        // Primeira instância aberta pela Athena: `Launch::Athena` mostra só a janela dela.
+        enqueue(request);
     }
     Ok(Some((instance, rx)))
 }
@@ -250,6 +316,66 @@ fn hypr_batch(commands: &str) -> bool {
         .is_ok_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).lines().all(|line| line.trim().trim_end_matches("ok").is_empty()))
 }
 fn is_hypr() -> bool { std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() }
+
+/// Janela da Ayla pelo título inicial no compositor ("Ayla" = conversa; "Athena" = bloco de notas).
+fn window_label(client: &Value) -> Option<&'static str> {
+    match client["initialTitle"].as_str()? { "Ayla" => Some("main"), "Athena" => Some(ATHENA_WINDOW), _ => None }
+}
+
+/// Onde estão as janelas agora (Hyprland): workspace, flutuante, posição e tamanho. Guardado ao
+/// reiniciar a Ayla, para cada janela voltar ao monitor e ao workspace em que estava.
+pub fn window_places() -> Value {
+    if !is_hypr() { return Value::Null; }
+    let Some(clients) = hypr_json("clients") else { return Value::Null };
+    let pid = u64::from(std::process::id());
+    let places: serde_json::Map<String, Value> = clients.as_array().into_iter().flatten()
+        .filter(|c| c["pid"].as_u64() == Some(pid) && c["mapped"] != false)
+        .filter_map(|c| Some((window_label(c)?.to_string(), json!({
+            "workspace": c["workspace"]["id"], "workspace_name": c["workspace"]["name"],
+            "floating": c["floating"], "at": c["at"], "size": c["size"],
+        }))))
+        .collect();
+    Value::Object(places)
+}
+
+/// Comandos do `hyprctl --batch` que devolvem a janela `address` ao lugar guardado.
+fn place_commands(place: &Value, client: &Value) -> Option<String> {
+    let address = client["address"].as_str()?;
+    let id = place["workspace"].as_i64()?;
+    let workspace = if id > 0 { id.to_string() } else { format!("name:{}", place["workspace_name"].as_str()?) };
+    let mut commands = Vec::new();
+    if client["workspace"]["id"].as_i64() != Some(id) {
+        commands.push(format!("dispatch movetoworkspacesilent {workspace},address:{address}"));
+    }
+    let floating = place["floating"].as_bool().unwrap_or(false);
+    if client["floating"].as_bool().unwrap_or(false) != floating {
+        commands.push(format!("dispatch togglefloating address:{address}"));
+    }
+    if floating {
+        if let (Some(w), Some(h)) = (place["size"][0].as_i64(), place["size"][1].as_i64()) { commands.push(format!("dispatch resizewindowpixel exact {w} {h},address:{address}")); }
+        if let (Some(x), Some(y)) = (place["at"][0].as_i64(), place["at"][1].as_i64()) { commands.push(format!("dispatch movewindowpixel exact {x} {y},address:{address}")); }
+    }
+    (!commands.is_empty()).then(|| commands.join(" ; "))
+}
+
+/// Depois de reiniciar: espera cada janela guardada aparecer (até 20 s) e a devolve ao lugar.
+pub fn restore_places(places: Value) {
+    let Some(mut pending) = places.as_object().cloned().filter(|p| !p.is_empty() && is_hypr()) else { return };
+    std::thread::spawn(move || {
+        let pid = u64::from(std::process::id());
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let Some(clients) = hypr_json("clients") else { continue };
+            for client in clients.as_array().into_iter().flatten().filter(|c| c["pid"].as_u64() == Some(pid)) {
+                let Some(label) = window_label(client) else { continue };
+                if let Some(place) = pending.remove(label) {
+                    if let Some(commands) = place_commands(&place, client) { hypr_batch(&commands); }
+                }
+            }
+            if pending.is_empty() { break; }
+        }
+    });
+}
 
 /// A pessoa está olhando para a Ayla? No Hyprland, pergunta ao compositor qual janela está ativa
 /// (o GTK no Wayland pode continuar "em foco" com a janela escondida). Fora dele, só conta uma
@@ -540,6 +666,9 @@ pub fn launch(app: &AppHandle, mode: Launch) -> Result<(), String> {
         let view = state.lock().unwrap();
         (view.quick, view.pending_show.is_some())
     };
+    if mode == Launch::Athena {
+        return show_athena(app);
+    }
     match mode {
         Launch::Login if app.state::<Core>().prefs()?.desktop.background => Ok(()),
         Launch::Quick if quick && (pending || window.is_visible().unwrap_or(false)) => close(app, &window),
@@ -604,6 +733,18 @@ pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn janelas_voltam_ao_workspace_e_a_posicao() {
+        let athena = json!({"initialTitle":"Athena","address":"0xa","workspace":{"id":1},"floating":false});
+        assert_eq!(window_label(&athena), Some("athena"));
+        assert_eq!(window_label(&json!({"initialTitle":"Ayla · Visão rápida · 9"})), None, "o painel rápido fica de fora");
+        let tiled = json!({"workspace":3,"workspace_name":"3","floating":false,"at":[0,0],"size":[10,10]});
+        assert_eq!(place_commands(&tiled, &athena).as_deref(), Some("dispatch movetoworkspacesilent 3,address:0xa"));
+        let floating = json!({"workspace":-98,"workspace_name":"special:notas","floating":true,"at":[100,200],"size":[800,600]});
+        assert_eq!(place_commands(&floating, &athena).as_deref(), Some("dispatch movetoworkspacesilent name:special:notas,address:0xa ; dispatch togglefloating address:0xa ; dispatch resizewindowpixel exact 800 600,address:0xa ; dispatch movewindowpixel exact 100 200,address:0xa"));
+        let same = json!({"workspace":1,"workspace_name":"1","floating":false});
+        assert_eq!(place_commands(&same, &athena), None, "já está no lugar");
+    }
     #[test]
     fn positions_the_panel_on_the_focused_scaled_rotated_output() {
         let m=json!({"id":3,"x":-900,"y":70,"width":1800,"height":1200,"scale":1.5,"transform":1,"reserved":[18,30,0,12],"activeWorkspace":{"id":4}});
