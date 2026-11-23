@@ -1327,8 +1327,16 @@ pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: Stri
 
 /// Grava a nota; recusa se ela mudou fora da Ayla desde `expected`. Devolve a nova data.
 #[tauri::command]
-pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
-    if let Some(dir) = external_text(&state, &root, &path)? {
+pub async fn athena_write(window: tauri::WebviewWindow, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
+    use tauri::Emitter;
+    let modified = athena_write_to(&state, &root, &path, content, expected).await?;
+    // A mesma nota pode estar aberta na Athena da Ayla e na Athena separada: a outra janela relê.
+    let _ = window.emit("note-saved", json!({"root": root, "path": path, "modified": modified, "from": window.label()}));
+    Ok(modified)
+}
+async fn athena_write_to(state: &Core, root: &str, path: &str, content: String, expected: Option<i64>) -> Result<i64, String> {
+    let (root, path) = (root.to_string(), path.to_string());
+    if let Some(dir) = external_text(state, &root, &path)? {
         return athena::write(&dir, &path, &content, expected);
     }
     let dir = state.athena_path(&state.prefs()?, &root)?;

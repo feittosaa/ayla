@@ -2,9 +2,9 @@
  *
  * A Ayla serve este arquivo em /__ayla/tema.css, depois das variáveis dela (--ayla-*, com a
  * aparência atual: fundo escolhido, modo claro ou escuro) e o inclui em toda página da Moneta
- * aberta pela Ayla. Fundos, superfícies, bordas, texto e fontes seguem a Ayla; o destaque e os
- * gráficos continuam os da Moneta. O claro ou escuro da Moneta acompanha o modo da Ayla
- * (/__ayla/tema.js), e as tintas de cada modo continuam as da própria Moneta.
+ * aberta pela Ayla. Fundos, superfícies, bordas, texto, fontes e o destaque seguem a Ayla (decisão
+ * do usuário, 23/11/2026); os gráficos continuam os da Moneta. O claro ou escuro da Moneta acompanha
+ * o modo da Ayla (/__ayla/tema.js), e as tintas de cada modo continuam as da própria Moneta.
  */
 :root, :root[data-theme=light] {
   --canvas: var(--ayla-bg);
@@ -44,6 +44,44 @@
   --backdrop: #1f232680;
   --shadow: #3b2a1a33;
   --dot-ring: #00000030;
+}
+
+/* Destaque da Ayla, com as mesmas derivações que a Moneta calcula para a cor escolhida nela
+ * (public/theme.js, `palette`). `!important` vence a cor que a própria Moneta põe no elemento raiz;
+ * esta folha só vale no tema "Sistema" da Moneta (nos outros, ela mesma a desliga). */
+:root:not([data-theme=light]) {
+  --accent: var(--ayla-accent) !important;
+  --accent-ink: var(--ayla-accent-soft) !important;
+  --accent-soft: color-mix(in srgb, var(--ayla-accent) 58%, #ffffff) !important;
+  --on-accent: var(--ayla-on-accent) !important;
+  --nav-active: color-mix(in srgb, var(--ayla-accent) 15%, var(--ayla-panel)) !important;
+  --track: color-mix(in srgb, var(--ayla-accent) 12%, var(--ayla-panel)) !important;
+  --toast: color-mix(in srgb, var(--ayla-accent) 14%, var(--ayla-panel)) !important;
+  --toast-line: color-mix(in srgb, var(--ayla-accent) 45%, var(--ayla-panel)) !important;
+  --hero-line: color-mix(in srgb, var(--ayla-accent) 38%, var(--ayla-panel)) !important;
+  --hero-bg: linear-gradient(107deg, color-mix(in srgb, var(--ayla-accent) 14%, var(--ayla-bg)) 20%, color-mix(in srgb, var(--ayla-accent) 30%, var(--ayla-bg)) 64%, color-mix(in srgb, var(--ayla-accent) 60%, #000000)) !important;
+  --hero-eyebrow: color-mix(in srgb, var(--ayla-accent) 12%, #ffffff) !important;
+  --hero-note: color-mix(in srgb, var(--ayla-accent) 15%, #e6e6e6) !important;
+  --hero-frame: color-mix(in srgb, color-mix(in srgb, var(--ayla-accent) 12%, #ffffff) 19%, transparent) !important;
+  --orbit: color-mix(in srgb, var(--ayla-accent) 40%, transparent) !important;
+  --chart-net: color-mix(in srgb, var(--ayla-accent) 85%, #ffffff) !important;
+}
+:root[data-theme=light] {
+  --accent: var(--ayla-accent) !important;
+  --accent-ink: var(--ayla-accent-soft) !important;
+  --accent-soft: color-mix(in srgb, var(--ayla-accent) 70%, #ffffff) !important;
+  --on-accent: var(--ayla-on-accent) !important;
+  --nav-active: color-mix(in srgb, var(--ayla-accent) 12%, var(--ayla-panel)) !important;
+  --track: color-mix(in srgb, var(--ayla-accent) 10%, var(--ayla-panel)) !important;
+  --toast: color-mix(in srgb, var(--ayla-accent) 10%, var(--ayla-panel)) !important;
+  --toast-line: color-mix(in srgb, var(--ayla-accent) 40%, var(--ayla-panel)) !important;
+  --hero-line: color-mix(in srgb, var(--ayla-accent) 40%, var(--ayla-panel)) !important;
+  --hero-bg: linear-gradient(107deg, color-mix(in srgb, var(--ayla-accent) 6%, #ffffff) 20%, color-mix(in srgb, var(--ayla-accent) 18%, #ffffff) 64%, color-mix(in srgb, var(--ayla-accent) 50%, #ffffff)) !important;
+  --hero-eyebrow: color-mix(in srgb, var(--ayla-accent) 55%, #000000) !important;
+  --hero-note: color-mix(in srgb, color-mix(in srgb, var(--ayla-accent) 55%, #000000) 60%, #555555) !important;
+  --hero-frame: color-mix(in srgb, color-mix(in srgb, var(--ayla-accent) 55%, #000000) 15%, transparent) !important;
+  --orbit: color-mix(in srgb, var(--ayla-accent) 33%, transparent) !important;
+  --chart-net: color-mix(in srgb, var(--ayla-accent) 90%, #000000) !important;
 }
 
 body { background: var(--canvas); }

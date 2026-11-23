@@ -296,6 +296,20 @@ export default function AthenaPad() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Nota da Athena salva na Ayla (outra janela): sem alterações aqui, relê; com alterações, avisa.
+  useEffect(() => {
+    const off = listen<{ root: string; path: string; modified: number; from: string }>('note-saved', event => {
+      const { root, path, modified, from } = event.payload;
+      if (from === 'athena') return;
+      for (const tab of tabsRef.current) {
+        if (tab.note?.root !== root || tab.note.path !== path || tab.modified === modified) continue;
+        if (isDirty(tab.id)) patchTab(tab.id, { changedOnDisk: true }); else void reload(tab.id);
+      }
+    });
+    return () => { void off.then(f => f()); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Arquivo mudou fora do editor: sem alterações, recarrega; com alterações, pergunta.
   useEffect(() => {
     const check = () => {

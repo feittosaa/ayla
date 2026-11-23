@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
 import { CalendarIcon, ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, ImportIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
@@ -83,9 +84,36 @@ const WORKSPACE = 'ayla-athena-workspace';
 const empty: Workspace = { panes: [{ tabs: [], active: 0 }], focused: 0, panel: false };
 /** Texto aberto pelo "Abrir com Athena" fora das raízes: vale só enquanto a Ayla estiver aberta. */
 const isExternal = (root: string) => root.startsWith('aberto:');
-function restore(): Workspace {
+/** Notas e Biblioteca têm abas e telas separadas: uma nota não aparece na Biblioteca e vice-versa. */
+type View = 'notas' | 'biblioteca';
+type Spaces = Record<View, Workspace>;
+const SPACES = 'ayla-athena-workspaces';
+/** Só as abas de um lado (livros ou notas), sem telas vazias além da primeira. */
+function only(ws: Workspace, books: boolean): Workspace {
+  let panes = ws.panes.map(p => {
+    const current = p.tabs[p.active];
+    const tabs = p.tabs.filter(t => isBookRoot(t.root) === books);
+    const kept = current ? tabs.indexOf(current) : -1;
+    return { tabs, active: kept >= 0 ? kept : Math.max(0, Math.min(p.active, tabs.length - 1)) };
+  });
+  if (panes.length > 1) panes = panes.filter(p => p.tabs.length);
+  if (!panes.length) panes = [{ tabs: [], active: 0 }];
+  return { ...ws, panes, focused: Math.min(ws.focused, panes.length - 1) };
+}
+function restoreSpaces(): Spaces {
   try {
-    const saved = JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null') as Workspace | null;
+    const saved = JSON.parse(localStorage.getItem(SPACES) ?? 'null') as Partial<Spaces> | null;
+    if (saved) return { notas: only(parse(saved.notas), false), biblioteca: only(parse(saved.biblioteca), true) };
+  } catch { /* volta ao formato antigo */ }
+  // Antes, notas e livros dividiam as mesmas abas: separa.
+  const old = restore();
+  return { notas: only(old, false), biblioteca: { ...only(old, true), panel: false } };
+}
+function restore(): Workspace {
+  try { return parse(JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null')); } catch { return empty; }
+}
+function parse(saved: Workspace | null | undefined): Workspace {
+  try {
     if (!saved || !Array.isArray(saved.panes) || !saved.panes.length) return empty;
     const panes = saved.panes.slice(0, 2).map(p => {
       const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string' && !isExternal(t.root)).map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: !isAttachment(t.path) }));
@@ -146,8 +174,21 @@ function ago(seconds: number) {
 /** Athena: notas em Markdown em árvore — notas da Athena, cofres (ex.: do Obsidian) e projetos —, com
  * abas (fixáveis), duas notas lado a lado, links entre notas, busca, nota do dia e painel do Git. */
 export default function Athena({ active, onOpenSettings, external }: { active: boolean; onOpenSettings: () => void; external?: { id: number; paths: string[] } }) {
-  const [workspace, setWorkspace] = useState<Workspace>(restore);
-  const opened = shownTab(workspace);
+  /** Barra lateral: notas ou Biblioteca (livros e mangás), lembrada neste computador. */
+  const [view, setView] = useState<View>(() => localStorage.getItem('ayla-athena-view') === 'biblioteca' ? 'biblioteca' : 'notas');
+  useEffect(() => { localStorage.setItem('ayla-athena-view', view); }, [view]);
+  const viewRef = useRef(view); viewRef.current = view;
+  const [spaces, setSpaces] = useState<Spaces>(restoreSpaces);
+  const spacesRef = useRef(spaces); spacesRef.current = spaces;
+  const workspace = spaces[view];
+  /** Abas e telas do lado à vista (ou do lado pedido). */
+  const setWorkspace = useCallback((update: (ws: Workspace) => Workspace, target?: View) => setSpaces(prev => {
+    const key = target ?? viewRef.current;
+    return { ...prev, [key]: update(prev[key]) };
+  }), []);
+  /** Renomear, mover e apagar valem para os dois lados. */
+  const setEveryWorkspace = useCallback((update: (ws: Workspace) => Workspace) => setSpaces(prev => ({ notas: update(prev.notas), biblioteca: update(prev.biblioteca) })), []);
+  const opened = shownTab(spaces.notas);
   const [tree, setTree] = useState<Tree | null>(null);
   const [expanded, setExpanded] = useState<string[]>(() => ['ayla|', ...(opened ? ancestors(opened.root, opened.path) : [])]);
   const [query, setQuery] = useState(''); const [hits, setHits] = useState<Hit[] | null>(null);
@@ -172,9 +213,6 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   /** Diálogo de senha de uma pasta protegida. */
   const [lockDialog, setLockDialog] = useState<{ mode: LockMode; root: string; path: string; file: boolean } | null>(null);
   const [clock, setClock] = useState(() => Date.now());
-  /** Barra lateral: notas ou Biblioteca (livros e mangás), lembrada neste computador. */
-  const [view, setView] = useState<'notas' | 'biblioteca'>(() => localStorage.getItem('ayla-athena-view') === 'biblioteca' ? 'biblioteca' : 'notas');
-  useEffect(() => { localStorage.setItem('ayla-athena-view', view); }, [view]);
   const { library, load: loadLibrary, saveProgress, saveMode, markBooks } = useLibrary();
   /** Importar notas (.txt/.md) para uma pasta. */
   const [importing, setImporting] = useState<{ root: string; folder: string } | null>(null);
@@ -261,7 +299,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   const expand = useCallback((root: string, path: string) => {
     setExpanded(prev => [...new Set([...prev, ...ancestors(root, path)])]);
   }, []);
-  useEffect(() => { localStorage.setItem(WORKSPACE, JSON.stringify(workspace)); }, [workspace]);
+  useEffect(() => { localStorage.setItem(SPACES, JSON.stringify(spaces)); }, [spaces]);
   useEffect(() => { if (active) { load(); loadOverview(); } }, [active, load, loadOverview]);
 
   const panes = workspace.panes;
@@ -275,9 +313,9 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   useEffect(() => { if (activeKey) setCalendar(false); }, [activeKey]);
   useEffect(() => { if (activeRoot && !isBookRoot(activeRoot) && !isExternal(activeRoot)) setFocus(activeRoot); }, [activeRoot]);
   // A Biblioteca carrega quando aparece na lateral ou quando há um livro aberto.
-  const readingBook = workspace.panes.some(p => p.tabs.some(t => isBookRoot(t.root)));
-  /** Modo Biblioteca: a lateral na Biblioteca ou um livro à vista. */
-  const libraryMode = view === 'biblioteca' || Boolean(activeTab && isBookRoot(activeTab.root));
+  const readingBook = spaces.biblioteca.panes.some(p => p.tabs.length > 0);
+  /** Modo Biblioteca: a lateral na Biblioteca (só os livros ficam nas abas). */
+  const libraryMode = view === 'biblioteca';
   useEffect(() => {
     if (active && !library && (view === 'biblioteca' || readingBook)) void loadLibrary().catch(e => setError(errorText(e)));
   }, [active, library, view, readingBook, loadLibrary]);
@@ -310,6 +348,9 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     setError('');
     // Livros abrem em abas como as notas, mas não mudam a raiz de notas em foco.
     if (!isBookRoot(root) && !isExternal(root)) { setFocus(root); expand(root, path); }
+    // Livro abre na Biblioteca; nota, em Notas (trocando o lado à vista, se preciso).
+    const target: View = isBookRoot(root) ? 'biblioteca' : 'notas';
+    if (target !== viewRef.current) { viewRef.current = target; setView(target); }
     setWorkspace(ws => {
       const index = Math.min(ws.focused, ws.panes.length - 1);
       const pane = ws.panes[index];
@@ -323,8 +364,8 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         else { at = pane.active; tabs = tabs.map((t, k) => k === at ? tab : t); }
       }
       return { ...ws, focused: index, panes: ws.panes.map((p, k) => k === index ? { tabs, active: at } : p) };
-    });
-  }, [expand]);
+    }, target);
+  }, [expand, setWorkspace]);
   const updatePane = (index: number, change: (pane: Pane) => Pane) => setWorkspace(ws => {
     const next = ws.panes.map((p, k) => k === index ? change(p) : p);
     if (next.length > 1 && !next[index].tabs.length) { const rest = next.filter((_, k) => k !== index); return { ...ws, panes: rest, focused: 0 }; }
@@ -370,11 +411,11 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     if (root === 'ayla') { setPinnedNotes(prev => prev.map(moved(from, to, folder))); if (folder) setPinnedFolders(prev => prev.map(moved(from, to, true))); }
     retargetTabs(root, from, to, folder);
   };
-  const retargetTabs = (root: string, from: string, to: string, folder = false) => setWorkspace(ws => ({ ...ws, panes: ws.panes.map(p => ({ ...p, tabs: p.tabs.map(t => t.root !== root ? t
+  const retargetTabs = (root: string, from: string, to: string, folder = false) => setEveryWorkspace(ws => ({ ...ws, panes: ws.panes.map(p => ({ ...p, tabs: p.tabs.map(t => t.root !== root ? t
     : folder && t.path.startsWith(`${from}/`) ? { ...t, path: `${to}${t.path.slice(from.length)}` }
     : !folder && t.path === from ? { ...t, path: to } : t) })) }));
   /** Fecha as abas que não existem mais (nota apagada, cofre fechado). */
-  const drop = (gone: (tab: Tab) => boolean) => setWorkspace(ws => {
+  const drop = (gone: (tab: Tab) => boolean) => setEveryWorkspace(ws => {
     let next = ws.panes.map(p => {
       const current = p.tabs[p.active];
       const tabs = p.tabs.filter(t => !gone(t));
@@ -412,6 +453,16 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   };
   const split = () => setWorkspace(ws => ws.panes.length > 1 ? { ...ws, panes: [ws.panes[0]], focused: 0 } : { ...ws, panes: [...ws.panes, { tabs: [], active: 0 }], focused: 1 });
 
+  // Nota salva na Athena separada (outra janela): as abas com ela releem (sem alterações pendentes).
+  useEffect(() => {
+    let me = 'main';
+    try { me = getCurrentWebviewWindow().label; } catch { /* fora do Tauri */ }
+    const stop = listen<{ root: string; path: string; from: string }>('note-saved', event => {
+      const { root, path, from } = event.payload;
+      if (from !== me && Object.values(spacesRef.current).some(ws => ws.panes.some(p => p.tabs.some(t => same(t, root, path))))) setRevision(r => r + 1);
+    });
+    return () => { void stop.then(off => off()); };
+  }, []);
   useEffect(() => {
     const stop = listen<{ root?: string; path?: string }>('notes-updated', event => {
       load(); loadOverview(); setRevision(r => r + 1);
@@ -570,7 +621,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         } catch (e) { failed.push(`${path} — ${errorText(e)}`); }
       }
       if (destination) {
-        setWorkspace(ws => ({ ...ws, panes: ws.panes.map(pane => ({ ...pane, tabs: pane.tabs.map(tab => {
+        setEveryWorkspace(ws => ({ ...ws, panes: ws.panes.map(pane => ({ ...pane, tabs: pane.tabs.map(tab => {
           const path = moved.get(noteKey(tab));
           return path ? { ...tab, path } : tab;
         }) })) }));
@@ -970,14 +1021,14 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
             onStatus={text => setStatuses(prev => prev[index] === text ? prev : prev.map((s, k) => k === index ? text : s))}
             onError={setError}
             register={flush => { flushers.current[index] = flush; }} />
-        : index === 0
+        : index === 0 && view === 'notas'
         ? <div className="athena-welcome">
             <h1>Athena</h1>
             <p>Suas notas em Markdown, em pastas, como no Obsidian: as notas da Athena, os seus cofres e uma pasta para cada projeto da Ayla. Links como [[nota]] funcionam entre as notas.</p>
             <p>Clique numa nota para abrir; Ctrl+clique abre em nova aba. Arraste uma nota para uma pasta para movê-la, ou para a lateral da tela para ver duas notas lado a lado. Fixe uma aba para ela continuar aberta.</p>
             <div className="row-actions"><button className="primary-action" onClick={() => void addVault()}>Abrir cofre</button><button onClick={() => void today()}>Nota de hoje</button><button className="ghost-button" onClick={onOpenSettings}>Configurações</button></div>
           </div>
-        : <div className="athena-welcome"><p>Escolha uma nota na barra lateral para abrir nesta tela.</p></div>}
+        : <div className="athena-welcome"><p>{view === 'biblioteca' ? 'Escolha um livro na Biblioteca para ler nesta tela.' : 'Escolha uma nota na barra lateral para abrir nesta tela.'}</p></div>}
     </section>;
   }
 

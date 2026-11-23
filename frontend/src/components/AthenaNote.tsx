@@ -153,7 +153,8 @@ export default function AthenaNote(props: Props) {
   useEffect(() => {
     if (dirty.current || pasteJob.current) return;
     let alive = true;
-    read().then(note => { if (alive && !dirty.current && !pasteJob.current) apply(note); }, e => { if (alive) setFailed(errorText(e)); });
+    // Mesma versão que já está na tela: não reaplica (o cursor não pula).
+    read().then(note => { if (alive && !dirty.current && !pasteJob.current && !(note.modified === stamp.current && note.content === latest.current)) apply(note); }, e => { if (alive) setFailed(errorText(e)); });
     return () => { alive = false; };
   }, [read, apply, revision]);
 
