@@ -48,6 +48,17 @@ impl Model {
         (self.capability == kind || self.capabilities.contains(&kind))
             && (kind != Capability::Vision || self.companion.is_some())
     }
+    /// Cabe na RAM do perfil ou, se for do catálogo com VRAM medida, inteiro na placa de vídeo.
+    pub fn fits(&self, budget: Budget, context: u32) -> bool {
+        let entry = catalog_entry(self.catalog.as_deref());
+        let gpu = entry.is_some_and(|e| e.gpu_bytes > 0 && e.gpu_bytes <= budget.gpu);
+        let ram = !entry.is_some_and(|e| e.gpu_only) && self.estimated_memory(context) <= budget.ram;
+        gpu || ram
+    }
+    /// MTP do próprio GGUF, informado pelo catálogo.
+    pub fn mtp(&self) -> bool {
+        catalog_entry(self.catalog.as_deref()).is_some_and(|e| e.mtp)
+    }
     pub fn estimated_memory(&self, context: u32) -> u64 {
         match self.memory_bytes {
             // Medição real do catálogo; só o contexto além da referência é estimado.
@@ -81,6 +92,12 @@ pub struct CatalogEntry {
     pub files: &'static [CatalogFile],
     /// Motor necessário: "llama" (pacote preferido) ou "whisper".
     pub runtime: &'static str,
+    /// VRAM medida na placa de vídeo com projetor, contexto de 32K e MTP (23/11/2026); 0 = roda na CPU.
+    pub gpu_bytes: u64,
+    /// Só é escolhido rodando inteiro na placa de vídeo (na CPU seria lento demais).
+    pub gpu_only: bool,
+    /// O GGUF traz a cabeça MTP: o llama.cpp especula 2 tokens por passo com ela.
+    pub mtp: bool,
 }
 impl CatalogEntry {
     pub fn download_bytes(&self) -> u64 {
@@ -89,16 +106,57 @@ impl CatalogEntry {
     pub fn memory_bytes(&self) -> u64 {
         self.measured_bytes.saturating_mul(6) / 5
     }
-    pub fn fits(&self, budget: u64, context: u32) -> bool {
-        self.memory_bytes().saturating_add(
+    pub fn fits(&self, budget: Budget, context: u32) -> bool {
+        let gpu = self.gpu_bytes > 0 && self.gpu_bytes <= budget.gpu;
+        let ram = !self.gpu_only && self.memory_bytes().saturating_add(
             u64::from(context.saturating_sub(MEASURED_CONTEXT)) * KV_BYTES_PER_TOKEN,
-        ) <= budget
+        ) <= budget.ram;
+        gpu || ram
     }
+}
+
+/// VRAM deixada para o sistema quando o modelo roda na placa de vídeo.
+pub const GPU_RESERVE: u64 = 3 << 30;
+
+/// Orçamento de memória: a RAM limitada pelo perfil (Leve, Moderado, Máximo) e, com placa de vídeo
+/// dedicada, a VRAM menos a reserva do sistema (decisão do usuário, 23/11/2026).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub ram: u64,
+    pub gpu: u64,
+}
+impl Budget {
+    #[cfg(test)]
+    pub fn ram(ram: u64) -> Self { Self { ram, gpu: 0 } }
+}
+/// VRAM disponível para modelos: a maior placa, menos a reserva; zero sem placa usável.
+pub fn gpu_budget(hardware: &Hardware, usable: bool) -> u64 {
+    if !usable { return 0; }
+    hardware.gpus.iter().filter_map(|g| g.vram_total_bytes).max().unwrap_or(0).saturating_sub(GPU_RESERVE)
+}
+fn catalog_entry(id: Option<&str>) -> Option<&'static CatalogEntry> {
+    id.and_then(|id| catalog().iter().find(|e| e.id == id))
 }
 const CONVERSATION: &[Capability] = &[Capability::Text, Capability::Reasoning, Capability::Vision];
 /// Conjunto inicial aprovado: revisões fixas e verificação SHA-256.
 pub fn catalog() -> &'static [CatalogEntry] {
     &[
+        CatalogEntry {
+            id: "qwen3.6-35b-a3b",
+            name: "Qwen3.6 35B-A3B",
+            summary: "O mais capaz, para placas de vídeo com 16 GB: conversa, raciocínio e imagens, com MTP.",
+            capabilities: CONVERSATION,
+            // VRAM medida (projetor, 32K, MTP) + RAM anônima do processo; sem projetor de CPU.
+            measured_bytes: 12_784_000_000,
+            runtime: "llama",
+            gpu_bytes: 12_523_208_704,
+            gpu_only: true,
+            mtp: true,
+            files: &[
+                CatalogFile { url: "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf", bytes: 12_574_128_416, sha256: "ed7cda7e38985b4fcff76475865135039641d2bfbac3c169df15ca770f37fb0c", projector: false },
+                CatalogFile { url: "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/mmproj-F16.gguf", bytes: 899_283_584, sha256: "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160", projector: true },
+            ],
+        },
         CatalogEntry {
             id: "gemma-4-e4b",
             name: "Gemma 4 E4B",
@@ -106,6 +164,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             capabilities: CONVERSATION,
             measured_bytes: 7_464_751_104,
             runtime: "llama",
+            gpu_bytes: 4_670_521_344,
+            gpu_only: false,
+            mtp: false,
             files: &[
                 CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf", bytes: 5_154_941_280, sha256: "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee", projector: false },
                 CatalogFile { url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B-it-mmproj.gguf", bytes: 991_552_256, sha256: "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578", projector: true },
@@ -118,6 +179,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             capabilities: CONVERSATION,
             measured_bytes: 4_748_759_040,
             runtime: "llama",
+            gpu_bytes: 4_667_052_032,
+            gpu_only: false,
+            mtp: false,
             files: &[
                 CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/Qwen3.5-4B-Q4_K_M.gguf", bytes: 3_032_091_584, sha256: "217002fa8008ef4fc6d548353a3aebef055a96e6ff8e0e2c0953ef8254a89c14", projector: false },
                 CatalogFile { url: "https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/resolve/8d43d974efc48399cb58957ad49c8b26bf5a109c/mmproj-Qwen3.5-4B-Q8_0.gguf", bytes: 366_894_560, sha256: "5a5ba634d46f9888599963bfc52194eadf099e1efdbee46d71957d911cf62654", projector: true },
@@ -131,6 +195,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             // RSS medido na CPU com contexto 2048 (benchmark de 19/11/2026).
             measured_bytes: 406_847_488,
             runtime: "llama",
+            gpu_bytes: 0,
+            gpu_only: false,
+            mtp: false,
             files: &[
                 CatalogFile { url: "https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/8dd0ca2a66a8f14470acb0e2a71f801afbc5fb73/embeddinggemma-300M-qat-Q4_0.gguf", bytes: 277_852_192, sha256: "50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26", projector: false },
             ],
@@ -143,6 +210,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             // Pico de RAM do whisper-cli na CPU (benchmark FLEURS de 19/11/2026).
             measured_bytes: 787_480_576,
             runtime: "whisper",
+            gpu_bytes: 0,
+            gpu_only: false,
+            mtp: false,
             files: &[
                 CatalogFile { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin", bytes: 487_601_967, sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b", projector: false },
             ],
@@ -155,6 +225,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
             // Pico de RAM do whisper-cli na CPU (benchmark FLEURS de 19/11/2026).
             measured_bytes: 185_597_952,
             runtime: "whisper",
+            gpu_bytes: 0,
+            gpu_only: false,
+            mtp: false,
             files: &[
                 CatalogFile { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin", bytes: 77_691_713, sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21", projector: false },
             ],
@@ -162,7 +235,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
     ]
 }
 /// Melhor modelo de conversa que cabe no orçamento: o de maior consumo medido.
-pub fn recommended(budget: u64, context: u32) -> Option<&'static CatalogEntry> {
+pub fn recommended(budget: Budget, context: u32) -> Option<&'static CatalogEntry> {
     catalog()
         .iter()
         .filter(|entry| entry.capabilities.contains(&Capability::Text) && entry.fits(budget, context))
@@ -207,7 +280,7 @@ pub fn memory_budget(hardware: &Hardware, preferences: &Preferences) -> u64 {
 pub fn choose(
     models: &[Model],
     kind: Capability,
-    budget: u64,
+    budget: Budget,
     context: u32,
     selected: Option<&str>,
 ) -> Result<Model, String> {
@@ -216,7 +289,7 @@ pub fn choose(
         .filter(|m| {
             m.supports(kind)
                 && m.path.is_file()
-                && m.estimated_memory(context) <= budget
+                && m.fits(budget, context)
                 && selected.map(|id| id == m.id).unwrap_or(true)
         })
         .cloned()
@@ -376,11 +449,11 @@ mod tests {
             model("huge", &file, 20 << 30, all, true),
         ];
         let budget = 8 << 30;
-        assert_eq!(choose(&models, Capability::Text, budget, 2048, None).unwrap().id, "large");
-        assert_eq!(choose(&models, Capability::Reasoning, budget, 2048, None).unwrap().id, "large");
+        assert_eq!(choose(&models, Capability::Text, Budget::ram(budget), 2048, None).unwrap().id, "large");
+        assert_eq!(choose(&models, Capability::Reasoning, Budget::ram(budget), 2048, None).unwrap().id, "large");
         let only_small = &models[..1];
-        assert!(choose(only_small, Capability::Vision, budget, 2048, None).is_err());
-        assert_eq!(choose(&models, Capability::Text, budget, 2048, Some("small")).unwrap().id, "small");
+        assert!(choose(only_small, Capability::Vision, Budget::ram(budget), 2048, None).is_err());
+        assert_eq!(choose(&models, Capability::Text, Budget::ram(budget), 2048, Some("small")).unwrap().id, "small");
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -407,9 +480,16 @@ mod tests {
             assert!(matches!(entry.runtime, "llama" | "whisper"));
             assert!(!entry.capabilities.contains(&Capability::Speech), "a Ayla não baixa voz de saída");
         }
-        assert_eq!(recommended(15 << 30, 8192).unwrap().id, "gemma-4-e4b");
-        assert_eq!(recommended(7 << 30, 8192).unwrap().id, "qwen3.5-4b");
-        assert!(recommended(4 << 30, 8192).is_none());
+        assert_eq!(recommended(Budget::ram(15 << 30), 8192).unwrap().id, "gemma-4-e4b");
+        assert_eq!(recommended(Budget::ram(7 << 30), 8192).unwrap().id, "qwen3.5-4b");
+        assert!(recommended(Budget::ram(4 << 30), 8192).is_none());
+        // Sem placa de vídeo, o 35B nunca é escolhido, mesmo com muita RAM.
+        assert_eq!(recommended(Budget::ram(64 << 30), 8192).unwrap().id, "gemma-4-e4b");
+        // Placa de 16 GB (13 GB livres após a reserva) e perfil Leve: o 35B cabe na placa.
+        let rx = Budget { ram: 7 << 30, gpu: 16_304 * (1 << 20) - GPU_RESERVE };
+        assert_eq!(recommended(rx, 32768).unwrap().id, "qwen3.6-35b-a3b");
+        // Placa de 12 GB: o 35B não cabe; a Gemma roda inteira na placa mesmo no Leve.
+        assert_eq!(recommended(Budget { ram: 7 << 30, gpu: (12 << 30) - GPU_RESERVE }, 32768).unwrap().id, "gemma-4-e4b");
     }
     #[test]
     fn invalid_import_does_not_touch_source_or_leave_partial_assets() {

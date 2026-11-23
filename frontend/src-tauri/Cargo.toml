@@ -28,7 +28,7 @@ tauri-plugin-log = "2"
 
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "stream", "rustls", "form"] }
 futures-util = "0.3"
-tokio = { version = "1", features = ["fs", "process", "sync", "io-util", "time", "macros"] }
+tokio = { version = "1", features = ["fs", "process", "sync", "io-util", "time", "macros", "signal"] }
 rusqlite = { version = "0.43", features = ["bundled", "backup"] }
 sha2 = "0.10"
 tauri-plugin-dialog = "2"

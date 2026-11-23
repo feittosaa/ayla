@@ -4,7 +4,7 @@ import { errorText, native } from '../services/Desktop';
 import { basesChanged } from '../services/Bases';
 
 const PROVIDERS = [
-  { id: 'unsplash', name: 'Unsplash', get: 'https://unsplash.com/developers', hint: 'Access Key de um app em unsplash.com/developers.' },
+  { id: 'unsplash', name: 'Unsplash', get: 'https://unsplash.com/developers', hint: 'Access Key de um app em unsplash.com/developers. A Secret Key não é necessária: ela só serve para agir em nome de uma conta, e a Ayla apenas busca fotos.' },
   { id: 'pexels', name: 'Pexels', get: 'https://www.pexels.com/api/', hint: 'Chave da API em pexels.com/api.' },
   { id: 'pixabay', name: 'Pixabay', get: 'https://pixabay.com/api/docs/', hint: 'Chave que aparece em pixabay.com/api/docs com a conta aberta.' },
 ] as const;

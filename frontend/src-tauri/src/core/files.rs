@@ -63,6 +63,10 @@ pub const MAX_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_EXTRACTED: usize = 200_000;
 /// Orçamento de texto de anexos por resposta (cabe no contexto padrão de 8192 tokens).
 pub const PROMPT_BUDGET: usize = 8_000;
+/// Orçamento de anexos proporcional ao contexto do modelo: 8.000 caracteres a 8K, 32.000 a 32K.
+pub fn prompt_budget(context: u32) -> usize {
+    (PROMPT_BUDGET * context as usize / 8192).clamp(1_000, 32_000)
+}
 /// Imagens (fotos, quadros de vídeo e de GIF) por resposta.
 pub const MAX_IMAGES: usize = 4;
 
@@ -187,6 +191,13 @@ pub fn budgets(lengths: &[usize], total: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_budget_follows_the_model_context() {
+        assert_eq!(prompt_budget(8192), PROMPT_BUDGET);
+        assert_eq!(prompt_budget(32768), 32_000);
+        assert_eq!(prompt_budget(512), 1_000);
+    }
     #[test]
     fn kinds_follow_content_and_extension() {
         assert_eq!(kind_of("relatorio.PDF", b"%PDF-1.7"), Some(Kind::Pdf));

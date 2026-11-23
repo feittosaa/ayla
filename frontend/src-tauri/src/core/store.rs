@@ -88,7 +88,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 9;
+const SCHEMA: u32 = 10;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -191,6 +191,14 @@ impl Store {
         if version <= 8 {
             let tx = conn.transaction()?;
             tx.execute_batch("ALTER TABLE messages ADD COLUMN extras TEXT; PRAGMA user_version=9;")?;
+            tx.commit()?;
+        }
+        // v10: leitura do prompt e geração medidas separadamente (tempos informados pelo llama.cpp).
+        if version <= 9 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE metrics ADD COLUMN prompt_tokens INTEGER; ALTER TABLE metrics ADD COLUMN cache_tokens INTEGER;
+                ALTER TABLE metrics ADD COLUMN prompt_ms REAL; ALTER TABLE metrics ADD COLUMN decode_tokens INTEGER;
+                ALTER TABLE metrics ADD COLUMN decode_ms REAL; PRAGMA user_version=10;")?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -735,13 +743,22 @@ impl Store {
         duration: u64,
         tokens: u64,
         cancelled: bool,
+        timings: &serde_json::Value,
     ) -> rusqlite::Result<()> {
-        self.conn.execute("INSERT INTO metrics(model_id,first_token_ms,duration_ms,tokens,cancelled) VALUES(?1,?2,?3,?4,?5)",params![model,first.map(|v|v as i64),duration as i64,tokens as i64,cancelled])?;
+        let count = |key: &str| timings[key].as_i64();
+        let ms = |key: &str| timings[key].as_f64();
+        self.conn.execute("INSERT INTO metrics(model_id,first_token_ms,duration_ms,tokens,cancelled,prompt_tokens,cache_tokens,prompt_ms,decode_tokens,decode_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![model,first.map(|v|v as i64),duration as i64,tokens as i64,cancelled,count("prompt_n"),count("cache_n"),ms("prompt_ms"),count("predicted_n"),ms("predicted_ms")])?;
         self.conn.execute("DELETE FROM metrics WHERE id NOT IN (SELECT id FROM metrics ORDER BY id DESC LIMIT 1000)",[])?;
         Ok(())
     }
     pub fn metrics(&self) -> rusqlite::Result<Vec<serde_json::Value>> {
-        self.conn.prepare("SELECT model_id,first_token_ms,duration_ms,tokens,cancelled FROM metrics ORDER BY id DESC LIMIT 50")?.query_map([],|r| Ok(serde_json::json!({"model":r.get::<_,String>(0)?,"first_token_ms":r.get::<_,Option<i64>>(1)?,"duration_ms":r.get::<_,i64>(2)?,"chunks":r.get::<_,i64>(3)?,"cancelled":r.get::<_,bool>(4)?})))?.collect()
+        let rate = |n: Option<i64>, ms: Option<f64>| match (n, ms) { (Some(n), Some(ms)) if ms > 0.0 => Some((n as f64 * 1000.0 / ms * 10.0).round() / 10.0), _ => None };
+        self.conn.prepare("SELECT model_id,first_token_ms,duration_ms,tokens,cancelled,prompt_tokens,cache_tokens,prompt_ms,decode_tokens,decode_ms FROM metrics ORDER BY id DESC LIMIT 50")?.query_map([],|r| {
+            let (prompt, cache, prompt_ms, decode, decode_ms) = (r.get::<_,Option<i64>>(5)?, r.get::<_,Option<i64>>(6)?, r.get::<_,Option<f64>>(7)?, r.get::<_,Option<i64>>(8)?, r.get::<_,Option<f64>>(9)?);
+            Ok(serde_json::json!({"model":r.get::<_,String>(0)?,"first_token_ms":r.get::<_,Option<i64>>(1)?,"duration_ms":r.get::<_,i64>(2)?,"chunks":r.get::<_,i64>(3)?,"cancelled":r.get::<_,bool>(4)?,
+                "prompt_tokens":prompt,"cache_tokens":cache,"prompt_tps":rate(prompt,prompt_ms),"decode_tps":rate(decode,decode_ms)}))
+        })?.collect()
     }
     pub fn insert_fact(
         &self,
@@ -930,6 +947,23 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn metrics_keep_prompt_reading_and_generation_apart() {
+        let root = std::env::temp_dir().join(format!("ayla-metrics-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Store::open(&root.join("ayla.db")).unwrap();
+        assert_eq!(db.version().unwrap(), SCHEMA);
+        let timings = serde_json::json!({"cache_n":7423,"prompt_n":17,"prompt_ms":8.5,"predicted_n":256,"predicted_ms":3657.0});
+        db.metric("gemma", Some(50), 3700, 200, false, &timings).unwrap();
+        db.metric("nuvem", Some(900), 4000, 80, false, &serde_json::Value::Null).unwrap();
+        let list = db.metrics().unwrap();
+        assert_eq!(list[1]["prompt_tps"], 2000.0);
+        assert_eq!(list[1]["decode_tps"], 70.0);
+        assert_eq!(list[1]["cache_tokens"], 7423);
+        assert!(list[0]["prompt_tps"].is_null() && list[0]["decode_tps"].is_null(), "resposta sem tempos do motor");
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn legacy_import_preserves_source_and_backup_restores_native_data() {
         let root = std::env::temp_dir().join(format!("ayla-store-contract-{}", id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1087,10 +1121,10 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
         db.save_turn(&chat.id, "antes", "resposta antiga", true, &[], &[], None).unwrap();
-        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
+        db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
-        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v9-")), "backup antes da migração");
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v10-")), "backup antes da migração");
         db.save_turn(&chat.id, "busca imagens de gato", "Encontrei 1 imagem", true, &[], &[], None).unwrap();
         db.set_last_reply_extras(&chat.id, r#"{"images":{"query":"gato","items":[{"id":"1"}],"links":[]},"sources":[{"id":"artigo:0","name":"[1] X","pages":[],"url":"https://doi.org/1"}]}"#).unwrap();
         drop(db);
@@ -1110,7 +1144,7 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
         db.save_turn(&chat.id,"a","b",true,&[],&[],None).unwrap();
-        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
+        db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
         db.save_turn(&chat.id,"c","d",true,&[],&[],Some("cloud_search")).unwrap();
@@ -1158,7 +1192,7 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();

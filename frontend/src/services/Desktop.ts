@@ -7,22 +7,23 @@ export type Sensitivity = 'public' | 'sensitive' | 'uncertain';
 export type Preferences = {
   personality: string; version: number; onboarding_complete: boolean; profile: Profile | null;
   resource_percent: number | null; usage_mode: UsageMode; cloud_provider: string; cloud_endpoint: string; cloud_model: string; cloud_asked: boolean; image_provider: string; image_model: string;
-  history_messages: number; history_chars: number; context_tokens: number; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
+  history_messages: number; history_chars: number; context_tokens: number; context_auto?: boolean | null; idle_seconds: number; memory_auto: boolean; voice: boolean | null;
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
   athena_folder: string; athena_vaults: string[]; athena_git: boolean;
   response_source: '' | 'local' | 'auto' | 'cloud';
+  hidden_sources?: string[];
   appearance: { mode: 'escuro' | 'claro' | 'sistema'; accent: string; dark_background: string; light_background: string; roundness: number; opacity: number; icon_ayla: number; icon_athena: number };
 };
 export type Model = { id: string; name: string; capability: Capability; capabilities?: Capability[]; companion: string | null; bytes: number; sha256: string; catalog?: string | null };
-export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean };
+export type CatalogEntry = { id: string; name: string; summary: string; capabilities: Capability[]; download_bytes: number; memory_bytes: number; installed: boolean; fits: boolean; gpu_bytes?: number; gpu_only?: boolean };
 export type Hardware = {
   ram_total_bytes: number; ram_available_bytes: number; logical_cpus: number;
   gpus: { vendor: string; vram_total_bytes: number | null; vram_available_bytes: number | null }[];
 };
-export type Metric = { model: string; first_token_ms: number | null; duration_ms: number; chunks: number; cancelled: boolean };
+export type Metric = { model: string; first_token_ms: number | null; duration_ms: number; chunks: number; cancelled: boolean; prompt_tokens?: number | null; cache_tokens?: number | null; prompt_tps?: number | null; decode_tps?: number | null };
 export type Snapshot = {
-  system_prompt: string; preferences: Preferences; hardware: Hardware; models: Model[]; memory_budget_bytes: number;
+  system_prompt: string; preferences: Preferences; hardware: Hardware; models: Model[]; memory_budget_bytes: number; gpu_budget_bytes?: number;
   runtimes: { id: string; label: string; bytes: number; installed: boolean }[];
   worker: { active_model: string | null }; metrics: Metric[]; recommended_profile: Profile;
   catalog: CatalogEntry[]; recommended_model: string | null;

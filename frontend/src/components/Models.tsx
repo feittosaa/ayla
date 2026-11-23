@@ -34,7 +34,7 @@ export default function Models({ snapshot, refresh }: Props) {
     {progress && <p role="status">{progress}</p>}
     {busy && active.current && <button onClick={() => void native('cancel_job', { requestId: active.current })}>Interromper download</button>}
     <section className="panel"><h2>Modelos recomendados</h2><p>Testados em português pela Ayla. O download só começa depois da sua confirmação.</p>
-      {snapshot.catalog.map(entry => <article className="model-row" key={entry.id}><div><b>{entry.name}{entry.id === snapshot.recommended_model ? ' · recomendado' : ''}</b><small>{entry.summary}</small><small>Usa até {formatBytes(entry.memory_bytes)} de memória{entry.fits ? '' : ' · não cabe no orçamento atual'}</small></div><ModelSetup entry={entry} refresh={refresh} /></article>)}
+      {snapshot.catalog.map(entry => <article className="model-row" key={entry.id}><div><b>{entry.name}{entry.id === snapshot.recommended_model ? ' · recomendado' : ''}</b><small>{entry.summary}</small><small>{entry.gpu_only ? `Roda inteiro na placa de vídeo: usa ${formatBytes(entry.gpu_bytes ?? 0)} de memória gráfica` : `Usa até ${formatBytes(entry.memory_bytes)} de memória`}{entry.fits ? '' : entry.gpu_only ? ' · precisa de uma placa de vídeo com mais memória livre' : ' · não cabe no orçamento atual'}{entry.installed ? ' · instalado' : ''}</small></div><ModelSetup entry={entry} refresh={refresh} /></article>)}
     </section>
     <section className="panel"><h2>Importar modelo</h2>
       <label>Capacidade<select value={capability} disabled={busy} onChange={e => setCapability(e.target.value as Capability)}>{Object.entries(labels).filter(([key]) => key !== 'speech').map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
@@ -45,7 +45,7 @@ export default function Models({ snapshot, refresh }: Props) {
     <section className="panel"><h2>Biblioteca local</h2>
       {!snapshot.models.length && <p>Nenhum modelo importado. Você pode continuar usando a aplicação.</p>}
       {snapshot.models.map(model => <article className="model-row" key={model.id}><div><b>{model.name}</b><small>{capabilityList(model)} · {formatBytes(model.bytes)}</small><small>Compatibilidade de execução verificada ao carregar.</small></div><button disabled={busy} onClick={() => setConfirm(model.id)}>Remover cópia</button></article>)}
-      <p>Orçamento estimado agora: {formatBytes(snapshot.memory_budget_bytes)}. O uso real depende da arquitetura, do contexto e dos buffers do modelo.</p>
+      <p>Orçamento estimado agora: {formatBytes(snapshot.memory_budget_bytes)} de RAM{snapshot.gpu_budget_bytes ? ` e ${formatBytes(snapshot.gpu_budget_bytes)} na placa de vídeo (deixando 3 GB para o sistema)` : ''}. Os modelos do catálogo podem rodar inteiros na placa de vídeo. O uso real depende da arquitetura, do contexto e dos buffers do modelo.</p>
       <button disabled={busy} onClick={() => { void native('unload_models').then(refresh).catch(e => setError(errorText(e))); }}>Liberar modelo carregado</button>
     </section>
     <section className="panel"><h2>Componentes de execução</h2><p>São os motores que executam os modelos. Baixe apenas os que quiser usar; nenhum modelo é incluído no download.</p>

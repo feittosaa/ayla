@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { errorText, formatBytes, native } from '../services/Desktop';
 import { basesChanged, listBases, type Base, type Validation } from '../services/Bases';
+import { ACADEMIC_SOURCES, IMAGE_SOURCES } from '../services/Sources';
 
 /** "+" das bases: baixar do catálogo ou sugerir um link do GitHub, que a Ayla valida e você aprova. */
-export default function BasesDialog({ onClose }: { onClose: () => void }) {
+export default function BasesDialog({ onClose, hidden = [], onRestored }: { onClose: () => void; hidden?: string[]; onRestored?: () => void }) {
   const [catalog, setCatalog] = useState<Base[] | null>(null);
   const [url, setUrl] = useState(''); const [report, setReport] = useState<Validation | null>(null);
   const [busy, setBusy] = useState<string | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
@@ -13,15 +14,25 @@ export default function BasesDialog({ onClose }: { onClose: () => void }) {
     setBusy(key); setError(''); setNotice('');
     try { await task(); } catch (e) { setError(errorText(e)); } finally { setBusy(null); }
   }
-  const install = (base: Base) => run(base.id, async () => { await native('bases_install', { id: base.id }); setNotice(`${base.name} pronta.`); basesChanged(); load(); });
+  const install = (base: Base) => run(base.id, async () => { await native('bases_install', { id: base.id }); setNotice(`${base.name} pronta.`); basesChanged(); onRestored?.(); load(); });
   const validate = () => run('link', async () => { setReport(null); setReport(await native<Validation>('bases_validate', { url })); });
   const approve = (id: string) => run('approve', async () => { await native('bases_approve', { id }); setNotice('Base aprovada e instalada como curada por você.'); setReport(null); setUrl(''); basesChanged(); load(); });
   const discard = (id: string) => { void native('bases_discard', { id }).catch(() => {}); setReport(null); };
+  // Fontes e bases tiradas da barra: voltam com um clique (baixadas de novo pelo Baixar do catálogo).
+  const [restored, setRestored] = useState<string[]>([]);
+  const removed = [...IMAGE_SOURCES, ...ACADEMIC_SOURCES].filter(s => hidden.includes(s.id) && !restored.includes(s.id))
+    .concat((catalog ?? []).filter(b => !b.installed && hidden.includes(`base:${b.id}`) && !restored.includes(`base:${b.id}`)).map(b => ({ id: `base:${b.id}`, name: b.name, hint: b.description })));
+  const restore = (id: string) => run(id, async () => { await native('source_restore', { id }); setRestored(prev => [...prev, id]); onRestored?.(); });
   function close() { if (report) discard(report.id); onClose(); }
   return <div className="dialog-backdrop" onClick={() => { if (!busy) close(); }}>
     <div className="dialog bases-dialog" role="dialog" aria-modal="true" aria-labelledby="bases-dialog-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape' && !busy) close(); }}>
       <h2 id="bases-dialog-title">Bases de dados</h2>
       <p className="row-hint">Dados públicos numa versão fixada e conferida, guardados e consultados neste computador.</p>
+      {removed.length > 0 && <><h3>Removidas da barra</h3>
+        <ul className="bases-catalog">{removed.map(item => <li key={item.id}>
+          <span className="row-text"><span className="row-title">{item.name}</span><span className="row-hint">{item.hint}</span></span>
+          <button disabled={busy !== null} onClick={() => void restore(item.id)}>{busy === item.id ? 'Trazendo…' : 'Trazer de volta'}</button>
+        </li>)}</ul></>}
       <h3>Catálogo</h3>
       <ul className="bases-catalog">
         {catalog === null ? <li className="row-hint">Carregando…</li> : catalog.map(base => <li key={base.id}>

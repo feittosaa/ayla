@@ -183,7 +183,7 @@ fn line(n: usize, w: &Work) -> String {
 }
 
 /// Bloco para o prompt local: referências numeradas, com resumos, e a instrução de citar.
-pub fn context_block(works: &[Work], query: &str) -> String {
+pub fn context_block(works: &[Work], query: &str, scholar: bool) -> String {
     let mut out = format!("\n\nResultados de pesquisa acadêmica para \"{query}\" (OpenAlex, Crossref e arXiv, consultados agora):\n");
     for (i, w) in works.iter().enumerate() {
         out.push_str(&line(i + 1, w));
@@ -192,19 +192,20 @@ pub fn context_block(works: &[Work], query: &str) -> String {
         if !w.summary.is_empty() { out.push_str(&format!("\nResumo: {}", w.summary)); }
         out.push('\n');
     }
-    out.push_str(&format!("Responda em português com base só nestes trabalhos, citando-os como [n]. Não invente autores, anos nem resultados. Termine com a seção \"Referências\" com os itens usados e seus links, e com o link para continuar no Google Acadêmico: {}", scholar_url(query)));
+    let more = if scholar { format!(", e com o link para continuar no Google Acadêmico: {}", scholar_url(query)) } else { ".".to_string() };
+    out.push_str(&format!("Responda em português com base só nestes trabalhos, citando-os como [n]. Não invente autores, anos nem resultados. Termine com a seção \"Referências\" com os itens usados e seus links{more}"));
     out
 }
 
 /// Resposta sem modelo local: a lista das referências encontradas.
-pub fn plain_reply(works: &[Work], query: &str, failed: &[&str]) -> String {
+pub fn plain_reply(works: &[Work], query: &str, failed: &[&str], scholar: bool) -> String {
     let mut out = if works.is_empty() { format!("Não encontrei trabalhos acadêmicos para \"{query}\".") } else { format!("Trabalhos acadêmicos sobre \"{query}\":\n\n") };
     for (i, w) in works.iter().enumerate() {
         out.push_str(&format!("- {}", line(i + 1, w)));
         if let Some(pdf) = &w.pdf { out.push_str(&format!(" · [PDF aberto]({pdf})")); }
         out.push('\n');
     }
-    out.push_str(&format!("\n[Continuar no Google Acadêmico]({})", scholar_url(query)));
+    if scholar { out.push_str(&format!("\n[Continuar no Google Acadêmico]({})", scholar_url(query))); }
     if !failed.is_empty() { out.push_str(&format!("\n\n{} não respondeu agora.", failed.join(", "))); }
     out
 }
@@ -233,9 +234,12 @@ mod tests {
  All You Need</title><summary>We propose &amp; test.</summary><author><name>Ashish Vaswani</name></author><link title="pdf" href="https://arxiv.org/pdf/1706.03762v7" rel="related"/></entry></feed>"#;
         let work = &parse_arxiv(xml)[0];
         assert_eq!((work.title.as_str(), work.year, work.pdf.as_deref(), work.summary.as_str()), ("Attention Is All You Need", Some(2017), Some("https://arxiv.org/pdf/1706.03762v7"), "We propose & test."));
-        let block = context_block(&[work.clone()], "atenção");
+        let block = context_block(&[work.clone()], "atenção", true);
         assert!(block.contains("[1] Ashish Vaswani. Attention Is All You Need (2017). arXiv.") && block.contains("scholar.google.com/scholar?q=aten%C3%A7%C3%A3o"));
-        assert!(plain_reply(&[], "x", &["arXiv"]).contains("arXiv não respondeu"));
+        assert!(plain_reply(&[], "x", &["arXiv"], true).contains("arXiv não respondeu"));
+        // Google Acadêmico tirado da barra: nenhum link para ele.
+        assert!(!plain_reply(&[work.clone()], "x", &[], false).contains("scholar.google"));
+        assert!(!context_block(&[work.clone()], "x", false).contains("scholar.google"));
     }
 
     /// Real (rede): `cargo test --lib -- --ignored academico_real --nocapture`

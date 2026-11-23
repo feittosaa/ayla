@@ -138,16 +138,27 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
   }, [project]);
   const togglePick = (item: { id: string; name: string }) => setPicked(prev => prev.some(p => p.id === item.id) ? prev.filter(p => p.id !== item.id) : [...prev, { id: item.id, name: item.name }]);
   /** Fonte indisponível: o aviso explica o que falta e o clique leva à configuração. */
-  const sourceRow = (source: Source, warning: string | null, icon: React.ReactNode) => <div key={source.id} className="conversation-row">
+  const sourceRow = (source: Source, warning: string | null, icon: React.ReactNode) => removingBase === source.id
+    ? confirmRemoval(source.id, source.name, 'Ela sai da barra e não é mais consultada. Dá para trazer de volta pelo +.')
+    : <div key={source.id} className="conversation-row">
     <button className="conversation-item base-item" aria-pressed={!warning && picked.some(p => p.id === source.id)}
       title={warning ? `${source.name}: ${warning}` : `${source.name} · ${source.hint}\nClique para usar na próxima mensagem`}
       onClick={() => warning ? onOpenSettings?.('imagens') : togglePick(source)}>{icon}<span>{source.name}</span>
       {warning && <span className="source-warning" aria-label={warning}><WarningIcon size={14} /></span>}</button>
+    {removeButton(source.id, source.name)}
   </div>;
-  async function removeBase(id: string) {
-    setRemovingBase(null);
-    try { await native('bases_remove', { id }); basesChanged(); } catch (e) { setError(errorText(e)); }
+  // Qualquer item da barra pode sair: bases (baixadas perdem os dados), fontes de imagens e acadêmicas.
+  // Volta pelo "+"; não é um bloqueio permanente.
+  const hidden = snapshot.preferences.hidden_sources ?? [];
+  async function removeSource(id: string) {
+    setRemovingBase(null); setPicked(prev => prev.filter(p => p.id !== id && `base:${p.id}` !== id));
+    try { await native('source_remove', { id }); basesChanged(); await refresh(); } catch (e) { setError(errorText(e)); }
   }
+  const confirmRemoval = (id: string, name: string, detail: string) => <div key={id} className="conversation-confirm" role="group" aria-label="Confirmar remoção">
+    <span>Remover “{name}”?</span><small>{detail}</small>
+    <div className="row-actions"><button className="danger-action" onClick={() => void removeSource(id)}>Remover</button><button className="ghost-button" onClick={() => setRemovingBase(null)}>Cancelar</button></div>
+  </div>;
+  const removeButton = (id: string, name: string) => <span className="row-tools"><button className="icon-button tiny" aria-label={`Remover “${name}”`} title="Remover" onClick={() => setRemovingBase(id)}><TrashIcon size={15} /></button></span>;
   // "Abrir com Ayla": uma conversa nova com os arquivos na caixa de mensagem, sem enviar.
   const handled = useRef(0);
   useEffect(() => {
@@ -178,7 +189,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
   }
 
   return <div className="chat-layout">
-    {addingBase && <BasesDialog onClose={() => setAddingBase(false)} />}
+    {addingBase && <BasesDialog hidden={hidden} onClose={() => setAddingBase(false)} onRestored={() => { basesChanged(); void refresh(); }} />}
     {(compact || narrow) && sidebar && <div className="sidebar-backdrop" aria-hidden="true" onClick={() => setSidebar(false)} />}
     {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
       {project && onBack && <button className="ghost-button back-to-ayla" onClick={onBack}><ChevronLeftIcon size={16} />Ayla</button>}
@@ -201,23 +212,19 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
           </div>
           {basesOpen && <div className="sources-list">
             <p className="sources-group">Dados</p>
-            {bases.map(base => removingBase === base.id
-              ? <div key={base.id} className="conversation-confirm" role="group" aria-label="Confirmar remoção">
-                  <span>Remover “{base.name}”?</span>
-                  <small>{base.origin === 'voce' ? 'Ela sai do seu catálogo; dá para sugerir o link de novo.' : 'Dá para baixar de novo pelo +.'}</small>
-                  <div className="row-actions"><button className="danger-action" onClick={() => void removeBase(base.id)}>Remover</button><button className="ghost-button" onClick={() => setRemovingBase(null)}>Cancelar</button></div>
-                </div>
+            {bases.filter(base => !hidden.includes(`base:${base.id}`)).map(base => removingBase === `base:${base.id}`
+              ? confirmRemoval(`base:${base.id}`, base.name, base.origin === 'voce' ? 'Os dados saem deste computador e ela sai do seu catálogo; dá para sugerir o link de novo.' : base.installed ? 'Os dados saem deste computador e ela sai da barra. Dá para baixar de novo pelo +.' : 'Ela sai da barra. Dá para trazer de volta pelo +.')
               : <div key={base.id} className="conversation-row">
                   <button className="conversation-item base-item" aria-pressed={Boolean(base.installed) && picked.some(p => p.id === base.id)}
                     title={base.installed ? `${base.name} · ${base.publisher}\nClique para usar na próxima mensagem` : `${base.name}: ainda não baixada. Clique para baixar em Configurações.`}
                     onClick={() => base.installed ? togglePick(base) : onOpenSettings?.('bases')}><DatabaseIcon size={16} /><span>{base.name}</span>
                     {!base.installed && <span className="source-warning" aria-label="Ainda não baixada"><WarningIcon size={14} /></span>}</button>
-                  {base.installed && <span className="row-tools"><button className="icon-button tiny" aria-label={`Remover a base “${base.name}”`} title="Remover" onClick={() => setRemovingBase(base.id)}><TrashIcon size={15} /></button></span>}
+                  {removeButton(`base:${base.id}`, base.name)}
                 </div>)}
             <p className="sources-group">Imagens</p>
-            {IMAGE_SOURCES.map(source => sourceRow(source, source.key && keys && !keys[source.key] ? 'falta a chave da API. Clique para configurar.' : null, <ImageIcon size={16} />))}
+            {IMAGE_SOURCES.filter(source => !hidden.includes(source.id)).map(source => sourceRow(source, source.key && keys && !keys[source.key] ? 'falta a chave da API. Clique para configurar.' : null, <ImageIcon size={16} />))}
             <p className="sources-group">Acadêmico</p>
-            {ACADEMIC_SOURCES.map(source => sourceRow(source, null, <FileIcon size={16} />))}
+            {ACADEMIC_SOURCES.filter(source => !hidden.includes(source.id)).map(source => sourceRow(source, null, <FileIcon size={16} />))}
           </div>}
           <div className="sidebar-label-row"><p className="sidebar-label">Projetos</p><button className="icon-button small" aria-label="Novo projeto" title="Novo projeto" onClick={onNewProject}><PlusIcon size={16} /></button></div>
           {!projects.length && <button className="conversation-item muted" onClick={onNewProject}>Criar um projeto…</button>}

@@ -84,13 +84,13 @@ impl Core {
             .load()
             .map_err(|_| "Configuração inválida; arquivo preservado".into())
     }
-    pub(super) fn budget(&self, prefs: &Preferences) -> u64 {
+    pub(super) fn budget(&self, prefs: &Preferences) -> models::Budget {
         let mut hw = hardware::detect();
         hw.ram_available_bytes = hw
             .ram_available_bytes
             .saturating_add(self.runtime.resident_bytes())
             .min(hw.ram_total_bytes);
-        models::memory_budget(&hw, prefs)
+        models::Budget { ram: models::memory_budget(&hw, prefs), gpu: models::gpu_budget(&hw, runtime::preferred_llama() == "llama-vulkan") }
     }
     pub(super) fn models(&self) -> Result<Vec<Model>, String> {
         self.store
@@ -544,6 +544,7 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
         "maximum"
     };
     let budget = models::memory_budget(&hw, &prefs);
+    let fit_budget = state.budget(&prefs);
     let installed = state.models()?;
     let runtime_root = state.root.join("runtimes");
     let runtime_bytes = if runtime::llama_installed(&runtime_root) {
@@ -559,11 +560,12 @@ pub fn desktop_snapshot(state: tauri::State<'_, Core>) -> Result<Value, String> 
         "id": entry.id, "name": entry.name, "summary": entry.summary, "capabilities": entry.capabilities,
         "download_bytes": entry.download_bytes() + runtime_bytes, "memory_bytes": entry.memory_bytes(),
         "installed": installed.iter().any(|m| m.catalog.as_deref() == Some(entry.id)),
-        "fits": entry.fits(budget, prefs.context_tokens),
+        "fits": entry.fits(fit_budget, prefs.context_tokens),
+        "gpu_bytes": entry.gpu_bytes, "gpu_only": entry.gpu_only,
     })).collect();
-    let recommended_model = models::recommended(budget, prefs.context_tokens).map(|e| e.id);
+    let recommended_model = models::recommended(fit_budget, prefs.context_tokens).map(|e| e.id);
     Ok(
-        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null),"projects":projects}),
+        json!({"system_prompt":prefs.system_prompt(),"preferences":prefs,"memory_budget_bytes":budget,"gpu_budget_bytes":fit_budget.gpu,"hardware":hw,"models":installed,"runtimes":artifacts,"worker":state.runtime.status(),"metrics":metrics,"recommended_profile":recommended,"catalog":catalog,"recommended_model":recommended_model,"setup":state.setup.lock().map(|s|s.clone()).unwrap_or(Value::Null),"projects":projects}),
     )
 }
 /// Instrução padrão da Ayla (não faz parte da personalidade editável).
@@ -594,6 +596,36 @@ pub fn save_appearance(state: tauri::State<'_, Core>, appearance: super::prefere
     store.save(&prefs).map_err(|_| "Aparência fora dos limites suportados".into())
 }
 /// Guarda só o modo de resposta, sem sobrescrever outras preferências salvas no meio-tempo.
+/// Tira uma fonte da barra de Bases (ou a traz de volta). Ids: "imagens:<fonte>", "academico:<fonte>", "base:<id>".
+fn set_source_hidden(state: &Core, id: &str, hidden: bool) -> Result<(), String> {
+    let known = super::images::LINKS.iter().map(|(i, _)| format!("imagens:{i}"))
+        .chain(["unsplash", "pexels", "pixabay", "wallhaven"].iter().map(|i| format!("imagens:{i}")))
+        .chain(super::academic::SOURCES.iter().map(|(i, _)| format!("academico:{i}")))
+        .any(|k| k == id)
+        || id.strip_prefix("base:").is_some_and(|b| super::bases::find(&state.root, b).is_some());
+    if !known { return Err("Fonte desconhecida".into()); }
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler as configurações")?;
+    if prefs.source_shown(id) != hidden { return Ok(()); }
+    if hidden { prefs.hidden_sources.push(id.to_string()); } else { prefs.hidden_sources.retain(|h| h != id); }
+    store.save(&prefs).map_err(|_| "Não foi possível salvar".into())
+}
+#[tauri::command]
+pub fn source_remove(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    if let Some(base) = id.strip_prefix("base:") {
+        // Base baixada: os dados saem do computador; dá para baixar de novo pelo +.
+        if super::bases::find(&state.root, base).is_some_and(|_| super::bases::installed(&state.root, base).is_some()) {
+            super::bases::remove(&state.root, base)?;
+        }
+        // Adicionada por link: sai do catálogo junto, então não há o que esconder.
+        if super::bases::find(&state.root, base).is_none() { return Ok(()); }
+    }
+    set_source_hidden(&state, &id, true)
+}
+#[tauri::command]
+pub fn source_restore(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    set_source_hidden(&state, &id, false)
+}
 #[tauri::command]
 pub fn set_response_source(state: tauri::State<'_, Core>, source: String) -> Result<(), String> {
     let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
@@ -2421,7 +2453,9 @@ pub async fn bases_install(state: tauri::State<'_, Core>, id: String) -> Result<
     }.await;
     let _ = fs::remove_file(&archive);
     let _ = fs::remove_file(&part);
-    result.map(|_| ())
+    result?;
+    // Baixada de novo pelo +: volta para a barra.
+    set_source_hidden(&state, &format!("base:{id}"), false)
 }
 
 /// Remove a base deste computador (e do catálogo, se foi adicionada por link).
@@ -3017,6 +3051,7 @@ pub async fn chat(
     let mut partial = String::new();
     let mut first = None;
     let mut chunks = 0;
+    let mut timings = Value::Null;
     let mut metric_model = String::from("unresolved");
     let mut origin = None;
     let mut recalled = 0usize;
@@ -3058,7 +3093,7 @@ pub async fn chat(
         }
         // Buscas externas (imagens e trabalhos acadêmicos): só num pedido explícito, nunca num pedido
         // sensível, e só os termos saem do computador.
-        let mut academic:Option<(Vec<super::academic::Work>,String)>=None;
+        let mut academic:Option<(Vec<super::academic::Work>,String,bool)>=None;
         if request.attachments.is_empty()&&request.sensitivity!=Sensitivity::Sensitive&&!super::policy::suspect_content(&request.message){
             // Fontes escolhidas na barra: "imagens:<fonte>" e "academico:<fonte>".
             let picked=|prefix:&str|->Vec<String>{request.bases.iter().filter_map(|b|b.strip_prefix(prefix).map(str::to_string)).collect()};
@@ -3069,14 +3104,22 @@ pub async fn chat(
                 let (pt,en)=state.search_terms(&prefs,super::images::terms_request(&request.message,&rules),&rules,&token).await;
                 let _=events.send(json!({"type":"status","text":"Buscando imagens…"}));
                 let keys=state.image_keys();
-                let providers=super::images::chosen(kind,&image_only);
+                // Fontes tiradas da barra de Bases não são consultadas.
+                let providers:Vec<&'static str>=super::images::chosen(kind,&image_only).into_iter().filter(|p|prefs.source_shown(&format!("imagens:{p}"))).collect();
                 let missing=super::images::missing(&providers,&keys);
                 let usable:Vec<&'static str>=providers.iter().copied().filter(|p|!missing.contains(p)).collect();
                 let wanted=super::images::count(&request.message);
                 let (mut items,failed)=if usable.is_empty(){(Vec::new(),Vec::new())}else{super::images::search(&search_client()?,kind,&en,&keys,&usable).await};
                 if let Some(n)=wanted{items.truncate(n);}
                 let used:Vec<&str>=usable.iter().map(|p|super::images::label(p)).collect();
-                let link_list=super::images::links(&pt,&image_only);
+                let link_list:Vec<(&'static str,String)>=super::images::links(&pt,&image_only).into_iter()
+                    .filter(|(name,_)|super::images::LINKS.iter().find(|(_,n)|n==name).is_none_or(|(id,_)|prefs.source_shown(&format!("imagens:{id}")))).collect();
+                if providers.is_empty()&&link_list.is_empty(){
+                    let reply="Não há fontes de imagens na barra de Bases. Traga uma de volta pelo + das Bases.".to_string();
+                    metric_model="imagens".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+                    let _=events.send(json!({"type":"token","text":reply}));
+                    return Ok(());
+                }
                 let links:Vec<Value>=link_list.iter().map(|(name,url)|json!({"name":name,"url":url})).collect();
                 send_kept(&events,&extras,json!({"type":"images","query":pt,"items":items,"links":links}));
                 if !used.is_empty(){let _=events.send(json!({"type":"routing","text":format!("Busca externa: só os termos \"{en}\" foram enviados a {}",used.join(", "))}));}
@@ -3085,7 +3128,11 @@ pub async fn chat(
                 let _=events.send(json!({"type":"token","text":reply}));
                 return Ok(());
             }
-            if super::academic::request(&request.message)||!academic_only.is_empty(){
+            let scholar=prefs.source_shown("academico:scholar");
+            let academic_apis:Vec<String>=super::academic::SOURCES.iter().filter(|(id,_)|*id!="scholar"&&prefs.source_shown(&format!("academico:{id}"))).map(|(id,_)|id.to_string()).collect();
+            if (super::academic::request(&request.message)||!academic_only.is_empty())&&(scholar||!academic_apis.is_empty()){
+                // Sem escolha na barra, consulta só as fontes que continuam nela.
+                let academic_only=if academic_only.is_empty(){academic_apis.clone()}else{academic_only};
                 let rules=super::academic::terms(&request.message);
                 let (pt,en)=state.search_terms(&prefs,super::academic::terms_request(&request.message,&rules),&rules,&token).await;
                 let _=events.send(json!({"type":"status","text":"Buscando trabalhos acadêmicos…"}));
@@ -3093,16 +3140,16 @@ pub async fn chat(
                 let (works,failed)=if apis.is_empty(){(Vec::new(),Vec::new())}else{super::academic::search(&search_client()?,&pt,&en,&academic_only).await};
                 if !apis.is_empty(){let _=events.send(json!({"type":"routing","text":format!("Busca externa: só os termos \"{pt}\" e \"{en}\" foram enviados a {}",apis.join(", "))}));}
                 let mut listed:Vec<Value>=works.iter().enumerate().map(|(i,w)|json!({"id":format!("artigo:{i}"),"name":format!("[{}] {}{}",i+1,w.title.chars().take(90).collect::<String>(),w.year.map(|y|format!(" ({y})")).unwrap_or_default()),"pages":[],"url":w.url})).collect();
-                listed.push(json!({"id":"scholar","name":"Continuar no Google Acadêmico","pages":[],"url":super::academic::scholar_url(&pt)}));
+                if scholar{listed.push(json!({"id":"scholar","name":"Continuar no Google Acadêmico","pages":[],"url":super::academic::scholar_url(&pt)}));}
                 send_kept(&events,&extras,json!({"type":"sources","files":listed}));
                 let local=state.models().is_ok_and(|m|m.iter().any(|m|m.supports(Capability::Text)));
                 if works.is_empty()||!local{
-                    let reply=if apis.is_empty(){format!("[Abrir \"{pt}\" no Google Acadêmico]({})",super::academic::scholar_url(&pt))}else{super::academic::plain_reply(&works,&pt,&failed)};
+                    let reply=if apis.is_empty(){format!("[Abrir \"{pt}\" no Google Acadêmico]({})",super::academic::scholar_url(&pt))}else{super::academic::plain_reply(&works,&pt,&failed,scholar)};
                     metric_model="academico".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
                     let _=events.send(json!({"type":"token","text":reply}));
                     return Ok(());
                 }
-                academic=Some((works,pt));
+                academic=Some((works,pt,scholar));
             }
         }
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
@@ -3227,9 +3274,6 @@ pub async fn chat(
             }
         }
         // Arquivos anteriores da conversa e os do projeto entram pela Iris (só os trechos relevantes).
-        let lengths:Vec<usize>=texts.iter().map(|(_,_,t)|t.chars().count()).collect();
-        let mut blocks:Vec<String>=texts.iter().zip(files::budgets(&lengths,files::PROMPT_BUDGET)).filter(|(_,limit)|*limit>0).map(|((name,kind,text),limit)|files::prompt_block(name,*kind,text,limit)).collect();
-        if let Some(note)=photo_note{blocks.push(note);}
         let models=state.models()?;let mut kind=if !images.is_empty(){Capability::Vision}else{request.capability.unwrap_or_else(||models::request_kind(&request.message,false))};
         if request.capability.is_none() && kind==Capability::Reasoning && !models.iter().any(|m|m.supports(kind)){kind=Capability::Text;}
         if images.is_empty(){if let Some(selected)=request.model.as_ref().and_then(|id|models.iter().find(|m|m.id==*id)){
@@ -3239,6 +3283,11 @@ pub async fn chat(
         if selection.is_err() && request.capability.is_none() && request.model.is_none() && kind==Capability::Reasoning {
             kind=Capability::Text;selection=models::choose(&models,kind,state.budget(&prefs),prefs.context_tokens,None);
         }
+        // Arquivos: o orçamento acompanha o contexto real do modelo escolhido (32K com placa de vídeo).
+        let budget=files::prompt_budget(selection.as_ref().map_or(prefs.context_tokens,|m|state.runtime.context_for(m,&prefs)));
+        let lengths:Vec<usize>=texts.iter().map(|(_,_,t)|t.chars().count()).collect();
+        let mut blocks:Vec<String>=texts.iter().zip(files::budgets(&lengths,budget)).filter(|(_,limit)|*limit>0).map(|((name,kind,text),limit)|files::prompt_block(name,*kind,text,limit)).collect();
+        if let Some(note)=photo_note{blocks.push(note);}
         let text=if blocks.is_empty(){request.message.clone()}else{format!("{}\n\n{}",request.message,blocks.join("\n\n"))};
         let content=with_images(&text,&images)?;
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
@@ -3276,7 +3325,7 @@ pub async fn chat(
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
                 None=>{}
             }
-            if let Some((works,query))=&academic{system.push_str(&super::academic::context_block(works,query));}
+            if let Some((works,query,scholar))=&academic{system.push_str(&super::academic::context_block(works,query,*scholar));}
             for (entry,installed) in chosen_bases.iter().filter(|_|plan.consult){
                 let _=events.send(json!({"type":"status","text":format!("Consultando a base {}…",entry.name)}));
                 match base_lookup(&state,&prefs,entry,&format!("{} ({})",request.message,plan.keywords.join(", ")),&token).await{
@@ -3291,7 +3340,7 @@ pub async fn chat(
         }
         context.insert(0,json!({"role":"system","content":system}));
         context.push(json!({"role":"user","content":content}));
-        let mut report=|event:Value|{if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
+        let mut report=|event:Value|{if event["type"]=="timings"{timings=event["timings"].clone();return;}if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
         if use_cloud{
             metric_model = prefs.cloud_model.clone();
             if !request.automatic {
@@ -3382,6 +3431,7 @@ pub async fn chat(
                     start.elapsed().as_millis() as u64,
                     chunks,
                     token.is_cancelled(),
+                    &timings,
                 );
             }
             Err(_) => result = Err("A resposta foi recebida, mas os dados estão ocupados".into()),
@@ -4456,6 +4506,24 @@ pub async fn import_legacy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_sources_leave_the_bar_and_come_back_without_a_permanent_block() {
+        let root = std::env::temp_dir().join(format!("ayla-sources-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        for id in ["imagens:pinterest", "academico:scholar", "imagens:unsplash"] {
+            set_source_hidden(&core, id, true).unwrap();
+            assert!(!core.prefs().unwrap().source_shown(id), "{id}");
+        }
+        set_source_hidden(&core, "imagens:pinterest", true).unwrap();
+        assert_eq!(core.prefs().unwrap().hidden_sources.len(), 3, "sem repetir");
+        set_source_hidden(&core, "imagens:pinterest", false).unwrap();
+        assert!(core.prefs().unwrap().source_shown("imagens:pinterest"));
+        assert!(set_source_hidden(&core, "imagens:inventada", true).is_err());
+        assert!(set_source_hidden(&core, "base:nao-existe", true).is_err());
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn screen_capture_returns_png_for_a_region_and_rejects_bad_ones() {

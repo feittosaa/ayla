@@ -148,6 +148,8 @@ export default function App() {
   function go(next: Page, section?: string) {
     setSpace('settings'); setPage(next); setNotice(''); setError('');
     if (section) setTimeout(() => revealSection(section), 0);
+    // Subpáginas (Modelos, Recursos) começam no topo, sem herdar a rolagem das Configurações.
+    else setTimeout(() => document.querySelector('.settings-main')?.scrollTo({ top: 0 }), 0);
   }
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
   /** Salva na hora uma mudança simples (interruptores e perfil), sem mexer no que está em edição. */
@@ -325,7 +327,8 @@ export default function App() {
                 </div>
                 <div className="advanced-block"><h3>Limites técnicos</h3>
                   <label>Limite personalizado de memória (%)<input type="number" min={5} max={90} value={draft.resource_percent ?? profiles.find(p => p.id === profile)?.percent ?? 50} onChange={e => update({ resource_percent: Number(e.target.value) })} /></label>
-                  <label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} value={draft.context_tokens} onChange={e => update({ context_tokens: Number(e.target.value) })} /></label>
+                  <label className="check"><input type="checkbox" checked={draft.context_auto ?? draft.context_tokens === 8192} onChange={e => update(e.target.checked ? { context_auto: true, context_tokens: 8192 } : { context_auto: false })} /> Contexto automático: 32.768 tokens com placa de vídeo, 8.192 sem</label>
+                  <label>Contexto máximo do modelo (tokens)<input type="number" min={512} max={32768} step={512} disabled={draft.context_auto ?? draft.context_tokens === 8192} value={draft.context_tokens} onChange={e => update({ context_auto: false, context_tokens: Number(e.target.value) })} /></label>
                   <label>Liberar modelo após inatividade (segundos)<input type="number" min={0} max={3600} value={draft.idle_seconds} onChange={e => update({ idle_seconds: Number(e.target.value) })} /></label>
                   <label>Mensagens recentes no contexto<input type="number" min={2} max={200} value={draft.history_messages} onChange={e => update({ history_messages: Number(e.target.value) })} /></label>
                   <label>Limite de caracteres do histórico<input type="number" min={1000} max={200000} value={draft.history_chars} onChange={e => update({ history_chars: Number(e.target.value) })} /></label>
@@ -354,7 +357,7 @@ export default function App() {
                 <div className="advanced-block"><h3>Medições locais</h3>
                   <p>Tempo até o primeiro trecho, duração e quantidade de trechos das últimas respostas.</p>
                   {!snapshot.metrics.length && <p>Ainda sem medições.</p>}
-                  {snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.cancelled ? ' · interrompida' : ''}</p>)}
+                  {snapshot.metrics.slice(0, 5).map((m, i) => <p key={i}>Primeiro trecho: {m.first_token_ms ?? '—'} ms · duração: {m.duration_ms} ms · {m.chunks} trechos{m.prompt_tps != null ? ` · leitura: ${Math.round(m.prompt_tps)} tok/s (${m.prompt_tokens ?? 0} novos${m.cache_tokens ? `, ${m.cache_tokens} do cache` : ''})` : ''}{m.decode_tps != null ? ` · geração: ${m.decode_tps.toFixed(1)} tok/s` : ''}{m.cancelled ? ' · interrompida' : ''}</p>)}
                 </div>
               </details>
             </section>

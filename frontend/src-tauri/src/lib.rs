@@ -208,6 +208,21 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             let core = Core::open(directory.clone()).map_err(io::Error::other)?;
+            // Workers de uma Ayla que caiu sem encerrar continuariam ocupando RAM e VRAM.
+            let reaped = core.runtime.reap_orphans();
+            if reaped > 0 { eprintln!("Ayla: {reaped} modelo(s) local(is) de uma execução anterior encerrado(s)."); }
+            // SIGTERM (pkill, fim da sessão), SIGHUP e SIGINT saem pelo caminho normal, que encerra
+            // os modelos locais e o contêiner da Moneta.
+            #[cfg(unix)]
+            {
+                let exit = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup()), signal(SignalKind::interrupt())) else { return };
+                    tokio::select! { _ = term.recv() => {}, _ = hup.recv() => {}, _ = int.recv() => {} }
+                    exit.exit(0);
+                });
+            }
             let weak = std::sync::Arc::downgrade(&core.runtime);
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -394,6 +409,8 @@ pub fn run() {
             core::research::suggests_web_search,
             core::research::automatic_check,
             core::services::set_response_source,
+            core::services::source_remove,
+            core::services::source_restore,
             core::version::app_version
         ])
         .build(tauri::generate_context!())
