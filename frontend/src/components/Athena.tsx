@@ -79,12 +79,14 @@ const sectionLabel: Record<Root['kind'], string> = { ayla: '', vault: 'Cofres', 
 const vaultsChanged = () => window.dispatchEvent(new Event('athena-vaults'));
 const WORKSPACE = 'ayla-athena-workspace';
 const empty: Workspace = { panes: [{ tabs: [], active: 0 }], focused: 0, panel: false };
+/** Texto aberto pelo "Abrir com Athena" fora das raízes: vale só enquanto a Ayla estiver aberta. */
+const isExternal = (root: string) => root.startsWith('aberto:');
 function restore(): Workspace {
   try {
     const saved = JSON.parse(localStorage.getItem(WORKSPACE) ?? 'null') as Workspace | null;
     if (!saved || !Array.isArray(saved.panes) || !saved.panes.length) return empty;
     const panes = saved.panes.slice(0, 2).map(p => {
-      const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string').map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: !isAttachment(t.path) }));
+      const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter(t => typeof t?.root === 'string' && typeof t.path === 'string' && !isExternal(t.root)).map(t => ({ root: t.root, path: t.path, pinned: !!t.pinned, editing: !isAttachment(t.path) }));
       return { tabs, active: Math.min(Math.max(0, Number(p.active) || 0), Math.max(0, tabs.length - 1)) };
     });
     return { panes, focused: Math.min(Number(saved.focused) || 0, panes.length - 1), panel: !!saved.panel };
@@ -141,7 +143,7 @@ function ago(seconds: number) {
 
 /** Athena: notas em Markdown em árvore — notas da Athena, cofres (ex.: do Obsidian) e projetos —, com
  * abas (fixáveis), duas notas lado a lado, links entre notas, busca, nota do dia e painel do Git. */
-export default function Athena({ active, onOpenSettings }: { active: boolean; onOpenSettings: () => void }) {
+export default function Athena({ active, onOpenSettings, external }: { active: boolean; onOpenSettings: () => void; external?: { id: number; paths: string[] } }) {
   const [workspace, setWorkspace] = useState<Workspace>(restore);
   const opened = shownTab(workspace);
   const [tree, setTree] = useState<Tree | null>(null);
@@ -249,7 +251,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   const activeTab = panes[focused].tabs[panes[focused].active] as Tab | undefined;
   // A raiz em foco acompanha a nota que passa a ficar visível (trocar de aba, fechar, abrir pela conversa).
   const activeRoot = activeTab?.root;
-  useEffect(() => { if (activeRoot && !isBookRoot(activeRoot)) setFocus(activeRoot); }, [activeRoot]);
+  useEffect(() => { if (activeRoot && !isBookRoot(activeRoot) && !isExternal(activeRoot)) setFocus(activeRoot); }, [activeRoot]);
   // A Biblioteca carrega quando aparece na lateral ou quando há um livro aberto.
   const readingBook = workspace.panes.some(p => p.tabs.some(t => isBookRoot(t.root)));
   /** Modo Biblioteca: a lateral na Biblioteca ou um livro à vista. */
@@ -285,7 +287,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
   const open = useCallback((root: string, path: string, options: { newTab?: boolean; edit?: boolean } = {}) => {
     setError('');
     // Livros abrem em abas como as notas, mas não mudam a raiz de notas em foco.
-    if (!isBookRoot(root)) { setFocus(root); expand(root, path); }
+    if (!isBookRoot(root) && !isExternal(root)) { setFocus(root); expand(root, path); }
     setWorkspace(ws => {
       const index = Math.min(ws.focused, ws.panes.length - 1);
       const pane = ws.panes[index];
@@ -310,6 +312,22 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
     const tabs = pane.tabs.filter((_, k) => k !== at);
     return { tabs, active: Math.max(0, Math.min(at < pane.active ? pane.active - 1 : pane.active, tabs.length - 1)) };
   });
+  // "Abrir com Athena": nota de uma raiz abre nela; texto de fora abre numa aba que grava o próprio arquivo.
+  const [outside, setOutside] = useState<Record<string, string>>({});
+  const handledOpen = useRef(0);
+  useEffect(() => {
+    if (!external || external.id === handledOpen.current) return;
+    handledOpen.current = external.id;
+    void (async () => {
+      for (const path of external.paths) {
+        try {
+          const found = await native<{ root: string; path: string; name: string }>('athena_open_external', { path });
+          if (isExternal(found.root)) setOutside(prev => ({ ...prev, [found.root]: found.name }));
+          open(found.root, found.path, { newTab: true });
+        } catch (e) { setError(errorText(e)); }
+      }
+    })();
+  }, [external, open]);
   const setTab = (index: number, at: number, change: Partial<Tab>) => updatePane(index, pane => ({ ...pane, tabs: pane.tabs.map((t, k) => k === at ? { ...t, ...change } : t) }));
   const activate = (index: number, at: number) => {
     const tab = panes[index]?.tabs[at];
@@ -819,7 +837,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
       <header className="note-tabs organ-bar">
         {index === 0 && !sidebar && <button className="icon-button" data-tip="Mostrar a barra lateral" aria-label="Mostrar a barra lateral" onClick={() => setSidebar(true)}><SidebarIcon size={18} /></button>}
         <div className="tab-strip" role="tablist" aria-label="Notas abertas">
-          {pane.tabs.map((t, k) => <div key={`${t.root}|${t.path}`} role="tab" aria-selected={k === pane.active} className={['note-tab', k === pane.active ? 'active' : '', t.pinned ? 'pinned' : ''].join(' ')} title={`${rootOf(t.root)?.name ?? ''} / ${t.path}`} onPointerDown={startDrag({ kind: isAttachment(t.path) ? 'file' : 'note', root: t.root, path: t.path, label: titleOf(t.path), tab: { pane: index, at: k } })} onClick={() => activate(index, k)} onAuxClick={e => { if (e.button === 1 && !t.pinned) closeTab(index, k); }} onDoubleClick={() => setTab(index, k, { pinned: !t.pinned })}>
+          {pane.tabs.map((t, k) => <div key={`${t.root}|${t.path}`} role="tab" aria-selected={k === pane.active} className={['note-tab', k === pane.active ? 'active' : '', t.pinned ? 'pinned' : ''].join(' ')} title={`${rootOf(t.root)?.name ?? outside[t.root] ?? ''} / ${t.path}`} onPointerDown={startDrag({ kind: isAttachment(t.path) ? 'file' : 'note', root: t.root, path: t.path, label: titleOf(t.path), tab: { pane: index, at: k } })} onClick={() => activate(index, k)} onAuxClick={e => { if (e.button === 1 && !t.pinned) closeTab(index, k); }} onDoubleClick={() => setTab(index, k, { pinned: !t.pinned })}>
             {t.pinned && <span className="tab-pin" aria-label="Fixada"><PinIcon size={12} /></span>}
             <span className="tab-title">{isBookRoot(t.root) ? bookTitle(t.path) : titleOf(t.path)}</span>
             <button className="tab-button" aria-label={t.pinned ? 'Desafixar' : 'Fixar'} data-tip={t.pinned ? 'Desafixar' : 'Fixar'} onClick={e => { e.stopPropagation(); setTab(index, k, { pinned: !t.pinned }); }}><PinIcon size={12} /></button>
@@ -833,7 +851,7 @@ export default function Athena({ active, onOpenSettings }: { active: boolean; on
             <button className={tab.editing ? 'icon-button active' : 'icon-button'} aria-pressed={tab.editing} aria-label="Editar" data-tip="Editar" onClick={() => setTab(index, pane.active, { editing: true })}><PencilIcon size={17} /></button>
           </div>
           {root?.obsidian && !tabLock && !/\.txt$/i.test(tab.path) && <button className="icon-button" data-tip="Abrir no Obsidian" aria-label="Abrir no Obsidian, com os plugins do cofre" onClick={() => void (flushers.current[index]?.() ?? Promise.resolve()).then(() => native('athena_open_obsidian', { root: tab.root, path: tab.path })).catch(e => setError(errorText(e)))}><ExpandIcon size={17} /></button>}
-          {confirming === index
+          {isExternal(tab.root) ? null : confirming === index
             ? <span className="row-actions"><button onClick={() => void remove(index)}>Mover para a lixeira</button><button className="ghost-button" onClick={() => setConfirming(null)}>Cancelar</button></span>
             : <button className="icon-button" aria-label="Apagar nota" data-tip="Apagar nota" onClick={() => setConfirming(index)}><TrashIcon size={17} /></button>}
         </div>}

@@ -132,7 +132,7 @@ pub fn run() {
         std::process::exit(code);
     }
     let initial = desktop::Launch::from_args();
-    let (instance, requests) = match desktop::register(initial) {
+    let (instance, requests) = match desktop::register(initial, desktop::OpenRequest::from_args()) {
         Ok(Some(primary)) => primary,
         Ok(None) => return,
         Err(error) => { eprintln!("Falha ao registrar a Ayla na sessão: {error}"); return; }
@@ -269,6 +269,18 @@ pub fn run() {
             desktop::desktop_view,
             desktop::quick_ready,
             desktop::desktop_action,
+            desktop::open_requests,
+            core::services::athena_open_external,
+            core::services::bases_list,
+            core::services::bases_install,
+            core::services::bases_remove,
+            core::services::bases_validate,
+            core::services::bases_approve,
+            core::services::bases_discard,
+            core::services::image_keys_status,
+            core::services::image_key_set,
+            core::services::image_save,
+            core::services::iris_open_external,
             backend_connection,
             core::services::desktop_snapshot,
             core::services::save_preferences,

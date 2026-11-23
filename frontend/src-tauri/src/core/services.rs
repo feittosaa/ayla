@@ -46,6 +46,8 @@ pub struct Core {
     setup: Mutex<Value>,
     /// Voz e transcrição em fila própria: rodam enquanto a conversa gera a resposta.
     voice_gate: tokio::sync::Mutex<()>,
+    /// Arquivos abertos pelo "Abrir com" (Athena e Iris), só enquanto a Ayla estiver aberta.
+    pub(crate) opened: super::external::Opened,
 }
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
@@ -68,6 +70,7 @@ impl Core {
             background: Mutex::new(None),
             setup: Mutex::new(json!({"active":false})),
             voice_gate: tokio::sync::Mutex::new(()),
+            opened: Default::default(),
         })
     }
     pub(crate) fn prefs(&self) -> Result<Preferences, String> {
@@ -232,6 +235,9 @@ impl Core {
     }
     /// Pasta de uma raiz, criada se for da Ayla (notas ou projeto); cofres precisam existir.
     fn athena_path(&self, prefs: &Preferences, id: &str) -> Result<PathBuf, String> {
+        if id.starts_with(super::external::PREFIX) {
+            return Err("Arquivo aberto de fora da Athena: dá para ler e editar o texto, sem anexos nem links. Para o resto, importe-o para um cofre.".into());
+        }
         let root = self.athena_roots(prefs).into_iter().find(|r| r.id == id).ok_or("Esta pasta de notas não está mais na Athena")?;
         if root.kind != "vault" {
             fs::create_dir_all(&root.path).map_err(|_| "Não foi possível criar a pasta de notas")?;
@@ -1077,6 +1083,9 @@ pub struct ChatRequest {
     /// Memórias públicas que a pessoa manteve marcadas na revisão de envio à nuvem.
     #[serde(default)]
     pub references: Vec<memory::Reference>,
+    /// Bases escolhidas pela pessoa para esta mensagem (etiquetas na caixa de texto).
+    #[serde(default)]
+    pub bases: Vec<String>,
 }
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
@@ -1258,6 +1267,10 @@ pub async fn athena_pick_folder(app: tauri::AppHandle) -> Result<Option<String>,
 
 #[tauri::command]
 pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: String) -> Result<Value, String> {
+    if let Some(dir) = external_text(&state, &root, &path)? {
+        let (content, modified) = athena::read(&dir, &path)?;
+        return Ok(json!({"content": content, "modified": modified}));
+    }
     let dir = state.athena_path(&state.prefs()?, &root)?;
     if let Some(opened) = open_file(&dir, &path) {
         let (target, key) = opened?;
@@ -1278,6 +1291,9 @@ pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: Stri
 /// Grava a nota; recusa se ela mudou fora da Ayla desde `expected`. Devolve a nova data.
 #[tauri::command]
 pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
+    if let Some(dir) = external_text(&state, &root, &path)? {
+        return athena::write(&dir, &path, &content, expected);
+    }
     let dir = state.athena_path(&state.prefs()?, &root)?;
     if let Some(opened) = open_file(&dir, &path) {
         let (target, key) = opened?;
@@ -2325,6 +2341,315 @@ fn athena_attachment_path(state: &Core, root: &str, target: &str) -> Result<Path
     Ok(path)
 }
 
+/// Gera (modelo local) e executa a consulta numa base curada. Uma segunda tentativa leva o erro
+/// ou o resultado vazio da primeira.
+async fn base_lookup(state: &Core, prefs: &Preferences, entry: &super::bases::Base, message: &str, token: &CancellationToken) -> Result<(String, super::bases::Table), String> {
+    use super::bases;
+    let model = models::choose(&state.models()?, Capability::Text, state.budget(prefs), prefs.context_tokens, None)?;
+    let path = bases::db_path(&state.root, &entry.id);
+    let schema = { let path = path.clone(); tauri::async_runtime::spawn_blocking(move || bases::schema(&path)).await.map_err(|_| "Falha ao ler a base")?? };
+    let mut previous: Option<(String, String)> = None;
+    let mut empty = None;
+    for _ in 0..2 {
+        let request = bases::sql_request(entry, &schema, message, previous.as_ref().map(|(s, e)| (s.as_str(), e.as_str())));
+        let raw = state.runtime.complete_json(&model, prefs, request, bases::sql_schema(), token).await?;
+        let Some(sql) = bases::parse_sql(&raw) else { previous = Some((raw.chars().take(300).collect(), "a resposta não trouxe um SQL".into())); continue };
+        let (target, query) = (path.clone(), sql.clone());
+        match tauri::async_runtime::spawn_blocking(move || bases::query(&target, &query)).await.map_err(|_| "Falha ao consultar a base")? {
+            Ok(table) if !table.rows.is_empty() => return Ok((sql, table)),
+            Ok(table) => { previous = Some((sql.clone(), "nenhuma linha".into())); empty = Some((sql, table)); }
+            Err(error) => { let columns = bases::related(&schema, &sql); previous = Some((sql, format!("{error}\nColunas reais das tabelas citadas:\n{columns}"))); }
+        }
+    }
+    empty.ok_or_else(|| "o modelo local não conseguiu montar uma consulta válida".into())
+}
+
+/// Bases da conversa: as escolhidas pela pessoa (etiquetas) e as citadas pelos termos, instaladas.
+fn bases_for(state: &Core, request: &ChatRequest) -> Vec<(super::bases::Base, super::bases::Installed)> {
+    use super::bases;
+    let mut out = Vec::new();
+    for base in bases::catalog(&state.root) {
+        let chosen = request.bases.iter().any(|id| *id == base.id);
+        // Sem escolha, a base entra quando a pergunta cita seus termos (ou, nas adicionadas por link, suas tabelas).
+        let cited = || bases::matches(&base, &request.message)
+            || (base.origin == "voce" && bases::matches_tables(&bases::table_terms(&bases::db_path(&state.root, &base.id)), &request.message));
+        if out.len() < 3 && (chosen || cited()) {
+            if let Some(installed) = bases::installed(&state.root, &base.id) {
+                out.push((base, installed));
+            }
+        }
+    }
+    out
+}
+
+fn base_json(root: &std::path::Path, e: &super::bases::Base) -> Value {
+    let installed = super::bases::installed(root, &e.id);
+    json!({"id": e.id, "name": e.name, "publisher": e.publisher, "description": e.description, "license": e.license,
+        "repository": e.repository, "source": e.source_url(), "commit": e.commit, "download": e.bytes, "origin": e.origin,
+        "current": installed.as_ref().is_some_and(|i| i.commit == e.commit),
+        "installed": installed.map(|i| json!({"commit": i.commit, "version": i.version, "bytes": i.bytes, "installedAt": i.installed_at}))})
+}
+
+/// Catálogo (da Ayla e aprovado pela pessoa), com o que está instalado neste computador.
+#[tauri::command]
+pub fn bases_list(state: tauri::State<'_, Core>) -> Value {
+    json!(super::bases::catalog(&state.root).iter().map(|e| base_json(&state.root, e)).collect::<Vec<_>>())
+}
+
+/// Baixa o commit fixado (tamanho e SHA-256 conferidos), monta e confere a base. Também atualiza.
+#[tauri::command]
+pub async fn bases_install(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    use super::bases;
+    let entry = bases::find(&state.root, &id).ok_or("Base desconhecida")?;
+    let dir = bases::dir(&state.root);
+    fs::create_dir_all(&dir).map_err(|_| "Não foi possível criar a pasta das bases")?;
+    let archive = dir.join(format!(".{}.tar.gz.part", entry.id));
+    let part = dir.join(format!(".{}.db.part", entry.id));
+    let token = CancellationToken::new();
+    let result = async {
+        super::runtime::download(&entry.archive_url(), entry.bytes, &entry.sha256, &archive, &token, |_| {}).await?;
+        let (root, source, target) = (state.root.clone(), archive.clone(), part.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            let version = bases::build(&entry, &source, &target)?;
+            bases::finish(&root, &entry, &target, version)
+        }).await.map_err(|_| "Falha ao montar a base")?
+    }.await;
+    let _ = fs::remove_file(&archive);
+    let _ = fs::remove_file(&part);
+    result.map(|_| ())
+}
+
+/// Remove a base deste computador (e do catálogo, se foi adicionada por link).
+#[tauri::command]
+pub fn bases_remove(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    super::bases::find(&state.root, &id).ok_or("Base desconhecida")?;
+    super::bases::remove(&state.root, &id)
+}
+
+fn pending_dir(root: &std::path::Path) -> PathBuf {
+    super::bases::dir(root).join(".pendentes")
+}
+
+/// Confere um link do GitHub: licença, commit atual, tamanho, formato e se monta sem erro.
+/// A cópia montada fica à espera da aprovação da pessoa (`bases_approve`).
+#[tauri::command]
+pub async fn bases_validate(state: tauri::State<'_, Core>, url: String) -> Result<Value, String> {
+    use super::bases::{self, link};
+    let link = link::parse(&url)?;
+    let client = reqwest::Client::builder().user_agent("Ayla/0.1 (assistente local)").connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(300)).build().map_err(|_| "Falha ao preparar a conexão")?;
+    let api = format!("https://api.github.com/repos/{}/{}", link.owner, link.repo);
+    let repo: Value = client.get(&api).send().await.map_err(|_| "Não foi possível falar com o GitHub")?
+        .error_for_status().map_err(|_| "Repositório não encontrado (ou privado)")?.json().await.map_err(|_| "Resposta do GitHub inválida")?;
+    let reference = link.reference.clone().or_else(|| repo["default_branch"].as_str().map(str::to_string)).ok_or("Ramo do repositório desconhecido")?;
+    let commit: Value = client.get(format!("{api}/commits/{reference}")).send().await.map_err(|_| "Não foi possível falar com o GitHub")?
+        .error_for_status().map_err(|_| "Ramo ou commit não encontrado")?.json().await.map_err(|_| "Resposta do GitHub inválida")?;
+    let sha = commit["sha"].as_str().filter(|s| s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())).ok_or("Commit inválido")?.to_string();
+    let license = repo["license"]["spdx_id"].as_str().filter(|l| *l != "NOASSERTION").unwrap_or("").to_string();
+    let name = repo["name"].as_str().unwrap_or(&link.repo).replace(['-', '_'], " ");
+    let description = repo["description"].as_str().unwrap_or("").chars().take(400).collect::<String>();
+    let pending = pending_dir(&state.root);
+    fs::create_dir_all(&pending).map_err(|_| "Não foi possível preparar a validação")?;
+    let id = link::id_for(&link);
+    let archive = pending.join(format!("{id}.tar.gz"));
+    let kept = id.clone();
+    let (bytes, sha256) = link::download(&client, &format!("https://codeload.github.com/{}/{}/tar.gz/{sha}", link.owner, link.repo), &archive).await
+        .inspect_err(|_| { let _ = fs::remove_file(&archive); })?;
+    let (root, path) = (state.root.clone(), link.path.clone());
+    let built = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let format = link::detect(&archive, &path)?;
+        let base = link::base(&link, name, description, license, sha, bytes, sha256, format);
+        let db = pending.join(format!("{id}.db"));
+        let version = bases::build(&base, &archive, &db)?;
+        let schema = bases::schema(&db)?;
+        let size = fs::metadata(&db).map_or(0, |m| m.len());
+        fs::write(pending.join(format!("{id}.json")), serde_json::to_vec(&json!({"base": base, "version": version})).map_err(|_| "Falha ao guardar a validação")?)
+            .map_err(|_| "Falha ao guardar a validação")?;
+        let tables: Vec<&str> = schema.lines().collect();
+        let open = link::OPEN.contains(&base.license.as_str());
+        let mut warnings = Vec::new();
+        if base.license.is_empty() { warnings.push("O repositório não declara licença: o uso dos dados pode não ser permitido.".to_string()); }
+        else if !open { warnings.push(format!("Licença {} não está entre as abertas que a Ayla reconhece; confira os termos.", base.license)); }
+        if bases::find(&root, &base.id).is_some() { warnings.push("Já existe uma base com esse repositório; aprovar substitui a anterior.".into()); }
+        Ok(json!({"id": base.id, "name": base.name, "repository": base.repository, "commit": base.commit, "license": base.license,
+            "licenseOpen": open, "format": match &base.format { bases::Format::Flyway { .. } => "Migrações SQL (SQLite)", bases::Format::Csv { .. } => "Arquivos CSV" },
+            "download": bytes, "size": size, "tables": tables, "warnings": warnings, "description": base.description}))
+    }).await.map_err(|_| "Falha ao validar a base")?;
+    let pending = pending_dir(&state.root);
+    let _ = fs::remove_file(pending.join(format!("{kept}.tar.gz")));
+    if built.is_err() {
+        for ext in ["db", "json"] { let _ = fs::remove_file(pending.join(format!("{kept}.{ext}"))); }
+    }
+    built
+}
+
+/// Aprova a base validada: entra no catálogo como curada pela pessoa e fica instalada.
+#[tauri::command]
+pub fn bases_approve(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    use super::bases;
+    let pending = pending_dir(&state.root);
+    let saved: Value = fs::read(pending.join(format!("{id}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or("Valide o link de novo")?;
+    let base: bases::Base = serde_json::from_value(saved["base"].clone()).map_err(|_| "Validação inválida")?;
+    if base.id != id { return Err("Validação inválida".into()); }
+    let mut list = bases::user_catalog(&state.root);
+    list.retain(|b| b.id != base.id);
+    list.push(base.clone());
+    bases::save_user_catalog(&state.root, &list)?;
+    bases::finish(&state.root, &base, &pending.join(format!("{id}.db")), saved["version"].as_str().map(str::to_string))?;
+    let _ = fs::remove_file(pending.join(format!("{id}.json")));
+    Ok(())
+}
+
+/// Descarta uma validação não aprovada.
+#[tauri::command]
+pub fn bases_discard(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { return Err("Base inválida".into()); }
+    let pending = pending_dir(&state.root);
+    for ext in ["db", "json", "tar.gz"] { let _ = fs::remove_file(pending.join(format!("{id}.{ext}"))); }
+    Ok(())
+}
+
+/// Envia o evento à tela e guarda imagens e fontes para salvar com a resposta.
+fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: Value) {
+    if let Ok(mut kept) = extras.lock() {
+        match event["type"].as_str() {
+            Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
+            Some("sources") => {
+                let mut list = kept["sources"].as_array().cloned().unwrap_or_default();
+                for file in event["files"].as_array().into_iter().flatten() {
+                    if !list.iter().any(|f| f["id"] == file["id"]) { list.push(file.clone()); }
+                }
+                kept["sources"] = json!(list);
+            }
+            _ => {}
+        }
+    }
+    let _ = events.send(event);
+}
+
+/// Cliente das buscas externas: identificação genérica, sem dados da pessoa.
+fn search_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().user_agent("Ayla/0.1 (assistente local)").connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20)).build().map_err(|_| "Falha ao preparar a busca".into())
+}
+
+impl Core {
+    /// Termos de uma busca externa: pelo modelo local (português e inglês) ou, sem ele, pelas regras.
+    async fn search_terms(&self, prefs: &Preferences, request: Vec<Value>, rules: &str, token: &CancellationToken) -> (String, String) {
+        let model = self.models().and_then(|m| models::choose(&m, Capability::Text, self.budget(prefs), prefs.context_tokens, None));
+        if let Ok(model) = model {
+            if let Ok(raw) = self.runtime.complete_json(&model, prefs, request, super::images::terms_schema(), token).await {
+                if let Some(terms) = super::images::parse_terms(&raw) { return terms; }
+            }
+        }
+        (rules.to_string(), rules.to_string())
+    }
+    fn image_keys(&self) -> super::images::Keys {
+        super::images::Keys {
+            unsplash: self.vault_get("imagens:unsplash"), pexels: self.vault_get("imagens:pexels"), pixabay: self.vault_get("imagens:pixabay"),
+        }
+    }
+}
+
+/// Quais fontes de imagem têm chave guardada (nunca devolve a chave).
+#[tauri::command]
+pub fn image_keys_status(state: tauri::State<'_, Core>) -> Value {
+    let keys = state.image_keys();
+    json!({"unsplash": keys.unsplash.is_some(), "pexels": keys.pexels.is_some(), "pixabay": keys.pixabay.is_some()})
+}
+
+/// Guarda (no cofre do sistema) ou apaga a chave gratuita de uma fonte de imagens.
+#[tauri::command]
+pub fn image_key_set(state: tauri::State<'_, Core>, provider: String, key: Option<String>) -> Result<(), String> {
+    if !super::images::PROVIDERS.contains(&provider.as_str()) { return Err("Fonte desconhecida".into()); }
+    let account = format!("imagens:{provider}");
+    match key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+        Some(key) if key.len() <= 200 && key.chars().all(|c| c.is_ascii_graphic()) => state.vault_set(&account, &key, true),
+        Some(_) => Err("Chave inválida".into()),
+        None => state.vault_delete(&account),
+    }
+}
+
+/// Salva uma imagem encontrada no tamanho original (no projeto ou em Arquivos), com os créditos
+/// ao lado (`creditos.json`). Só baixa das fontes da busca; no Unsplash, registra o download.
+#[tauri::command]
+pub async fn image_save(state: tauri::State<'_, Core>, item: Value, project: Option<String>) -> Result<FileInfo, String> {
+    use super::images;
+    let provider = item["provider"].as_str().unwrap_or("");
+    let full = item["full"].as_str().unwrap_or("");
+    if !images::allowed_download(provider, full) { return Err("Endereço de imagem não reconhecido".into()); }
+    let client = search_client()?;
+    if provider == "unsplash" {
+        if let (Some(ping), Some(key)) = (item["download_ping"].as_str().filter(|p| images::allowed_ping(p)), state.image_keys().unsplash) {
+            let _ = client.get(ping).header("Authorization", format!("Client-ID {key}")).send().await;
+        }
+    }
+    let response = client.get(full).timeout(std::time::Duration::from_secs(120)).send().await.map_err(|_| "Não foi possível baixar a imagem")?
+        .error_for_status().map_err(|_| "A fonte não entregou a imagem")?;
+    if response.content_length().is_some_and(|l| l > 40 << 20) { return Err("A imagem passa de 40 MB".into()); }
+    let bytes = response.bytes().await.map_err(|_| "Download interrompido")?;
+    if bytes.len() > 40 << 20 { return Err("A imagem passa de 40 MB".into()); }
+    let extension = images::image_extension(&bytes).ok_or("O arquivo baixado não é uma imagem")?;
+    let name = images::file_name(provider, item["author"].as_str().unwrap_or(""), item["id"].as_str().unwrap_or("imagem"), extension);
+    let file = state.store_file(&name, |dest| fs::write(dest, &bytes).map(|()| bytes.len() as u64).map_err(|_| "Não foi possível guardar a imagem".to_string()), project, true)?;
+    let credits = json!({"fonte": provider, "autor": item["author"], "perfil": item["author_url"], "pagina": item["page"], "licenca": item["license_name"],
+        "licenca_url": item["license_url"], "uso": if item["license"] == "livre" { "livre para usar" } else { "só referência (direitos dos autores)" }, "salva_em": store::now()});
+    if let Some(dir) = state.root.join(&file.path).parent() {
+        let _ = fs::write(dir.join("creditos.json"), serde_json::to_vec_pretty(&credits).unwrap_or_default());
+    }
+    Ok(file)
+}
+
+/// Raiz fora da Athena: pasta conectada na Iris ou pasta de um arquivo aberto pelo "Abrir com".
+fn linked_root(root: &str) -> bool {
+    root.starts_with("iris:") || root.starts_with(super::external::PREFIX)
+}
+
+/// Pasta de um texto aberto pelo "Abrir com"; `None` para as raízes da Athena.
+fn external_text(state: &Core, root: &str, path: &str) -> Result<Option<PathBuf>, String> {
+    if !root.starts_with(super::external::PREFIX) {
+        return Ok(None);
+    }
+    state.opened.text_dir(root, path).map(Some).ok_or_else(|| "Este arquivo não está mais aberto; abra-o de novo pelo gerenciador de arquivos".into())
+}
+
+/// "Abrir com Athena": um `.md`/`.txt` de uma raiz da Athena abre como nota dela; fora delas,
+/// abre numa aba que lê e grava o próprio arquivo, sem copiar nada.
+#[tauri::command]
+pub fn athena_open_external(state: tauri::State<'_, Core>, path: String) -> Result<Value, String> {
+    let file = super::external::real_file(&path)?;
+    if !super::external::is_text(&file) {
+        return Err("A Athena abre arquivos .md e .txt".into());
+    }
+    let prefs = state.prefs()?;
+    for root in state.athena_roots(&prefs).into_iter().filter(|r| r.available) {
+        let Ok(dir) = root.path.canonicalize() else { continue };
+        let Ok(relative) = file.strip_prefix(&dir) else { continue };
+        let relative = relative.to_string_lossy().into_owned();
+        if athena::safe_text(&relative).is_some() {
+            return Ok(json!({"root": root.id, "path": relative, "name": root.name}));
+        }
+    }
+    let (root, name) = state.opened.allow_text(&file)?;
+    let folder = file.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(json!({"root": root, "path": name, "name": folder}))
+}
+
+/// "Abrir com Iris": a mídia e as outras imagens, vídeos e PDFs da mesma pasta (sem subpastas),
+/// só para ver, sem conectar a pasta.
+#[tauri::command]
+pub async fn iris_open_external(state: tauri::State<'_, Core>, path: String) -> Result<Value, String> {
+    let file = super::external::real_file(&path)?;
+    let (root, dir, name) = state.opened.allow_media(&file)?;
+    let place = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.to_string_lossy().into_owned());
+    let found = tauri::async_runtime::spawn_blocking(move || super::external::media_in(&dir)).await.map_err(|_| "Falha ao ler a pasta")?;
+    let items: Vec<Value> = found.into_iter().map(|(file, mime, modified, bytes)| json!({
+        "key": format!("{root}|{file}"), "kind": kind_of_mime(mime), "name": file, "source": "computer", "place": place,
+        "date": modified, "bytes": bytes, "root": root, "path": file,
+    })).collect();
+    Ok(json!({"items": items, "open": format!("{root}|{name}")}))
+}
+
 /// Identifica o vínculo também nos endereços que já estão abertos quando a pasta muda.
 fn iris_root_id(dir: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
@@ -2352,6 +2677,9 @@ fn linked_media_path(dir: &std::path::Path, requested_root: &str, target: &str) 
 }
 
 fn readable_media_path(state: &Core, root: &str, target: &str) -> Result<PathBuf, String> {
+    if root.starts_with(super::external::PREFIX) {
+        return state.opened.media(root, target).ok_or_else(|| "Arquivo indisponível; abra-o de novo pelo gerenciador de arquivos".into());
+    }
     if root.starts_with("iris:") {
         return state.prefs()?.system_folders().iter().find_map(|dir| linked_media_path(dir, root, target))
             .ok_or_else(|| "Arquivo indisponível na pasta conectada".into());
@@ -2443,7 +2771,7 @@ pub fn athena_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tau
     let trimmed = request.uri().path().trim_start_matches('/');
     let Some((root, target)) = trimmed.split_once('/') else { return not_found() };
     let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return not_found() };
-    if !root.starts_with("iris:") {
+    if !linked_root(&root) {
         match protected_media(state, &root, &target) {
             Some(Ok((bytes, mime))) => {
                 // Sem miniaturas (seriam cópias no disco): imagens vão inteiras; vídeo e PDF mostram o ícone.
@@ -2575,7 +2903,7 @@ pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Opt
             state.root.join(&file.path)
         }
         (None, Some(root), Some(path)) => {
-            if !root.starts_with("iris:") && protected(&state.athena_path(&state.prefs()?, &root)?, &path).is_some() {
+            if !linked_root(&root) && protected(&state.athena_path(&state.prefs()?, &root)?, &path).is_some() {
                 return Err("Arquivos de pastas protegidas só abrem na Athena".into());
             }
             readable_media_path(&state, &root, &path)?
@@ -2687,6 +3015,8 @@ pub async fn chat(
     let mut metric_model = String::from("unresolved");
     let mut origin = None;
     let mut recalled = 0usize;
+    // Imagens e fontes da resposta: vão para a tela e ficam guardadas com ela (`extras`).
+    let extras=std::sync::Mutex::new(json!({}));
     let mut result=async{
         let prefs=state.prefs()?;
         // Lembretes: criados neste computador e confirmados com data e hora, sem passar pela nuvem.
@@ -2720,6 +3050,55 @@ pub async fn chat(
             metric_model="lembretes".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
             let _=events.send(json!({"type":"token","text":reply}));
             return Ok(());
+        }
+        // Buscas externas (imagens e trabalhos acadêmicos): só num pedido explícito, nunca num pedido
+        // sensível, e só os termos saem do computador.
+        let mut academic:Option<(Vec<super::academic::Work>,String)>=None;
+        if request.attachments.is_empty()&&request.sensitivity!=Sensitivity::Sensitive&&!super::policy::suspect_content(&request.message){
+            // Fontes escolhidas na barra: "imagens:<fonte>" e "academico:<fonte>".
+            let picked=|prefix:&str|->Vec<String>{request.bases.iter().filter_map(|b|b.strip_prefix(prefix).map(str::to_string)).collect()};
+            let (image_only,academic_only)=(picked("imagens:"),picked("academico:"));
+            let image_kind=super::images::request(&request.message).or((!image_only.is_empty()).then_some(super::images::Kind::Reference));
+            if let Some(kind)=image_kind{
+                let rules=super::images::terms(&request.message);
+                let (pt,en)=state.search_terms(&prefs,super::images::terms_request(&request.message,&rules),&rules,&token).await;
+                let _=events.send(json!({"type":"status","text":"Buscando imagens…"}));
+                let keys=state.image_keys();
+                let providers=super::images::chosen(kind,&image_only);
+                let missing=super::images::missing(&providers,&keys);
+                let usable:Vec<&'static str>=providers.iter().copied().filter(|p|!missing.contains(p)).collect();
+                let wanted=super::images::count(&request.message);
+                let (mut items,failed)=if usable.is_empty(){(Vec::new(),Vec::new())}else{super::images::search(&search_client()?,kind,&en,&keys,&usable).await};
+                if let Some(n)=wanted{items.truncate(n);}
+                let used:Vec<&str>=usable.iter().map(|p|super::images::label(p)).collect();
+                let link_list=super::images::links(&pt,&image_only);
+                let links:Vec<Value>=link_list.iter().map(|(name,url)|json!({"name":name,"url":url})).collect();
+                send_kept(&events,&extras,json!({"type":"images","query":pt,"items":items,"links":links}));
+                if !used.is_empty(){let _=events.send(json!({"type":"routing","text":format!("Busca externa: só os termos \"{en}\" foram enviados a {}",used.join(", "))}));}
+                let reply=super::images::reply(kind,&pt,&items,&missing,&failed,&link_list,!usable.is_empty(),wanted);
+                metric_model="imagens".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+                let _=events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+            if super::academic::request(&request.message)||!academic_only.is_empty(){
+                let rules=super::academic::terms(&request.message);
+                let (pt,en)=state.search_terms(&prefs,super::academic::terms_request(&request.message,&rules),&rules,&token).await;
+                let _=events.send(json!({"type":"status","text":"Buscando trabalhos acadêmicos…"}));
+                let apis:Vec<&str>=super::academic::SOURCES.iter().filter(|(id,_)|*id!="scholar"&&(academic_only.is_empty()||academic_only.iter().any(|o|o==id))).map(|(_,n)|*n).collect();
+                let (works,failed)=if apis.is_empty(){(Vec::new(),Vec::new())}else{super::academic::search(&search_client()?,&pt,&en,&academic_only).await};
+                if !apis.is_empty(){let _=events.send(json!({"type":"routing","text":format!("Busca externa: só os termos \"{pt}\" e \"{en}\" foram enviados a {}",apis.join(", "))}));}
+                let mut listed:Vec<Value>=works.iter().enumerate().map(|(i,w)|json!({"id":format!("artigo:{i}"),"name":format!("[{}] {}{}",i+1,w.title.chars().take(90).collect::<String>(),w.year.map(|y|format!(" ({y})")).unwrap_or_default()),"pages":[],"url":w.url})).collect();
+                listed.push(json!({"id":"scholar","name":"Continuar no Google Acadêmico","pages":[],"url":super::academic::scholar_url(&pt)}));
+                send_kept(&events,&extras,json!({"type":"sources","files":listed}));
+                let local=state.models().is_ok_and(|m|m.iter().any(|m|m.supports(Capability::Text)));
+                if works.is_empty()||!local{
+                    let reply=if apis.is_empty(){format!("[Abrir \"{pt}\" no Google Acadêmico]({})",super::academic::scholar_url(&pt))}else{super::academic::plain_reply(&works,&pt,&failed)};
+                    metric_model="academico".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+                    let _=events.send(json!({"type":"token","text":reply}));
+                    return Ok(());
+                }
+                academic=Some((works,pt));
+            }
         }
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
         let referenced=request.references.iter().map(|r|r.content.as_str()).collect::<Vec<_>>().join("\n");
@@ -2778,6 +3157,19 @@ pub async fn chat(
             if organ.installed()&&super::organs::finance_question(&request.message){Some(organ.finance().await)}else{None}};
         let use_cloud=use_cloud&&finance.is_none();
         if let Some(data)=&finance{let _=events.send(json!({"type":"routing","text":match data{Ok(_)=>"Moneta consultada · resposta neste computador".to_string(),Err(e)=>format!("Moneta indisponível: {e}")}}));}
+        // Bases públicas curadas: o modelo local consulta a base instalada. No Automático a
+        // resposta fica neste computador; a nuvem escolhida à mão ainda não recebe os dados.
+        let mut chosen_bases=if finance.is_none(){bases_for(&state,&request)}else{Vec::new()};
+        if !state.models().is_ok_and(|m|m.iter().any(|m|m.supports(Capability::Text))){
+            if !request.bases.is_empty(){let _=events.send(json!({"type":"routing","text":"As bases são consultadas pelo modelo local; prepare um modelo de texto em Configurações."}));}
+            chosen_bases.clear();
+        }
+        if use_cloud&&!request.automatic&&!chosen_bases.is_empty(){
+            let names:Vec<String>=chosen_bases.iter().map(|(b,_)|b.name.clone()).collect();
+            let _=events.send(json!({"type":"routing","text":format!("Base não consultada: {} só vai nas respostas neste computador, por enquanto.",names.join(", "))}));
+            chosen_bases.clear();
+        }
+        let use_cloud=use_cloud&&chosen_bases.is_empty()&&academic.is_none();
         let public_search = super::research::suggests_web_search(&request.message);
         if !request.automatic && web_search && (!use_cloud || !public_search || !request.references.is_empty()) {
             return Err("O pedido de pesquisa mudou. Revise novamente o envio.".into());
@@ -2813,7 +3205,7 @@ pub async fn chat(
                     let prepared=state.prepare_file(&prefs,file,&token,&mut |event:Value|{let _=events.send(event);}).await?;
                     if let Some(path)=prepared.images.into_iter().next(){images.push(path);labels.push((file.name.clone(),*date));listed.push(json!({"id":file.id,"name":file.name,"pages":[],"date":iris::date_label(*date)}));}
                 }
-                if labels.len()>=2{photo_note=Some(iris::photos_block(&labels));let _=events.send(json!({"type":"sources","files":listed}));}
+                if labels.len()>=2{photo_note=Some(iris::photos_block(&labels));send_kept(&events,&extras,json!({"type":"sources","files":listed}));}
                 else{images.clear();}
             }
         }
@@ -2854,18 +3246,30 @@ pub async fn chat(
             if let Some(p)=&project{system.push_str(&project_block(p));}
             let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
             let found=state.iris(&prefs,&request.conversation,&request.message,&request.attachments,&token).await;
-            if let Some(block)=iris::context_block(&found){system.push_str(&block);let _=events.send(json!({"type":"sources","files":iris::sources(&found)}));}
+            if let Some(block)=iris::context_block(&found){system.push_str(&block);send_kept(&events,&extras,json!({"type":"sources","files":iris::sources(&found)}));}
             let notes=state.notes_context(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;
             if let Some(block)=athena::context_block(&notes){
                 system.push_str(&block);
                 let mut listed:Vec<Value>=Vec::new();
                 for (title,_) in &notes{if !listed.iter().any(|v|v["name"]==format!("{title} (nota)")){listed.push(json!({"id":format!("nota:{title}"),"name":format!("{title} (nota)"),"pages":[]}));}}
-                let _=events.send(json!({"type":"sources","files":listed}));
+                send_kept(&events,&extras,json!({"type":"sources","files":listed}));
             }
             match &finance{
                 Some(Ok(resumo))=>system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo))),
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
                 None=>{}
+            }
+            if let Some((works,query))=&academic{system.push_str(&super::academic::context_block(works,query));}
+            for (entry,installed) in &chosen_bases{
+                let _=events.send(json!({"type":"status","text":format!("Consultando a base {}…",entry.name)}));
+                match base_lookup(&state,&prefs,entry,&request.message,&token).await{
+                    Ok((sql,table))=>{
+                        system.push_str(&super::bases::context_block(entry,installed,&sql,&table));
+                        send_kept(&events,&extras,json!({"type":"sources","files":[{"id":format!("base:{}",entry.id),"name":super::bases::source_label(entry,installed),"pages":[]}]}));
+                        let _=events.send(json!({"type":"routing","text":"Base pública consultada · resposta neste computador"}));
+                    }
+                    Err(error)=>system.push_str(&format!("\n\nA base \"{}\" não pôde ser consultada agora: {error} Se a pessoa perguntar sobre esses dados, explique isso e não invente valores.",entry.name)),
+                }
             }
         }
         context.insert(0,json!({"role":"system","content":system}));
@@ -2947,6 +3351,10 @@ pub async fn chat(
                     result = Err(
                         "A resposta foi recebida, mas não foi possível salvar esta conversa".into(),
                     );
+                }
+                let kept = extras.lock().map(|e| e.clone()).unwrap_or_default();
+                if kept.as_object().is_some_and(|o| !o.is_empty()) {
+                    let _ = db.set_last_reply_extras(&request.conversation, &kept.to_string());
                 }
                 if let Some(source) = origin {
                     let _ = events.send(json!({"type":"origin","origin":source}));

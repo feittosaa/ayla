@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import AppearanceSettings from './components/AppearanceSettings';
 import BrandMark from './components/BrandMark';
 import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, palette, useMode, useSystemIcon, type Appearance } from './services/Appearance';
 import { DesktopSettings } from './components/DesktopIntegration';
 import { quickStyle, useDesktopView } from './services/DesktopView';
-import Space from './components/Space';
+import Space, { type Incoming } from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
 import MemoryPanel from './components/MemoryPanel';
@@ -14,6 +15,8 @@ import Confirm from './components/Confirm';
 import Athena from './components/Athena';
 import Iris from './components/Iris';
 import AthenaSettings from './components/AthenaSettings';
+import BasesSettings from './components/BasesSettings';
+import ImageSearchSettings from './components/ImageSearchSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
 import { shareAppearance, useOrgan } from './services/Organ';
 import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
@@ -28,11 +31,36 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
 ];
 const sections = [
   { id: 'desktop', label: 'Integração com o sistema' }, { id: 'aparencia', label: 'Aparência' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
-  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
+  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'bases', label: 'Bases de dados' }, { id: 'imagens', label: 'Imagens e pesquisa' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
 type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena' | 'iris';
+/** "Abrir com" do gerenciador de arquivos, entregue pelo núcleo. */
+type OpenRequest = { target: 'ayla' | 'athena' | 'iris'; paths: string[] };
+let openCounter = 0;
+
+/** Leva até uma seção de Configurações e a mantém no topo enquanto as seções de cima terminam de
+ * carregar (elas crescem depois e empurrariam a seção para baixo). Para se a pessoa rolar. */
+function revealSection(id: string, frames = 90) {
+  const target = document.getElementById(id);
+  const content = target?.closest('.settings-main');
+  // A tela de Configurações pode ainda estar montando: espera a seção aparecer (até ~1,5 s).
+  if (!target || !content) { if (frames > 0) requestAnimationFrame(() => revealSection(id, frames - 1)); return; }
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  const align = () => { if (!stopped) target.scrollIntoView({ block: 'start' }); };
+  align();
+  const observer = new ResizeObserver(align);
+  observer.observe(content.querySelector('.settings-content') ?? content);
+  content.addEventListener('wheel', stop, { once: true, passive: true });
+  content.addEventListener('touchstart', stop, { once: true, passive: true });
+  window.addEventListener('keydown', stop, { once: true });
+  setTimeout(() => { observer.disconnect(); content.removeEventListener('wheel', stop); content.removeEventListener('touchstart', stop); window.removeEventListener('keydown', stop); }, 2000);
+  target.classList.remove('section-reveal');
+  void target.offsetWidth;
+  target.classList.add('section-reveal');
+}
 
 export default function App() {
   const [space, setSpace] = useState<SpaceId>('ayla'); const [page, setPage] = useState<Page>('settings');
@@ -99,13 +127,27 @@ export default function App() {
     if (id === 'athena') setAthenaVisited(true);
     if (id === 'iris') setIrisVisited(true);
   }
+  // "Abrir com": Ayla anexa numa conversa nova; Iris mostra a mídia; Athena abre o texto.
+  const [opened, setOpened] = useState<Partial<Record<OpenRequest['target'], Incoming>>>({});
+  const openFiles = useRef<(request: OpenRequest) => void>(() => {});
+  openFiles.current = request => {
+    const incoming = { id: ++openCounter, paths: request.paths };
+    if (request.target === 'ayla') showProject(null); else openSpace(request.target);
+    setOpened(prev => ({ ...prev, [request.target]: incoming }));
+  };
+  useEffect(() => {
+    const take = () => void native<OpenRequest[]>('open_requests').then(list => list.forEach(r => openFiles.current(r))).catch(e => setDesktopError(errorText(e)));
+    take();
+    const stop = listen('open-files', take);
+    return () => { void stop.then(unlisten => unlisten()); };
+  }, []);
   function showProject(id: string | null) {
     setSpace('ayla'); setOpenProject(id);
     if (id) setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
   }
   function go(next: Page, section?: string) {
     setSpace('settings'); setPage(next); setNotice(''); setError('');
-    if (section) setTimeout(() => document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    if (section) setTimeout(() => revealSection(section), 0);
   }
   function update(values: Partial<Preferences>) { setDraft(prev => prev ? { ...prev, ...values } : prev); setNotice(''); }
   /** Salva na hora uma mudança simples (interruptores e perfil), sem mexer no que está em edição. */
@@ -166,7 +208,7 @@ export default function App() {
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
         <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
-          projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} />
+          projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} incoming={opened.ayla} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
@@ -177,10 +219,10 @@ export default function App() {
       })}
 
       {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
-        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} />
+        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} external={opened.athena} />
       </div>}
       {irisVisited && !view.quick && <div className="page" hidden={space !== 'iris'}>
-        <Iris active={space === 'iris'} />
+        <Iris active={space === 'iris'} external={opened.iris} />
       </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
@@ -263,6 +305,10 @@ export default function App() {
             <MemoryPanel snapshot={snapshot} refresh={refresh} />
 
             <OrganSettings status={organ.status} refresh={organ.refresh} />
+
+            <BasesSettings />
+
+            <ImageSearchSettings />
 
             <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
               <div className="group-card">

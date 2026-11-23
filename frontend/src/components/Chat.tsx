@@ -5,7 +5,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { native, nativeTask, taskId, errorText, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type Effort, type Reference } from '../services/Desktop';
 import { base64, recordWav, type Recording } from '../services/Audio';
 import { asksForImage } from '../services/Intent';
-import { ArrowUpIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
+import ImageResults from './ImageResults';
+import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import Markdown from './Markdown';
 import FilePreview from './FilePreview';
 import './Chat.css';
@@ -26,11 +27,17 @@ type Props = {
   focusComposer?: number | null;
   /** Abre uma seção das Configurações (ex.: "nuvem"). */
   onOpenSettings?: (section: string) => void;
+  /** Arquivos do "Abrir com Ayla", anexados uma vez (pelo `id`). */
+  attach?: { id: number; paths: string[] };
+  /** Bases escolhidas na barra lateral para a próxima mensagem. */
+  bases?: { id: string; name: string }[];
+  onBasesUsed?: () => void;
+  onRemoveBase?: (id: string) => void;
 };
 type ResponseSource = 'local' | 'auto' | 'cloud';
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, focusComposer, onOpenSettings }: Props) {
+export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, focusComposer, onOpenSettings, attach, bases = [], onBasesUsed, onRemoveBase }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState(''); const [effort, setEffort] = useState<Effort>('');
   // Neste computador, o esforço escolhe entre resposta direta (leve) e raciocínio (alto).
@@ -143,7 +150,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     setError(''); setReviewed(false); setRouting(''); follow.current = true;
     if (!conversationId) { setMessages([]); return; }
     let current = true;
-    native<Message[]>('conversation_messages', { id: conversationId }).then(items => { if (current) setMessages(items); }).catch(e => { if (current) setError(errorText(e)); });
+    native<Message[]>('conversation_messages', { id: conversationId }).then(items => { if (current) setMessages(items.map(m => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources } : m)); }).catch(e => { if (current) setError(errorText(e)); });
     return () => { current = false; };
   }, [conversationId]);
 
@@ -201,6 +208,12 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   }
   const attachLatest = useRef(attachPaths);
   useEffect(() => { attachLatest.current = attachPaths; });
+  const attached = useRef(0);
+  useEffect(() => {
+    if (!attach || attach.id === attached.current) return;
+    attached.current = attach.id;
+    void attachLatest.current(attach.paths).then(() => field.current?.focus());
+  }, [attach]);
   // Arrastar arquivos para a janela anexa à conversa visível.
   useEffect(() => {
     if (!visible) return;
@@ -269,12 +282,14 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         autoRoute = check.route;
       } catch { autoRoute = 'local'; }
     }
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [] };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id) };
+    if (bases.length) onBasesUsed?.();
     let receivedText = false;
     try {
       await nativeTask<void>('chat', { request }, event => {
         if (event.type === 'origin') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, origin: event.origin } : m));
-        if (event.type === 'routing') setRouting(event.text || '');
+        if (event.type === 'routing') { setRouting(event.text || ''); setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, notice: event.text || '' } : m)); }
+        if (event.type === 'images') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, images: { query: event.query ?? '', items: event.items ?? [], links: event.links ?? [] } } : m));
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
         if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
         if (event.type === 'memory_error') setError(`Não consegui atualizar a memória: ${event.text}`);
@@ -404,7 +419,14 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                 <div className="assistant-body">
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
-                  {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => <span key={source.id} className="file-chip"><FileIcon size={14} />{source.name}{source.date ? ` · ${source.date}` : ''}{source.pages.length ? ` · p. ${source.pages.join(', ')}` : ''}</span>)}</p> : null}
+                  {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
+                  {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => {
+                    const label = <><FileIcon size={14} />{source.name}{source.date ? ` · ${source.date}` : ''}{source.pages.length ? ` · p. ${source.pages.join(', ')}` : ''}</>;
+                    return source.url
+                      ? <button key={source.id} type="button" className="file-chip link-chip" title={source.url} onClick={() => void native('open_web', { url: source.url }).catch(e => setError(errorText(e)))}>{label}</button>
+                      : <span key={source.id} className="file-chip">{label}</span>;
+                  })}</p> : null}
+                  {m.notice && m.complete && <p className="message-notice">{m.notice}</p>}
                   {!m.complete && m.content && !busy && <small className="incomplete">Resposta incompleta</small>}
                   {m.origin && m.content && <small className="reply-origin">{m.origin === 'cloud_search' ? 'Busca na nuvem' : 'Resposta na nuvem'}</small>}
                   {m.complete && m.content && <div className="message-actions"><button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button></div>}
@@ -460,6 +482,10 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
           {(attachments.length > 0 || adding) && <ul className="composer-files" aria-label="Arquivos anexados">
             {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><Confirm className="chip-remove" ariaLabel={`Remover ${file.name}`} disabled={busy} question="Tirar este anexo?" confirm="Tirar" onConfirm={() => removeAttachment(file)}><CloseIcon size={14} /></Confirm></li>)}
             {adding && <li className="file-chip" role="status">Guardando…</li>}
+          </ul>}
+          {bases.length > 0 && <ul className="composer-files" aria-label="Bases nesta mensagem">
+            {bases.map(base => <li key={base.id} className="file-chip base-chip"><DatabaseIcon size={14} /><span className="file-name">{base.id.startsWith('imagens:') || base.id.startsWith('academico:') ? 'Fonte' : 'Base'}: {base.name}</span>
+              <button type="button" className="chip-remove" aria-label={`Tirar a base ${base.name}`} disabled={busy} onClick={() => onRemoveBase?.(base.id)}><CloseIcon size={14} /></button></li>)}
           </ul>}
           <textarea ref={field} rows={1} aria-label="Mensagem" value={input} readOnly={listening !== 'idle'} disabled={busy}
             placeholder={listening === 'recording' ? 'Fale; o texto aparece aqui…' : image ? 'Descreva a imagem que você quer…' : 'Fale com a Ayla…'}

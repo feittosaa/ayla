@@ -129,7 +129,7 @@ function LibraryFolder({ root, selected, selectFolder, actions, drop }: {
 
 /** Iris: as imagens, vídeos e PDFs da Ayla num lugar só — dos cofres e notas da Athena, os
  * anexos enviados no chat, as imagens que a Ayla gerou e os arquivos adicionados direto. */
-export default function Iris({ active }: { active: boolean }) {
+export default function Iris({ active, external }: { active: boolean; external?: { id: number; paths: string[] } }) {
   const [library, setLibrary] = useState<{ items: Item[]; roots: LibraryRoot[]; athenaRoots: LibraryRoot[] } | null>(null);
   const items = library?.items ?? null;
   const [tileSize, setTileSize] = useState(() => {
@@ -260,12 +260,25 @@ export default function Iris({ active }: { active: boolean }) {
     return out;
   }, [visible, shown, order]);
 
-  const index = open ? visible.findIndex(item => item.key === open) : -1;
-  const current = index >= 0 ? visible[index] : null;
+  // "Abrir com Iris": a mídia e as vizinhas da mesma pasta, só para ver (nada é conectado).
+  const [outside, setOutside] = useState<Item[] | null>(null);
+  const handled = useRef(0);
+  useEffect(() => {
+    if (!external || external.id === handled.current || !external.paths.length) return;
+    handled.current = external.id;
+    void native<{ items: Item[]; open: string }>('iris_open_external', { path: external.paths[0] }).then(result => {
+      setOutside([...result.items].sort((a, b) => names.compare(a.name, b.name)));
+      setConfirmTrash(false); setTrashError(''); setOpen(result.open);
+    }, e => setError(errorText(e)));
+  }, [external]);
+  const list = outside ?? visible;
+  const index = open ? list.findIndex(item => item.key === open) : -1;
+  const current = index >= 0 ? list[index] : null;
   function closeViewer() {
     setConfirmTrash(false);
     setTrashError('');
     setOpen(null);
+    setOutside(null);
   }
 
   async function trashCurrent(item: Item) {
@@ -282,9 +295,9 @@ export default function Iris({ active }: { active: boolean }) {
     }
   }
   const step = useCallback((delta: number) => {
-    if (index < 0 || !visible.length) return;
-    setOpen(visible[(index + delta + visible.length) % visible.length].key);
-  }, [index, visible]);
+    if (index < 0 || !list.length) return;
+    setOpen(list[(index + delta + list.length) % list.length].key);
+  }, [index, list]);
   useEffect(() => {
     if (!current) return;
     const key = (event: KeyboardEvent) => {
@@ -418,9 +431,9 @@ export default function Iris({ active }: { active: boolean }) {
     {current && <div className="iris-viewer" role="dialog" aria-modal="true" aria-label={current.name} onClick={() => { if (!confirmTrash) closeViewer(); }}>
       <header className="iris-viewer-bar" onClick={e => e.stopPropagation()}>
         <span className="iris-viewer-title"><b>{current.name}</b><small>{itemLocation(current)} · {day(current.date)} · {size(current.bytes)}</small></span>
-        <span className="iris-viewer-count">{index + 1} de {visible.length}</span>
+        <span className="iris-viewer-count">{index + 1} de {list.length}</span>
         <button className="icon-button" data-tip="Abrir no visualizador do sistema" aria-label="Abrir no visualizador do sistema" onClick={() => system(current)}><ExpandIcon size={17} /></button>
-        {current.kind === 'image' && <button className="icon-button tip-end" data-tip="Excluir imagem" aria-label="Excluir imagem"
+        {current.kind === 'image' && !outside && <button className="icon-button tip-end" data-tip="Excluir imagem" aria-label="Excluir imagem"
           disabled={confirmTrash} onClick={() => setConfirmTrash(true)}><TrashIcon size={17} /></button>}
         <button className="icon-button tip-end" data-tip="Fechar (Esc)" aria-label="Fechar" disabled={trashing} onClick={closeViewer}><CloseIcon size={18} /></button>
       </header>
@@ -433,7 +446,7 @@ export default function Iris({ active }: { active: boolean }) {
       <div className="iris-stage" onClick={e => e.stopPropagation()}>
         <MediaView key={current.key} media={mediaOf(current)} name={current.name} kind={current.kind} autoPlay onError={setError} />
       </div>
-      {visible.length > 1 && !confirmTrash && <>
+      {list.length > 1 && !confirmTrash && <>
         <button className="iris-nav prev" aria-label="Anterior" onClick={e => { e.stopPropagation(); step(-1); }}><ChevronLeftIcon size={26} /></button>
         <button className="iris-nav next" aria-label="Próximo" onClick={e => { e.stopPropagation(); step(1); }}><ChevronRightIcon size={26} /></button>
       </>}

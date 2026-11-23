@@ -42,28 +42,35 @@ export function applyAppearance(a: Appearance, mode: Mode) {
   }
 }
 
-/** Ícone do sistema: a marca da Ayla no destaque, sobre um quadrado com o fundo escolhido. */
-export async function drawSystemIcon(a: Appearance, mode: Mode): Promise<string> {
+/** Ícone do sistema: a marca (da Ayla, da Athena ou da Iris) no destaque, sobre um quadrado com
+ * o fundo escolhido. */
+export async function drawSystemIcon(a: Appearance, mode: Mode, name: 'ayla' | 'athena' | 'iris' = 'ayla'): Promise<string> {
   const side = 512; const canvas = document.createElement('canvas'); canvas.width = canvas.height = side;
   const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Canvas indisponível');
   const bg = safeBackground(mode === 'escuro' ? a.dark_background : a.light_background, mode);
   ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(16, 16, side - 32, side - 32, 112); ctx.fill();
-  const svg = MARKS.ayla[a.icon_ayla - 1].replace('currentColor', isHex(a.accent) ? a.accent : DEFAULT_APPEARANCE.accent);
+  const marks: readonly string[] = MARKS[name];
+  const variant = name === 'ayla' ? a.icon_ayla : name === 'athena' ? a.icon_athena : 1;
+  const mark = marks[variant - (FIRST_VARIANT[name] ?? 1)] ?? marks[0];
+  const svg = mark.replaceAll('currentColor', isHex(a.accent) ? a.accent : DEFAULT_APPEARANCE.accent);
   const image = new Image(); image.src = markUrl(svg); await image.decode();
   ctx.drawImage(image, 104, 104, side - 208, side - 208);
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-/** Mantém o ícone da janela e do menu igual ao escolhido (o núcleo só regrava se mudar). */
+/** Mantém o ícone da janela, do menu e do "Abrir com" (Ayla, Athena e Iris) igual ao escolhido
+ * (o núcleo só regrava o que mudar). */
 export function useSystemIcon(a: Appearance, mode: Mode, ready: boolean) {
-  const key = [ready, a.icon_ayla, a.accent, a.dark_background, a.light_background, mode].join('|');
+  const key = [ready, a.icon_ayla, a.icon_athena, a.accent, a.dark_background, a.light_background, mode].join('|');
   useEffect(() => {
     if (!ready) return;
     const timer = setTimeout(() => {
-      void drawSystemIcon(a, mode).then(png => native('appearance_icon', { png })).catch(e => console.warn('Ícone da Ayla:', e));
+      void Promise.all((['ayla', 'athena', 'iris'] as const).map(name => drawSystemIcon(a, mode, name)))
+        .then(([png, athena, iris]) => native('appearance_icon', { png, athena, iris }))
+        .catch(e => console.warn('Ícone da Ayla:', e));
     }, 600);
     return () => clearTimeout(timer);
-    // `key` resume o que muda no ícone.
+    // `key` resume o que muda nos ícones.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 }

@@ -88,7 +88,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 8;
+const SCHEMA: u32 = 9;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -101,6 +101,8 @@ pub struct Message {
     pub content: String,
     pub complete: bool,
     pub origin: Option<String>,
+    /// Imagens encontradas e fontes da resposta (`{"images": …, "sources": […]}`).
+    pub extras: Option<serde_json::Value>,
     /// Arquivos enviados com esta mensagem.
     pub attachments: Vec<FileInfo>,
 }
@@ -183,6 +185,12 @@ impl Store {
         if version <= 7 {
             let tx = conn.transaction()?;
             tx.execute_batch("ALTER TABLE messages ADD COLUMN origin TEXT; PRAGMA user_version=8;")?;
+            tx.commit()?;
+        }
+        // v9: imagens encontradas e fontes da resposta (JSON), para reaparecerem ao reabrir a conversa.
+        if version <= 8 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN extras TEXT; PRAGMA user_version=9;")?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -384,8 +392,9 @@ impl Store {
         Ok(())
     }
     pub fn messages(&self, id: &str) -> rusqlite::Result<Vec<Message>> {
-        let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete,origin FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
-            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, origin:r.get(4)?, attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
+        let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete,origin,extras FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
+            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, origin:r.get(4)?,
+                extras: r.get::<_, Option<String>>(5)?.and_then(|e| serde_json::from_str(&e).ok()), attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
         rows.reverse();
         let attached = self.conversation_files(id)?;
         for message in &mut rows {
@@ -446,6 +455,11 @@ impl Store {
             tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, reply])?;
         }
         tx.commit()
+    }
+    /// Guarda imagens e fontes na última resposta da conversa (a que `save_turn` acabou de gravar).
+    pub fn set_last_reply_extras(&self, conversation: &str, extras: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE messages SET extras=?2 WHERE id=(SELECT MAX(id) FROM messages WHERE conversation_id=?1 AND role='assistant')", params![conversation, extras])?;
+        Ok(())
     }
     fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileInfo> {
         let kind: String = r.get(2)?;
@@ -1066,6 +1080,29 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] { let _ = std::fs::remove_file(format!("{}{suffix}", path.display())); }
     }
     #[test]
+    fn extras_da_resposta_voltam_ao_reabrir_e_migracao_v9_preserva_conversas() {
+        let root = std::env::temp_dir().join(format!("ayla-extras-{}", id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("ayla.db");
+        let db = Store::open(&path).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        db.save_turn(&chat.id, "antes", "resposta antiga", true, &[], &[], None).unwrap();
+        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
+        drop(db);
+        let db = Store::open(&path).unwrap();
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v9-")), "backup antes da migração");
+        db.save_turn(&chat.id, "busca imagens de gato", "Encontrei 1 imagem", true, &[], &[], None).unwrap();
+        db.set_last_reply_extras(&chat.id, r#"{"images":{"query":"gato","items":[{"id":"1"}],"links":[]},"sources":[{"id":"artigo:0","name":"[1] X","pages":[],"url":"https://doi.org/1"}]}"#).unwrap();
+        drop(db);
+        let messages = Store::open(&path).unwrap().messages(&chat.id).unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].extras, None, "respostas antigas seguem sem extras");
+        let extras = messages[3].extras.as_ref().unwrap();
+        assert_eq!((extras["images"]["query"].as_str(), extras["sources"][0]["url"].as_str()), (Some("gato"), Some("https://doi.org/1")));
+        assert_eq!(messages[2].extras, None, "só a resposta recebe");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn cloud_origin_survives_reopening_and_old_turns_remain_unlabelled() {
         let root = std::env::temp_dir().join(format!("ayla-origin-{}", id()));
         std::fs::create_dir(&root).unwrap();
@@ -1073,7 +1110,7 @@ mod tests {
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
         db.save_turn(&chat.id,"a","b",true,&[],&[],None).unwrap();
-        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
+        db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
         db.save_turn(&chat.id,"c","d",true,&[],&[],Some("cloud_search")).unwrap();
@@ -1121,7 +1158,7 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();

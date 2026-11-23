@@ -1,14 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import Chat from './Chat';
 import MemoryPanel from './MemoryPanel';
 import AppVersion from './AppVersion';
 import { native, errorText, fileLabels, formatBytes, type Conversation, type FileInfo, type Project, type Snapshot } from '../services/Desktop';
-import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, DatabaseIcon, WarningIcon, ImageIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
 import BrandMark from './BrandMark';
+import BasesDialog from './BasesDialog';
+import { listBases, onBasesChanged, basesChanged, type Base } from '../services/Bases';
+import { ACADEMIC_SOURCES, IMAGE_SOURCES, type KeyStatus, type Source } from '../services/Sources';
 
 type View = 'chat' | 'overview' | 'memory' | 'files';
-type Slot = { key: string; conversation: Conversation | null; busy: boolean };
+/** Arquivos que chegaram pelo "Abrir com Ayla": entram como anexos de uma conversa nova. */
+export type Incoming = { id: number; paths: string[] };
+type Slot = { key: string; conversation: Conversation | null; busy: boolean; attach?: Incoming };
 let slotCounter = 0;
 type Props = {
   snapshot: Snapshot; refresh: () => Promise<void>;
@@ -26,6 +31,7 @@ type Props = {
   onNewProject?: () => void;
   /** No projeto: voltar para a conversa geral da Ayla. */
   onBack?: () => void;
+  incoming?: Incoming | null;
 };
 
 /** Iniciais e cor estável de um projeto, usadas no trilho e no cabeçalho. */
@@ -37,7 +43,7 @@ export function ProjectAvatar({ project, size = 36 }: { project: Project; size?:
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack }: Props) {
+export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack, incoming }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // Cada conversa respondendo fica montada (oculta) para a resposta seguir enquanto outra é aberta.
   const [slots, setSlots] = useState<Slot[]>([{ key: 'c0', conversation: null, busy: false }]);
@@ -115,6 +121,48 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
       await refresh();
     } catch (e) { setError(errorText(e)); }
   }
+  // Bases de dados na barra (só no espaço geral): recolhidas ao abrir; clicar escolhe a base
+  // para a próxima mensagem da conversa aberta.
+  const [basesOpen, setBasesOpen] = useState(false); const [bases, setBases] = useState<Base[]>([]); const [keys, setKeys] = useState<KeyStatus | null>(null);
+  const [picked, setPicked] = useState<{ id: string; name: string }[]>([]);
+  const [addingBase, setAddingBase] = useState(false); const [removingBase, setRemovingBase] = useState<string | null>(null);
+  useEffect(() => {
+    if (project) return;
+    const load = () => {
+      void listBases().then(list => { setBases(list); setPicked(prev => prev.filter(p => !list.some(b => b.id === p.id && !b.installed))); }).catch(() => setBases([]));
+      void native<KeyStatus>('image_keys_status').then(status => { setKeys(status); setPicked(prev => prev.filter(p => { const s = IMAGE_SOURCES.find(i => i.id === p.id); return !s?.key || status[s.key]; })); }).catch(() => setKeys(null));
+    };
+    load();
+    return onBasesChanged(load);
+  }, [project]);
+  const togglePick = (item: { id: string; name: string }) => setPicked(prev => prev.some(p => p.id === item.id) ? prev.filter(p => p.id !== item.id) : [...prev, { id: item.id, name: item.name }]);
+  /** Fonte indisponível: o aviso explica o que falta e o clique leva à configuração. */
+  const sourceRow = (source: Source, warning: string | null, icon: React.ReactNode) => <div key={source.id} className="conversation-row">
+    <button className="conversation-item base-item" aria-pressed={!warning && picked.some(p => p.id === source.id)}
+      title={warning ? `${source.name}: ${warning}` : `${source.name} · ${source.hint}\nClique para usar na próxima mensagem`}
+      onClick={() => warning ? onOpenSettings?.('imagens') : togglePick(source)}>{icon}<span>{source.name}</span>
+      {warning && <span className="source-warning" aria-label={warning}><WarningIcon size={14} /></span>}</button>
+  </div>;
+  async function removeBase(id: string) {
+    setRemovingBase(null);
+    try { await native('bases_remove', { id }); basesChanged(); } catch (e) { setError(errorText(e)); }
+  }
+  // "Abrir com Ayla": uma conversa nova com os arquivos na caixa de mensagem, sem enviar.
+  const handled = useRef(0);
+  useEffect(() => {
+    if (!incoming || incoming.id === handled.current) return;
+    handled.current = incoming.id;
+    const current = slots.find(s => s.key === activeKey);
+    if (current && !current.busy) setSlots(prev => prev.map(s => s.key === activeKey ? { ...s, conversation: null, attach: incoming } : s));
+    else {
+      const key = `c${++slotCounter}`;
+      setSlots(prev => [...prev, { key, conversation: null, busy: false, attach: incoming }]); setActiveKey(key);
+    }
+    setView('chat');
+    if (compact || narrow) setSidebar(false);
+    // Só um pedido novo (`id`) abre outra conversa.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incoming]);
   function openConversation(item: Conversation | null) {
     const open = item && slots.find(s => s.conversation?.id === item.id);
     const current = slots.find(s => s.key === activeKey);
@@ -129,6 +177,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
   }
 
   return <div className="chat-layout">
+    {addingBase && <BasesDialog onClose={() => setAddingBase(false)} />}
     {(compact || narrow) && sidebar && <div className="sidebar-backdrop" aria-hidden="true" onClick={() => setSidebar(false)} />}
     {sidebar && <aside className="sidebar" aria-label={project ? `Projeto ${project.name}` : 'Conversas'}>
       {project && onBack && <button className="ghost-button back-to-ayla" onClick={onBack}><ChevronLeftIcon size={16} />Ayla</button>}
@@ -145,6 +194,30 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
       <button className="new-chat" onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
       <nav className="conversation-list" aria-label="Conversas e projetos">
         {!project && <>
+          <div className="sidebar-label-row">
+            <button className="sidebar-toggle" aria-expanded={basesOpen} onClick={() => setBasesOpen(o => !o)}><ChevronRightIcon size={16} />Bases</button>
+            <button className="icon-button small" aria-label="Adicionar base de dados" title="Adicionar base de dados" onClick={() => setAddingBase(true)}><PlusIcon size={16} /></button>
+          </div>
+          {basesOpen && <div className="sources-list">
+            <p className="sources-group">Dados</p>
+            {bases.map(base => removingBase === base.id
+              ? <div key={base.id} className="conversation-confirm" role="group" aria-label="Confirmar remoção">
+                  <span>Remover “{base.name}”?</span>
+                  <small>{base.origin === 'voce' ? 'Ela sai do seu catálogo; dá para sugerir o link de novo.' : 'Dá para baixar de novo pelo +.'}</small>
+                  <div className="row-actions"><button className="danger-action" onClick={() => void removeBase(base.id)}>Remover</button><button className="ghost-button" onClick={() => setRemovingBase(null)}>Cancelar</button></div>
+                </div>
+              : <div key={base.id} className="conversation-row">
+                  <button className="conversation-item base-item" aria-pressed={Boolean(base.installed) && picked.some(p => p.id === base.id)}
+                    title={base.installed ? `${base.name} · ${base.publisher}\nClique para usar na próxima mensagem` : `${base.name}: ainda não baixada. Clique para baixar em Configurações.`}
+                    onClick={() => base.installed ? togglePick(base) : onOpenSettings?.('bases')}><DatabaseIcon size={16} /><span>{base.name}</span>
+                    {!base.installed && <span className="source-warning" aria-label="Ainda não baixada"><WarningIcon size={14} /></span>}</button>
+                  {base.installed && <span className="row-tools"><button className="icon-button tiny" aria-label={`Remover a base “${base.name}”`} title="Remover" onClick={() => setRemovingBase(base.id)}><TrashIcon size={15} /></button></span>}
+                </div>)}
+            <p className="sources-group">Imagens</p>
+            {IMAGE_SOURCES.map(source => sourceRow(source, source.key && keys && !keys[source.key] ? 'falta a chave da API. Clique para configurar.' : null, <ImageIcon size={16} />))}
+            <p className="sources-group">Acadêmico</p>
+            {ACADEMIC_SOURCES.map(source => sourceRow(source, null, <FileIcon size={16} />))}
+          </div>}
           <div className="sidebar-label-row"><p className="sidebar-label">Projetos</p><button className="icon-button small" aria-label="Novo projeto" title="Novo projeto" onClick={onNewProject}><PlusIcon size={16} /></button></div>
           {!projects.length && <button className="conversation-item muted" onClick={onNewProject}>Criar um projeto…</button>}
           {projects.map(item => <button key={item.id} className="conversation-item project-item" onClick={() => onOpenProject?.(item.id)}><ProjectAvatar project={item} size={22} /><span>{item.name}</span></button>)}
@@ -174,7 +247,8 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
 
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
     {slots.map(slot => <div key={slot.key} className="chat-slot" hidden={view !== 'chat' || slot.key !== activeKey}>
-      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} />
+      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} attach={slot.attach}
+        bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))} />
     </div>)}
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
     {project && view === 'memory' && <main className="settings-main"><div className="settings-content">

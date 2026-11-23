@@ -747,3 +747,6 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .reader-side:hover { background: linear-gradient(90deg, var(--ayla-hover), transparent); }
 .app-shell .reader-side.right:hover { background: linear-gradient(270deg, var(--ayla-hover), transparent); }
 @media (prefers-reduced-motion: reduce) { .reader-progress span { transition: none; } .comic-placeholder { animation: none; } }
+/* Seção aberta por um atalho (ex.: o ⚠ de uma fonte sem chave): destaque breve. */
+.settings-group.section-reveal { animation: section-reveal 1.6s ease-out; border-radius: calc(14px * var(--ayla-round, 1)); }
+@keyframes section-reveal { 0%, 30% { box-shadow: 0 0 0 2px var(--ayla-accent-ring); } 100% { box-shadow: 0 0 0 2px transparent; } }
