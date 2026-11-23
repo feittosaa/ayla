@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import AppearanceSettings from './components/AppearanceSettings';
 import BrandMark from './components/BrandMark';
 import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, palette, useMode, useSystemIcon, type Appearance } from './services/Appearance';
@@ -92,6 +92,8 @@ export default function App() {
     applyAppearance(look, mode);
     // A Moneta, aberta dentro da Ayla, acompanha fundo, superfícies, texto e o modo claro ou escuro.
     shareAppearance(palette(look, mode), mode === 'claro');
+    // A Athena aberta como bloco de notas (janela própria) acompanha a mudança na hora, inclusive a prévia.
+    void emitTo('athena', 'ayla-appearance', look).catch(() => {});
   }, [look, mode]);
   useSystemIcon(savedLook, useMode(savedLook), Boolean(snapshot));
   useLayoutEffect(() => {
@@ -145,8 +147,14 @@ export default function App() {
     setSpace('ayla'); setOpenProject(id);
     if (id) setVisited(prev => prev.includes(id) ? prev : [...prev, id]);
   }
+  // Seção de Configurações em que a pessoa está (marcada na lateral). Ao clicar num tópico, ele fica
+  // marcado até a pessoa rolar (a seção pode não chegar ao topo quando é das últimas).
+  const [currentSection, setCurrentSection] = useState(sections[0].id);
+  const pinnedSection = useRef(false);
   function go(next: Page, section?: string) {
     setSpace('settings'); setPage(next); setNotice(''); setError('');
+    setCurrentSection(next === 'settings' ? section ?? sections[0].id : '');
+    pinnedSection.current = Boolean(section);
     if (section) setTimeout(() => revealSection(section), 0);
     // Subpáginas (Modelos, Recursos) começam no topo, sem herdar a rolagem das Configurações.
     else setTimeout(() => document.querySelector('.settings-main')?.scrollTo({ top: 0 }), 0);
@@ -234,11 +242,21 @@ export default function App() {
       <aside className="sidebar settings-sidebar" aria-label="Seções das configurações">
         <div className="brand"><span className="brand-name">Configurações</span></div>
         <nav className="conversation-list" aria-label="Seções">
-          {sections.map(item => <button key={item.id} className="conversation-item" onClick={() => go('settings', item.id)}>{item.label}</button>)}
+          {sections.map(item => <button key={item.id} className="conversation-item" aria-current={page === 'settings' && currentSection === item.id ? 'location' : undefined} onClick={() => go('settings', item.id)}>{item.label}</button>)}
         </nav>
       </aside>
 
-      <main className="settings-main">
+      <main className="settings-main" onWheel={() => { pinnedSection.current = false; }} onTouchStart={() => { pinnedSection.current = false; }} onKeyDown={() => { pinnedSection.current = false; }}
+        onScroll={event => {
+          if (pinnedSection.current || page !== 'settings') return;
+          const main = event.currentTarget; const top = main.getBoundingClientRect().top + 80;
+          // No fim da rolagem, a última seção visível; senão, a última cujo título já passou do topo.
+          const atEnd = main.scrollTop + main.clientHeight >= main.scrollHeight - 4;
+          const found = sections.map(item => document.getElementById(item.id)).filter((el): el is HTMLElement => Boolean(el));
+          const passed = found.filter(el => el.getBoundingClientRect().top <= (atEnd ? main.getBoundingClientRect().bottom - 40 : top));
+          const id = (passed[passed.length - 1] ?? found[0])?.id;
+          if (id) setCurrentSection(id);
+        }}>
         <div className="settings-content">
           {page === 'models' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Models snapshot={snapshot} refresh={refresh} /></>}
           {page === 'capabilities' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Capabilities snapshot={snapshot} refresh={refresh} /></>}

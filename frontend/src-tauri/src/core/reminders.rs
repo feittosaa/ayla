@@ -13,6 +13,10 @@ pub enum Repeat {
     Daily,
     Weekly,
     Monthly,
+    /// Todo ano (aniversários).
+    Yearly,
+    /// Segunda a sexta.
+    Weekdays,
 }
 impl Repeat {
     pub fn as_str(self) -> &'static str {
@@ -21,6 +25,8 @@ impl Repeat {
             Repeat::Daily => "daily",
             Repeat::Weekly => "weekly",
             Repeat::Monthly => "monthly",
+            Repeat::Yearly => "yearly",
+            Repeat::Weekdays => "weekdays",
         }
     }
     pub fn parse(value: &str) -> Self {
@@ -28,6 +34,8 @@ impl Repeat {
             "daily" => Repeat::Daily,
             "weekly" => Repeat::Weekly,
             "monthly" => Repeat::Monthly,
+            "yearly" => Repeat::Yearly,
+            "weekdays" => Repeat::Weekdays,
             _ => Repeat::None,
         }
     }
@@ -170,6 +178,7 @@ pub fn parse(message: &str, now: NaiveDateTime) -> Option<Parsed> {
                 Some("dia" | "dias") if !words.get(i + 2).is_some_and(|w| w.parse::<u32>().is_ok()) => repeat = Repeat::Daily,
                 Some("semana" | "semanas") => repeat = Repeat::Weekly,
                 Some("mês" | "mes" | "meses") => repeat = Repeat::Monthly,
+                Some("ano" | "anos") => repeat = Repeat::Yearly,
                 Some(w) if weekday(w).is_some() => {
                     repeat = Repeat::Weekly;
                     weekly_on = weekday(w);
@@ -183,6 +192,14 @@ pub fn parse(message: &str, now: NaiveDateTime) -> Option<Parsed> {
             "diariamente" => { repeat = Repeat::Daily; used.push(i); }
             "semanalmente" => { repeat = Repeat::Weekly; used.push(i); }
             "mensalmente" => { repeat = Repeat::Monthly; used.push(i); }
+            "anualmente" => { repeat = Repeat::Yearly; used.push(i); }
+            // "nos dias úteis", "em dias úteis", "todos os dias úteis".
+            "úteis" | "uteis" if i > 0 && words[i - 1] == "dias" => {
+                repeat = Repeat::Weekdays;
+                used.extend([i - 1, i]);
+                if i > 1 && matches!(words[i - 2].as_str(), "nos" | "em" | "os") { used.push(i - 2); }
+                if i > 2 && words[i - 3] == "todos" { used.push(i - 3); }
+            }
             "hoje" => { day = Some(now.date()); used.push(i); }
             "amanhã" | "amanha" => {
                 let depois = i >= 2 && words[i - 1] == "de" && words[i - 2] == "depois";
@@ -263,6 +280,10 @@ pub fn parse(message: &str, now: NaiveDateTime) -> Option<Parsed> {
     } else {
         when
     };
+    let mut when = when;
+    while repeat == Repeat::Weekdays && matches!(when.weekday(), Weekday::Sat | Weekday::Sun) {
+        when += Duration::days(1);
+    }
     if when <= now {
         return None;
     }
@@ -307,10 +328,137 @@ pub fn next(when: NaiveDateTime, repeat: Repeat) -> NaiveDateTime {
         Repeat::Weekly => when + Duration::days(7),
         Repeat::Monthly => {
             let (y, m) = if when.month() == 12 { (when.year() + 1, 1) } else { (when.year(), when.month() + 1) };
-            let last = (28..=31).rev().find(|d| NaiveDate::from_ymd_opt(y, m, *d).is_some()).unwrap_or(28);
-            NaiveDate::from_ymd_opt(y, m, when.day().min(last)).unwrap_or(when.date()).and_time(when.time())
+            on_day(y, m, when.day()).and_time(when.time())
+        }
+        Repeat::Yearly => on_day(when.year() + 1, when.month(), when.day()).and_time(when.time()),
+        Repeat::Weekdays => {
+            let mut next = when + Duration::days(1);
+            while matches!(next.weekday(), Weekday::Sat | Weekday::Sun) {
+                next += Duration::days(1);
+            }
+            next
         }
     }
+}
+
+/// Dia `day` do mês, ou o último dia quando o mês é mais curto (31 → 30, 29/02 → 28/02).
+fn on_day(year: i32, month: u32, day: u32) -> NaiveDate {
+    (1..=day.min(31)).rev().find_map(|d| NaiveDate::from_ymd_opt(year, month, d)).unwrap_or_default()
+}
+
+/// Ocorrências de um item que começa em `start` e se repete, entre `from` e `to` (inclusive).
+/// Contadas a partir do início: um mensal do dia 31 cai no dia 30 em abril e volta ao 31 em maio.
+pub fn occurrences(start: NaiveDateTime, repeat: Repeat, from: NaiveDate, to: NaiveDate) -> Vec<NaiveDateTime> {
+    let first = from.max(start.date());
+    if first > to {
+        return Vec::new();
+    }
+    let (time, anchor) = (start.time(), start.date());
+    let mut out = Vec::new();
+    match repeat {
+        Repeat::None => out.push(start),
+        Repeat::Daily | Repeat::Weekly | Repeat::Weekdays => {
+            let mut day = first;
+            while day <= to {
+                let keep = match repeat {
+                    Repeat::Weekly => (day - anchor).num_days() % 7 == 0,
+                    Repeat::Weekdays => !matches!(day.weekday(), Weekday::Sat | Weekday::Sun),
+                    _ => true,
+                };
+                if keep {
+                    out.push(day.and_time(time));
+                }
+                day += Duration::days(1);
+            }
+        }
+        Repeat::Monthly => {
+            let (mut y, mut m) = (first.year(), first.month());
+            while (y, m) <= (to.year(), to.month()) {
+                out.push(on_day(y, m, anchor.day()).and_time(time));
+                (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+            }
+        }
+        Repeat::Yearly => {
+            for y in first.year()..=to.year() {
+                out.push(on_day(y, anchor.month(), anchor.day()).and_time(time));
+            }
+        }
+    }
+    out.retain(|when| when.date() >= first && when.date() <= to);
+    out
+}
+
+/// Maior antecedência de um aviso: 365 dias, em minutos.
+pub const MAX_ALERT_MINUTES: i64 = 365 * 24 * 60;
+
+/// Próximo aviso depois de `after`, com a ocorrência a que ele se refere. `alerts` são as
+/// antecedências em minutos (0 = na hora; 60 = uma hora antes; 1440 = um dia antes).
+pub fn next_alert(start: NaiveDateTime, repeat: Repeat, alerts: &[i64], after: NaiveDateTime) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    let longest = alerts.iter().copied().max()?;
+    // O aviso vem antes da ocorrência: basta olhar as ocorrências depois de `after`.
+    let from = after.date();
+    let to = from + Duration::days(370) + Duration::minutes(longest);
+    occurrences(start, repeat, from, to).into_iter()
+        .flat_map(|occurrence| alerts.iter().map(move |minutes| (occurrence - Duration::minutes(*minutes), occurrence)))
+        .filter(|(alert, _)| *alert > after)
+        .min()
+}
+
+/// "na hora", "30 minutos antes", "1 hora antes", "2 dias antes".
+pub fn alert_label(minutes: i64) -> String {
+    let plural = |n: i64, one: &str, many: &str| format!("{n} {} antes", if n == 1 { one } else { many });
+    match minutes {
+        0 => "na hora".into(),
+        m if m % 1440 == 0 => plural(m / 1440, "dia", "dias"),
+        m if m % 60 == 0 => plural(m / 60, "hora", "horas"),
+        m => plural(m, "minuto", "minutos"),
+    }
+}
+
+/// Agenda para a conversa local: as ocorrências de ontem até `days` dias à frente, com os avisos.
+/// `items` são (texto, início, repetição, dia todo, avisos).
+pub fn agenda_block(items: &[(String, NaiveDateTime, Repeat, bool, Vec<i64>)], now: NaiveDateTime, days: i64) -> String {
+    let (from, to) = (now.date() - Duration::days(1), now.date() + Duration::days(days));
+    let mut lines: Vec<(NaiveDateTime, String)> = Vec::new();
+    for (text, start, repeat, all_day, alerts) in items {
+        for when in occurrences(*start, *repeat, from, to) {
+            let day = describe(when, now);
+            let day = if *all_day { format!("{} (dia todo)", day.split(" às ").next().unwrap_or(&day)) } else { day };
+            let mut line = format!("- {day}: {}", text.replace('\n', " "));
+            if *repeat != Repeat::None { line.push_str(repeat_label(*repeat, *start)); }
+            if alerts.is_empty() {
+                line.push_str(" · sem aviso");
+            } else {
+                let mut sorted = alerts.clone();
+                sorted.sort_unstable_by(|a, b| b.cmp(a));
+                line.push_str(&format!(" · aviso {}", sorted.iter().map(|m| alert_label(*m)).collect::<Vec<_>>().join(" e ")));
+            }
+            if when < now { line.push_str(" · já passou"); }
+            lines.push((when, line));
+        }
+    }
+    lines.sort();
+    let shown: Vec<String> = lines.iter().take(80).map(|(_, l)| l.clone()).collect();
+    let header = format!(
+        "\n\nAgenda da pessoa (calendário da Athena, horário local; agora é {}, {}), de ontem até {} dias à frente. Use estes itens quando ela perguntar sobre agenda, compromissos, eventos, lembretes ou avisos; não invente itens. Para criar, ela pode pedir \"me lembra…\" ou usar o calendário da Athena.",
+        WEEKDAYS[now.weekday().num_days_from_monday() as usize], now.format("%d/%m/%Y %H:%M"), days
+    );
+    if shown.is_empty() {
+        format!("{header}\nNada marcado nesse período.")
+    } else {
+        let more = lines.len().saturating_sub(shown.len());
+        format!("{header}\n{}{}", shown.join("\n"), if more > 0 { format!("\n(e mais {more} itens)") } else { String::new() })
+    }
+}
+
+/// Primeira ocorrência depois de `after`, ou `None` se não há mais (os avisos usam `next_alert`).
+#[cfg(test)]
+fn next_after(start: NaiveDateTime, repeat: Repeat, after: NaiveDateTime) -> Option<NaiveDateTime> {
+    if repeat == Repeat::None {
+        return (start > after).then_some(start);
+    }
+    let from = after.date().max(start.date());
+    occurrences(start, repeat, from, from + Duration::days(370)).into_iter().find(|when| *when > after)
 }
 
 /// Horário local agora, sem segundos fracionados.
@@ -363,13 +511,15 @@ pub fn repeat_label(repeat: Repeat, when: NaiveDateTime) -> &'static str {
             Weekday::Sun => " (todo domingo)",
         },
         Repeat::Monthly => " (todo mês)",
+        Repeat::Yearly => " (todo ano)",
+        Repeat::Weekdays => " (dias úteis)",
     }
 }
 
 /// Resposta da Ayla ao criar o lembrete.
 pub fn confirmation(parsed: &Parsed, now: NaiveDateTime) -> String {
     format!(
-        "Combinado! Vou te lembrar de **{}** {}{}. Você vê, adia ou cancela em Configurações › Lembretes.",
+        "Combinado! Vou te lembrar de **{}** {}{}. Ele aparece no calendário da Athena; você adia ou cancela em Configurações › Lembretes.",
         parsed.text,
         describe(parsed.when, now),
         repeat_label(parsed.repeat, parsed.when)
@@ -379,7 +529,7 @@ pub fn confirmation(parsed: &Parsed, now: NaiveDateTime) -> String {
 /// Pedido ao modelo local quando as regras não entendem (JSON validado).
 pub fn model_request(message: &str, now: NaiveDateTime) -> Vec<serde_json::Value> {
     let system = format!(
-        "Você extrai lembretes. Agora é {} ({}). Devolva só JSON com: quando (AAAA-MM-DDTHH:MM, horário local, no futuro), repetir (none, daily, weekly ou monthly) e texto (o que lembrar, curto, sem a data). Sem hora citada, use 09:00.",
+        "Você extrai lembretes. Agora é {} ({}). Devolva só JSON com: quando (AAAA-MM-DDTHH:MM, horário local, no futuro), repetir (none, daily, weekly, monthly, yearly ou weekdays, este para dias úteis) e texto (o que lembrar, curto, sem a data). Sem hora citada, use 09:00.",
         now.format("%Y-%m-%dT%H:%M"),
         WEEKDAYS[now.weekday().num_days_from_monday() as usize]
     );
@@ -404,7 +554,7 @@ pub fn parse_subject(raw: &str) -> Option<String> {
 pub fn model_schema() -> serde_json::Value {
     serde_json::json!({"type":"object","properties":{
         "quando":{"type":"string","minLength":16,"maxLength":16},
-        "repetir":{"type":"string","enum":["none","daily","weekly","monthly"]},
+        "repetir":{"type":"string","enum":["none","daily","weekly","monthly","yearly","weekdays"]},
         "texto":{"type":"string","minLength":1,"maxLength":200}
     },"required":["quando","repetir","texto"]})
 }
@@ -428,6 +578,71 @@ mod tests {
     }
     fn parsed(message: &str) -> Parsed {
         parse(message, now()).unwrap_or_else(|| panic!("não entendeu: {message}"))
+    }
+
+    #[test]
+    fn ocorrencias_contam_a_partir_do_inicio() {
+        let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let start = at(2026, 1, 31, 15, 0);
+        let monthly: Vec<_> = occurrences(start, Repeat::Monthly, d(2026, 1, 1), d(2026, 5, 31)).iter().map(|w| w.date()).collect();
+        assert_eq!(monthly, [d(2026, 1, 31), d(2026, 2, 28), d(2026, 3, 31), d(2026, 4, 30), d(2026, 5, 31)], "sem escorregar para o 28");
+        let birthday = at(2024, 2, 29, 9, 0);
+        let yearly: Vec<_> = occurrences(birthday, Repeat::Yearly, d(2025, 1, 1), d(2028, 12, 31)).iter().map(|w| w.date()).collect();
+        assert_eq!(yearly, [d(2025, 2, 28), d(2026, 2, 28), d(2027, 2, 28), d(2028, 2, 29)]);
+        // Sexta 20/11 → dias úteis até quarta 25/11, sem sábado e domingo.
+        let weekdays = occurrences(now(), Repeat::Weekdays, d(2026, 11, 1), d(2026, 11, 25));
+        assert_eq!(weekdays.iter().map(|w| w.day()).collect::<Vec<_>>(), [20, 23, 24, 25]);
+        let weekly = occurrences(now(), Repeat::Weekly, d(2026, 11, 21), d(2026, 12, 10));
+        assert_eq!(weekly.iter().map(|w| w.day()).collect::<Vec<_>>(), [27, 4]);
+        assert!(occurrences(now(), Repeat::None, d(2026, 11, 21), d(2026, 11, 30)).is_empty(), "fora do período");
+        assert_eq!(occurrences(now(), Repeat::None, d(2026, 11, 20), d(2026, 11, 20)), [now()]);
+        assert_eq!(next_after(now(), Repeat::Weekdays, at(2026, 11, 20, 10, 0)), Some(at(2026, 11, 23, 10, 0)), "pula o fim de semana");
+        assert_eq!(next_after(start, Repeat::Monthly, at(2026, 2, 28, 15, 0)), Some(at(2026, 3, 31, 15, 0)));
+        assert_eq!(next_after(now(), Repeat::None, now()), None, "único já passou");
+    }
+
+    #[test]
+    fn avisos_antes_e_na_hora() {
+        let start = at(2026, 11, 25, 15, 0);
+        // Uma hora antes e na hora.
+        let alerts = [60, 0];
+        assert_eq!(next_alert(start, Repeat::None, &alerts, now()), Some((at(2026, 11, 25, 14, 0), start)));
+        assert_eq!(next_alert(start, Repeat::None, &alerts, at(2026, 11, 25, 14, 0)), Some((start, start)));
+        assert_eq!(next_alert(start, Repeat::None, &alerts, start), None, "acabou");
+        // Semanal com aviso de 2 dias antes: o da semana seguinte vem antes do "na hora" desta.
+        let weekly = next_alert(start, Repeat::Weekly, &[2880, 0], at(2026, 11, 25, 14, 59)).unwrap();
+        assert_eq!(weekly, (start, start));
+        assert_eq!(next_alert(start, Repeat::Weekly, &[2880, 0], start).unwrap(), (at(2026, 11, 30, 15, 0), at(2026, 12, 2, 15, 0)));
+        assert_eq!(next_alert(start, Repeat::None, &[], now()), None, "sem aviso");
+        assert_eq!([alert_label(0), alert_label(60), alert_label(180), alert_label(1440), alert_label(4320), alert_label(30)],
+            ["na hora", "1 hora antes", "3 horas antes", "1 dia antes", "3 dias antes", "30 minutos antes"]);
+    }
+
+    #[test]
+    fn agenda_para_a_conversa() {
+        let items = vec![
+            ("Dentista".to_string(), at(2026, 11, 21, 15, 0), Repeat::None, false, vec![60, 0]),
+            ("Academia".to_string(), at(2026, 11, 2, 7, 0), Repeat::Weekly, false, vec![]),
+            ("Aniversário da Ana".to_string(), at(2026, 11, 22, 9, 0), Repeat::Yearly, true, vec![1440]),
+            ("Velho".to_string(), at(2026, 10, 1, 9, 0), Repeat::None, false, vec![]),
+        ];
+        let block = agenda_block(&items, now(), 7);
+        assert!(block.contains("- amanhã às 15:00: Dentista · aviso 1 hora antes e na hora"), "{block}");
+        assert!(block.contains("- segunda, 23/11 às 07:00: Academia (toda segunda) · sem aviso"), "{block}");
+        assert!(block.contains("- domingo, 22/11 (dia todo): Aniversário da Ana (todo ano) · aviso 1 dia antes"), "{block}");
+        assert!(!block.contains("Velho"), "fora do período");
+        assert!(block.find("Dentista").unwrap() < block.find("Aniversário").unwrap(), "em ordem de data");
+        assert!(agenda_block(&[], now(), 7).contains("Nada marcado"));
+    }
+
+    #[test]
+    fn entende_ano_e_dias_uteis() {
+        assert_eq!(parsed("me lembra todo ano dia 5 do aniversário da Ana").repeat, Repeat::Yearly);
+        let q = parsed("me lembra nos dias úteis às 8h de beber água");
+        assert_eq!((q.repeat, q.when, q.text.as_str()), (Repeat::Weekdays, at(2026, 11, 23, 8, 0), "beber água"));
+        assert_eq!(next(at(2026, 11, 20, 8, 0), Repeat::Weekdays), at(2026, 11, 23, 8, 0));
+        let saturday = at(2026, 11, 21, 10, 0);
+        assert_eq!(parse("me lembra nos dias úteis às 20h de revisar", saturday).unwrap().when, at(2026, 11, 23, 20, 0), "sábado pula para segunda");
     }
 
     #[test]
@@ -485,7 +700,7 @@ mod tests {
     #[test]
     fn confirma_e_aceita_o_modelo() {
         let p = parsed("me lembra às 15h de ligar pro médico");
-        assert_eq!(confirmation(&p, now()), "Combinado! Vou te lembrar de **ligar pro médico** hoje às 15:00. Você vê, adia ou cancela em Configurações › Lembretes.");
+        assert_eq!(confirmation(&p, now()), "Combinado! Vou te lembrar de **ligar pro médico** hoje às 15:00. Ele aparece no calendário da Athena; você adia ou cancela em Configurações › Lembretes.");
         assert_eq!(describe(at(2026, 11, 24, 8, 0), now()), "terça, 24/11 às 08:00");
         let model = parse_model(r#"{"quando":"2026-11-21T18:00","repetir":"weekly","texto":"comprar pão"}"#, now()).unwrap();
         assert_eq!((model.when, model.repeat, model.text.as_str()), (at(2026, 11, 21, 18, 0), Repeat::Weekly, "comprar pão"));

@@ -23,7 +23,8 @@ export default function AthenaText({ tab, revision, onSaved, onStatus, onError, 
   useEffect(() => {
     if (dirty.current) return;
     let alive = true;
-    read().then(file => { if (alive && !dirty.current) apply(file); }, e => { if (alive) setFailed(errorText(e)); });
+    // Mesma versão que já está na tela: não reaplica (o cursor não pula).
+    read().then(file => { if (alive && !dirty.current && !(file.modified === stamp.current && file.content === latest.current)) apply(file); }, e => { if (alive) setFailed(errorText(e)); });
     return () => { alive = false; };
   }, [read, revision]);
 

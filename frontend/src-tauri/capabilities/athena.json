@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "athena",
+  "description": "Janela da Athena sem a barra do sistema: o header move, maximiza e fecha a janela",
+  "windows": ["athena"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-close"
+  ]
+}

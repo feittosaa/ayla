@@ -743,65 +743,6 @@ pub fn rename_folder(root: &Path, from: &str, to: &str) -> Result<(String, usize
     Ok((new, changed))
 }
 
-// Tags (#tag no texto e `tags:` no cabeçalho YAML, como o Obsidian).
-
-/// Tags de uma nota, sem `#`, em minúsculas, sem repetição. Ignora código, títulos e âncoras de links.
-pub fn tags(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |tag: &str| {
-        let tag = tag.trim().trim_start_matches('#').trim_matches(|c: char| c == '"' || c == '\'').to_lowercase();
-        if !tag.is_empty() && tag.chars().any(|c| !c.is_ascii_digit()) && !out.contains(&tag) {
-            out.push(tag);
-        }
-    };
-    let mut body = text;
-    // Cabeçalho YAML: "tags: [a, b]", "tags: a, b" ou lista "- a".
-    if let Some(rest) = text.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---") {
-            let yaml = &rest[..end];
-            let mut in_tags = false;
-            for line in yaml.lines() {
-                let trimmed = line.trim();
-                if let Some(value) = trimmed.strip_prefix("tags:").or_else(|| trimmed.strip_prefix("tag:")) {
-                    in_tags = value.trim().is_empty();
-                    for tag in value.trim().trim_matches(['[', ']']).split(',') {
-                        push(tag);
-                    }
-                } else if in_tags && trimmed.starts_with("- ") {
-                    push(&trimmed[2..]);
-                } else if !trimmed.is_empty() {
-                    in_tags = false;
-                }
-            }
-            body = &rest[end + 4..];
-        }
-    }
-    let mut in_code = false;
-    for line in body.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            continue;
-        }
-        let line: String = line.split('`').enumerate().filter(|(i, _)| i % 2 == 0).map(|(_, p)| p).collect::<Vec<_>>().join(" ");
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '#' && (i == 0 || chars[i - 1].is_whitespace()) {
-                let tag: String = chars[i + 1..].iter().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/')).collect();
-                if !tag.is_empty() {
-                    push(&tag);
-                    i += tag.chars().count();
-                }
-            }
-            i += 1;
-        }
-    }
-    out
-}
-
 // Anexos (![[foto.png]]): procurados pelo nome na raiz, como o Obsidian.
 
 pub const ATTACHMENT_IMAGES: &[&str] = &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "svg", "avif"];
@@ -1294,10 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn tags_e_anexos() {
-        assert_eq!(tags("---\ntags: [treino, saúde]\n---\n# Título\nTexto #Academia e #rpg/sessão, não #1 nem a#b.\n```\n#codigo\n```"), ["treino", "saúde", "academia", "rpg/sessão"]);
-        assert_eq!(tags("---\ntags:\n  - a\n  - b\n---\n"), ["a", "b"]);
-        assert!(tags("## Título\n[link](x#ancora) `#codigo`").is_empty());
+    fn anexos() {
         let root = temp();
         fs::create_dir_all(root.join("anexos")).unwrap();
         fs::write(root.join("anexos/Foto 1.png"), "x").unwrap();

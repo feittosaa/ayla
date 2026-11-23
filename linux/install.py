@@ -123,13 +123,18 @@ ayla_icon = chosen_icon(applications / "dev.feit.ayla.desktop", "dev.feit.ayla")
 launcher = exec_arg(exe)
 # A janela da Ayla se identifica como "ayla"; StartupWMClass liga a janela a esta entrada (ícone na barra).
 write(applications / "dev.feit.ayla.desktop", entry.format(icon=ayla_icon) + f"Name=Ayla\nComment=Assistente pessoal\nExec={launcher} --abrir ayla %F\nStartupWMClass=ayla\nMimeType={chat_types}\nCategories=Utility;\nKeywords=assistente;chat;\nActions=Quick;\n\n[Desktop Action Quick]\nName=Visão rápida\nExec={launcher} --quick\n", 0o644)
-# Iris e Athena só aparecem no "Abrir com" (fora do menu); nenhuma vira aplicativo padrão.
-for organ, name, comment, types in (("iris", "Iris", "Ver imagens, vídeos e PDFs na Ayla", media_types), ("athena", "Athena", "Ler e editar notas e textos na Ayla", text_types)):
+# Iris só aparece no "Abrir com". A Athena é também um bloco de notas com janela própria: fica no
+# menu e é o editor padrão de .txt e .md (decisão do usuário, 23/11/2026).
+athena_types = text_types + "text/x-log;text/csv;application/json;application/x-yaml;application/toml;text/x-python;text/x-rust;text/javascript;application/x-shellscript;text/x-csrc;text/x-chdr;text/css;text/html;application/xml;"
+for organ, name, comment, types, extra in (
+    ("iris", "Iris", "Ver imagens, vídeos e PDFs na Ayla", media_types, "NoDisplay=true\n"),
+    ("athena", "Athena", "Bloco de notas e editor de textos da Ayla", athena_types, "Categories=Utility;TextEditor;\nKeywords=texto;notas;editor;bloco de notas;\n"),
+):
     base = f"dev.feit.ayla.{organ}"
     organ_icon = chosen_icon(applications / f"{base}.desktop", base)
     if organ_icon == base:
         organ_icon = ayla_icon
-    write(applications / f"{base}.desktop", entry.format(icon=organ_icon) + f"Name={name}\nComment={comment}\nExec={launcher} --abrir {organ} %F\nMimeType={types}\nNoDisplay=true\n", 0o644)
+    write(applications / f"{base}.desktop", entry.format(icon=organ_icon) + f"Name={name}\nComment={comment}\nExec={launcher} --abrir {organ} %F\nMimeType={types}\n{extra}", 0o644)
 # Remove a entrada separada criada pelas versões anteriores do instalador.
 (applications / "dev.feit.ayla-quick.desktop").unlink(missing_ok=True)
 login = entry.format(icon=ayla_icon) + f"Name=Ayla em segundo plano\nExec={launcher} --background\nNoDisplay=true\n"
@@ -144,6 +149,8 @@ def refresh(command, *paths):
     if shutil.which(command[0]):
         subprocess.run([*command, *map(str, paths)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 refresh(["update-desktop-database", "-q"], applications)
+# Athena como editor padrão de textos (para voltar: xdg-mime default org.gnome.TextEditor.desktop text/plain).
+refresh(["xdg-mime", "default", "dev.feit.ayla.athena.desktop", "text/plain", "text/markdown", "text/x-markdown"])
 theme = icon.parents[2]
 if (theme / "icon-theme.cache").exists():
     refresh(["gtk-update-icon-cache", "-q", "-f", "-t"], theme)

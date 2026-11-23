@@ -1,0 +1,61 @@
+/* Calendário da Athena: ocupa a área das notas, com a barra de 44 px na cor da lateral. */
+.athena-calendar { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.athena-calendar > .app-error { margin: 12px 24px 0; }
+.calendar-bar { flex: none; display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 4px 8px; border-bottom: 1px solid var(--ayla-border-soft); background: var(--ayla-sidebar); }
+.calendar-title { margin: 0 4px; min-width: 150px; text-align: center; font-size: 16px; }
+.calendar-spacer { flex: 1; }
+.calendar-body { flex: 1; min-height: 0; display: flex; gap: 0; overflow: hidden; }
+
+.calendar-month { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: auto repeat(6, minmax(0, 1fr)); gap: 4px; padding: 10px 12px 12px; overflow: auto; }
+.calendar-weekday { padding: 2px 6px; font-size: 12px; color: var(--ayla-text-faint); text-transform: uppercase; letter-spacing: .04em; }
+.app-shell .calendar-day { min-height: 78px; display: flex; flex-direction: column; align-items: stretch; gap: 2px; padding: 5px 6px; text-align: left; border: 1px solid var(--ayla-border-soft); border-radius: 6px; background: var(--ayla-bg); color: var(--ayla-text); overflow: hidden; }
+.app-shell .calendar-day:hover { background: var(--ayla-hover); }
+.app-shell .calendar-day.outside { color: var(--ayla-text-faint); background: transparent; }
+.app-shell .calendar-day.selected { border-color: var(--ayla-accent); box-shadow: inset 0 0 0 1px var(--ayla-accent); }
+.calendar-number { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; }
+.calendar-number svg { color: var(--ayla-text-faint); }
+.calendar-day.today .calendar-number { color: var(--ayla-accent); }
+.calendar-day.today .calendar-number::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ayla-accent); }
+.calendar-chip { display: block; padding: 1px 5px; border-radius: 4px; font-size: 12px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: var(--ayla-hover); }
+.calendar-chip b { margin-right: 4px; font-weight: 600; }
+.calendar-chip.reminder { background: var(--ayla-accent-ring); }
+.calendar-chip.past { opacity: .55; }
+.calendar-more { font-size: 11px; color: var(--ayla-text-faint); padding-left: 4px; }
+
+.calendar-day-panel { flex: 0 0 300px; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-left: 1px solid var(--ayla-border-soft); overflow-y: auto; }
+.calendar-day-panel h3 { margin: 0; font-size: 16px; }
+.calendar-day-panel h3::first-letter { text-transform: uppercase; }
+.app-shell .calendar-note { display: flex; align-items: center; gap: 8px; justify-content: flex-start; }
+.calendar-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.calendar-items li { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--ayla-border-soft); }
+.calendar-items li.past { opacity: .6; }
+.calendar-items .row-actions { margin-left: auto; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.calendar-when { flex: none; width: 58px; font-size: 13px; color: var(--ayla-text-soft); padding-top: 2px; }
+.calendar-what { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.calendar-what small { color: var(--ayla-text-faint); font-size: 12px; }
+.calendar-add button { display: inline-flex; align-items: center; gap: 6px; }
+.calendar-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--ayla-border); border-radius: 8px; background: var(--ayla-panel); }
+.calendar-form h4 { margin: 0; font-size: 14px; }
+.calendar-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.calendar-form input:not([type=checkbox]), .calendar-form select { font: inherit; color: var(--ayla-text); background: var(--ayla-bg); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 6px 8px; color-scheme: inherit; }
+.calendar-form .calendar-check { flex-direction: row; align-items: center; gap: 8px; color: var(--ayla-text); }
+.calendar-check input { accent-color: var(--ayla-accent); width: 16px; height: 16px; }
+.calendar-row { display: flex; gap: 8px; }
+.calendar-row label { flex: 1; min-width: 0; }
+.calendar-alerts { min-width: 0; display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 8px 0 0; border: 0; border-top: 1px solid var(--ayla-border-soft); }
+.calendar-alerts legend { padding: 0 0 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.calendar-alert { display: flex; align-items: center; gap: 6px; }
+.calendar-alert select { flex: 1; min-width: 0; width: 100%; }
+.calendar-alert input { flex: none; width: 64px; }
+.app-shell .calendar-add-alert { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; }
+.calendar-alerts select, .calendar-alerts input { font: inherit; color: var(--ayla-text); background: var(--ayla-bg); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 6px 8px; }
+.calendar-hint { font-size: 12px; margin-top: auto; }
+
+@media (max-width: 900px) {
+  .calendar-body { flex-direction: column; overflow-y: auto; }
+  .calendar-month { overflow: visible; }
+  .calendar-day-panel { flex: none; border-left: 0; border-top: 1px solid var(--ayla-border-soft); }
+  .app-shell .calendar-day { min-height: 56px; }
+  .calendar-chip { display: none; }
+  .calendar-day .calendar-chip:first-of-type { display: block; }
+}

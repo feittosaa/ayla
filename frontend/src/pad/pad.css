@@ -1,0 +1,130 @@
+/* Athena como bloco de notas: janela própria, com fundo, superfícies, texto e fontes da Ayla. */
+.pad { height: 100vh; display: flex; flex-direction: column; background: var(--ayla-bg); color: var(--ayla-text); position: relative; }
+.pad button { font: inherit; color: inherit; cursor: pointer; }
+/* Header no estilo GNOME: é a barra de título da janela (arrastar move, clique duplo maximiza). */
+.pad-bar { flex: none; height: 47px; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: var(--ayla-sidebar, var(--ayla-panel)); border-bottom: 1px solid var(--ayla-border-soft); user-select: none; }
+.pad-button, .pad-icon { border: 0; background: transparent; border-radius: 6px; height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.pad-button { padding: 0 10px; font-weight: 700; }
+.pad-icon { width: 34px; }
+.pad-button:hover, .pad-icon:hover:not(:disabled), .pad-button[aria-expanded=true], .pad-icon[aria-expanded=true] { background: var(--ayla-hover); }
+.pad-icon:disabled { opacity: .5; cursor: default; }
+.pad-brand { flex: none; display: inline-grid; place-items: center; width: 32px; height: 34px; color: var(--ayla-accent); }
+.pad-brand > * { pointer-events: none; }
+.pad .brand-mark { display: inline-block; background: currentColor; -webkit-mask-size: contain; mask-size: contain; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: center; mask-position: center; }
+.pad-window-close { border: 0; width: 24px; height: 24px; margin: 0 2px 0 6px; border-radius: 50%; display: inline-grid; place-items: center; background: var(--ayla-hover); }
+.pad-window-close:hover { background: var(--ayla-hover-strong); }
+.pad-title { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; line-height: 1.25; cursor: default; }
+.pad-title > * { pointer-events: none; }
+.pad-title b, .pad-title small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pad-title b { font-size: 14px; }
+.pad-title small { font-size: 12px; color: var(--ayla-text-faint); }
+/* Abas dividem a largura toda da janela (como no Text Editor) e podem ser arrastadas. */
+.pad-tabs[hidden] { display: none; }
+.pad-tabs { flex: none; display: flex; gap: 4px; padding: 4px 8px; overflow-x: auto; scrollbar-width: thin; background: var(--ayla-sidebar, var(--ayla-panel)); border-bottom: 1px solid var(--ayla-border-soft); }
+.pad-tab { flex: 1 1 0; min-width: 110px; display: flex; align-items: center; border-radius: calc(8px * var(--ayla-round, 1)); color: var(--ayla-text-soft); user-select: none; touch-action: none; }
+.pad-tab.dragging { background: var(--ayla-selected); color: var(--ayla-text); box-shadow: 0 4px 14px rgb(0 0 0 / .25); position: relative; z-index: 1; cursor: grabbing; }
+.pad-tab[aria-current=page] { box-shadow: inset 0 -2px 0 var(--ayla-accent); background: var(--ayla-selected); color: var(--ayla-text); }
+.pad-tab:hover { background: var(--ayla-hover); }
+.pad-tab-name { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: none; padding: 6px 4px 6px 30px; text-align: left; }
+.pad-tab-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pad-tab-name kbd { display: none; }
+.pad-tab-close { border: 0; background: none; padding: 4px 6px; opacity: .55; border-radius: 6px; display: inline-flex; }
+.pad-tab-close:hover { opacity: 1; background: var(--ayla-hover-strong); }
+
+.pad-menu { position: absolute; top: 46px; right: 40px; max-width: calc(100vw - 16px); z-index: 20; min-width: 260px; max-height: calc(100vh - 70px); overflow-y: auto; padding: 6px; background: var(--ayla-panel); border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); box-shadow: 0 12px 32px rgb(0 0 0 / .28); display: flex; flex-direction: column; }
+.pad-menu-left { left: 8px; right: auto; min-width: 320px; }
+.pad-menu button { border: 0; background: none; text-align: left; padding: 7px 10px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.pad-menu button:hover:not(:disabled) { background: var(--ayla-hover); }
+.pad-menu button:disabled { opacity: .45; cursor: default; }
+.pad-menu-left .pad-recent { flex-direction: column; align-items: flex-start; gap: 2px; }
+.pad-menu-head { padding: 4px 10px 2px; font-size: 12px; color: var(--ayla-text-faint); text-transform: uppercase; letter-spacing: .04em; }
+.pad-recent b, .pad-recent small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pad-menu small, .pad-notes small { color: var(--ayla-text-faint); font-size: 12px; }
+.pad-menu kbd { color: var(--ayla-text-faint); font: 12px var(--ayla-font-main); }
+.pad-menu hr { border: 0; border-top: 1px solid var(--ayla-border-soft); margin: 4px 6px; }
+.pad-hint { color: var(--ayla-text-faint); padding: 8px 10px; font-size: 13px; }
+
+.pad-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; font-size: 14px; background: var(--ayla-panel); border-bottom: 1px solid var(--ayla-border-soft); }
+.pad-banner span { flex: 1; min-width: 200px; }
+.pad-banner.warn { background: color-mix(in srgb, var(--ayla-accent) 14%, var(--ayla-panel)); }
+.pad-banner.error { background: color-mix(in srgb, var(--ayla-error) 16%, var(--ayla-panel)); }
+.pad-banner button { border: 1px solid var(--ayla-border); background: var(--ayla-control, transparent); border-radius: 8px; padding: 4px 10px; }
+.pad-banner button.primary { background: var(--ayla-accent); color: var(--ayla-on-accent); border-color: transparent; }
+.pad-banner button.danger { background: var(--ayla-error); color: #fff; border-color: transparent; }
+
+.pad-editor { flex: 1; min-height: 0; overflow: hidden; }
+.pad-editor .cm-editor { height: 100%; background: var(--ayla-bg); color: var(--ayla-text); font-family: var(--pad-font); font-size: var(--pad-size); }
+.pad-editor .cm-editor.cm-focused { outline: none; }
+.pad-editor .cm-scroller { font-family: inherit; line-height: 1.5; position: relative; }
+.pad-editor .cm-content { padding: 14px 0; caret-color: var(--ayla-accent); }
+.pad-editor .cm-line { padding: 0 18px; }
+.pad-editor .cm-cursor { border-left-color: var(--ayla-accent); border-left-width: 2px; }
+.pad-editor .cm-selectionBackground, .pad-editor .cm-focused .cm-selectionBackground, .pad-editor ::selection { background: color-mix(in srgb, var(--ayla-accent) 30%, transparent) !important; }
+.pad-editor .cm-gutters { background: var(--ayla-bg); color: var(--ayla-text-faint); border-right: 1px solid var(--ayla-border-soft); }
+.pad-editor .cm-activeLine { background: var(--ayla-hover); }
+.pad-editor .cm-activeLineGutter { background: var(--ayla-hover); color: var(--ayla-text); }
+.pad-editor .cm-matchingBracket { background: color-mix(in srgb, var(--ayla-accent) 28%, transparent); outline: 1px solid color-mix(in srgb, var(--ayla-accent) 60%, transparent); }
+.pad-editor .cm-selectionMatch { background: color-mix(in srgb, var(--ayla-accent) 14%, transparent); }
+.pad-editor .cm-searchMatch { background: color-mix(in srgb, var(--ayla-accent) 25%, transparent); }
+.pad-editor .cm-searchMatch-selected { background: color-mix(in srgb, var(--ayla-accent) 50%, transparent); }
+.pad-editor .cm-highlightSpace { background-image: radial-gradient(circle at 50% 55%, var(--ayla-text-faint) 12%, transparent 15%); }
+.pad-editor .cm-highlightTab { background-image: linear-gradient(to right, transparent 20%, var(--ayla-text-faint) 20%, var(--ayla-text-faint) 80%, transparent 80%); background-size: 100% 1px; background-position: left 55%; background-repeat: no-repeat; }
+.pad-editor .cm-trailingSpace { background: color-mix(in srgb, var(--ayla-error) 25%, transparent); }
+.pad-margin-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ayla-border); pointer-events: none; min-height: 100%; }
+.pad-editor .cm-panels { background: var(--ayla-panel); color: var(--ayla-text); border-color: var(--ayla-border-soft); font-family: var(--ayla-font-main); font-size: 14px; }
+.pad-editor .cm-panel.cm-search, .pad-editor .cm-panel.cm-gotoLine { padding: 8px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pad-editor .cm-panel input[type=text], .pad-editor .cm-textfield { background: var(--ayla-bg); color: var(--ayla-text); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 4px 8px; font: inherit; }
+.pad-editor .cm-panel button, .pad-editor .cm-button { background: var(--ayla-control, var(--ayla-hover)); background-image: none; color: var(--ayla-text); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 3px 10px; font: inherit; }
+.pad-editor .cm-panel label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.pad-editor .cm-panel [name=close] { color: var(--ayla-text-soft); font-size: 18px; border: 0; background: none; }
+
+/* Destaque de sintaxe com as cores da Ayla (claro e escuro). */
+.pad-editor { --tok-keyword: #b452cd; --tok-string: #3a7d2c; --tok-number: #b5651d; --tok-comment: #7a7f87; --tok-type: #1f6fb2; --tok-fn: #8a5a00; --tok-prop: #2f6c8f; }
+:root[data-mode=escuro] .pad-editor { --tok-keyword: #d79bf5; --tok-string: #9ccc7a; --tok-number: #f2b37b; --tok-comment: #8b9099; --tok-type: #7cb8f2; --tok-fn: #f0cf7a; --tok-prop: #8fd0ea; }
+.pad-editor .tok-keyword, .pad-editor .tok-operator.tok-definition { color: var(--tok-keyword); }
+.pad-editor .tok-string, .pad-editor .tok-string2 { color: var(--tok-string); }
+.pad-editor .tok-number, .pad-editor .tok-bool, .pad-editor .tok-atom { color: var(--tok-number); }
+.pad-editor .tok-comment, .pad-editor .tok-meta { color: var(--tok-comment); font-style: italic; }
+.pad-editor .tok-typeName, .pad-editor .tok-className, .pad-editor .tok-namespace { color: var(--tok-type); }
+.pad-editor .tok-variableName.tok-definition, .pad-editor .tok-function { color: var(--tok-fn); }
+.pad-editor .tok-propertyName, .pad-editor .tok-attributeName { color: var(--tok-prop); }
+.pad-editor .tok-heading { color: var(--ayla-accent); font-weight: 700; }
+.pad-editor .tok-emphasis { font-style: italic; }
+.pad-editor .tok-strong { font-weight: 700; }
+.pad-editor .tok-link, .pad-editor .tok-url { color: var(--tok-type); text-decoration: underline; }
+.pad-editor .tok-strikethrough { text-decoration: line-through; }
+.pad-editor .tok-invalid { color: var(--ayla-error); }
+
+.pad-field select option { background: var(--ayla-panel); color: var(--ayla-text); }
+
+.pad-dialog-backdrop { position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .35); display: grid; place-items: center; padding: 20px; }
+.pad-dialog { width: min(520px, 100%); max-height: 100%; overflow-y: auto; background: var(--ayla-panel); border: 1px solid var(--ayla-border); border-radius: calc(14px * var(--ayla-round, 1)); padding: 16px 18px 20px; display: flex; flex-direction: column; gap: 6px; }
+/* Notas: mais larga e mais baixa; a lista rola dentro dela. */
+.pad-dialog-notes { width: min(680px, 100%); height: min(420px, 100%); overflow: hidden; }
+.pad-dialog-notes .pad-notes { flex: 1; min-height: 0; overflow-y: auto; }
+.pad-dialog-head { display: flex; align-items: center; justify-content: space-between; }
+.pad-dialog h2 { font-size: 17px; }
+.pad-dialog h3 { font-size: 13px; color: var(--ayla-text-soft); margin-top: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.pad-toggle, .pad-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; }
+.pad-toggle input { width: 18px; height: 18px; accent-color: var(--ayla-accent); }
+.pad-field input, .pad-field select, .pad-search { background: var(--ayla-bg); color: var(--ayla-text); border: 1px solid var(--ayla-border); border-radius: 8px; padding: 5px 8px; font: inherit; }
+.pad-field input { width: 90px; }
+.pad-search { width: 100%; margin: 6px 0; }
+.pad-notes { list-style: none; display: flex; flex-direction: column; }
+.pad-notes button { width: 100%; border: 0; background: none; text-align: left; padding: 7px 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 2px; }
+.pad-notes button:hover { background: var(--ayla-hover); }
+
+.pad-print { display: none; }
+@media print {
+  .pad > *:not(.pad-print) { display: none !important; }
+  .pad { height: auto; background: #fff; color: #000; }
+  .pad-print { display: block; white-space: pre-wrap; word-break: break-word; font: 11pt var(--ayla-font-mono); color: #000; }
+}
+
+.pad-info { right: 74px; min-width: 300px; gap: 4px; padding: 10px 12px; }
+.pad-info-pos { font-weight: 700; padding: 2px 0 6px; }
+.pad-info label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
+.pad-info select { background: var(--ayla-bg); color: var(--ayla-text); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 3px 6px; font: inherit; width: 170px; }
+.pad-info select option { background: var(--ayla-panel); color: var(--ayla-text); }
+.pad-zoom { display: flex; gap: 4px; padding: 2px 4px; }
+.pad .pad-zoom button { flex: 1; justify-content: center; border: 1px solid var(--ayla-border-soft); font-size: 15px; }
