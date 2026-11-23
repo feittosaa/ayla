@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorText, native } from '../services/Desktop';
-import { monetaPage, type OrganStatus } from '../services/Organ';
+import { monetaPage, postAppearance, type OrganStatus } from '../services/Organ';
 
 export function OrganIcon({ status, size = 26 }: { status: OrganStatus; size?: number }) {
   // Logo monocromático (SVG) na cor do texto, como as marcas da Ayla, Athena e Iris.
@@ -18,6 +18,12 @@ export function OrganSpace({ status, active, refresh, onOpenSettings }: { status
   // A página carrega invisível por baixo da espera e só aparece pronta, com a mesma entrada suave
   // dos outros espaços (sem o quadro em branco da primeira abertura).
   const [loaded, setLoaded] = useState(false);
+  const frame = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    const update = () => postAppearance(frame.current);
+    window.addEventListener('ayla-tema', update);
+    return () => window.removeEventListener('ayla-tema', update);
+  }, []);
   const waiting = <div className="organ-space organ-waiting">
     <OrganIcon status={status} size={48} />
     <h1>{status.name}</h1>
@@ -29,7 +35,7 @@ export function OrganSpace({ status, active, refresh, onOpenSettings }: { status
   // Uma vez carregada, a página continua montada: trocar de espaço não perde o que estava aberto.
   if (!ready) return waiting;
   return <div className="organ-space organ-stack">
-    <iframe className={loaded ? 'organ-frame shown' : 'organ-frame'} title={status.name} src={monetaPage} onLoad={() => requestAnimationFrame(() => requestAnimationFrame(() => setLoaded(true)))} />
+    <iframe ref={frame} className={loaded ? 'organ-frame shown' : 'organ-frame'} title={status.name} src={monetaPage} onLoad={() => { postAppearance(frame.current); requestAnimationFrame(() => requestAnimationFrame(() => setLoaded(true))); }} />
     {!loaded && waiting}
   </div>;
 }

@@ -1,7 +1,7 @@
 use super::{
     cloud::{self, Api, Login, Secret},
     files::{self, Kind},
-    athena, athena_git,
+    athena, athena_git, athena_lock, library,
     hardware,
     iris,
     media,
@@ -993,6 +993,10 @@ pub fn update_project(state: tauri::State<'_, Core>, id: String, name: String, d
 /// Apaga o projeto com conversas e memórias dele (a interface pede confirmação).
 #[tauri::command]
 pub fn delete_project(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    // Uma pasta protegida bloqueada não sai junto com o projeto: precisa ser aberta antes.
+    if let Some(folder) = locked_inside(&state.root.join("projetos-notas").join(&id)) {
+        return Err(format!("As notas do projeto têm \"{folder}\", protegido e bloqueado. Abra-o na Athena com a senha antes de apagar o projeto."));
+    }
     let db = state.store.lock().map_err(|_| "Dados ocupados")?;
     let copies = db.project_file_paths(&id).unwrap_or_default();
     let name = db.projects().unwrap_or_default().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_else(|| "Projeto".into());
@@ -1171,11 +1175,41 @@ pub async fn athena_tree(state: tauri::State<'_, Core>) -> Result<Value, String>
     let open: Vec<String> = prefs.vaults();
     let listed = tauri::async_runtime::spawn_blocking(move || {
         roots.into_iter().map(|root| {
-            let (folders, notes, files) = if root.path.is_dir() { (athena::folders(&root.path), athena::list(&root.path), athena::attachments(&root.path)) } else { (Vec::new(), Vec::new(), Vec::new()) };
+            let (mut folders, mut notes, mut files) = if root.path.is_dir() { (athena::folders(&root.path), athena::list(&root.path), athena::attachments(&root.path)) } else { (Vec::new(), Vec::new(), Vec::new()) };
+            let mut texts = if root.path.is_dir() { athena::texts(&root.path) } else { Vec::new() };
+            let mut locks = Vec::new();
+            for folder in athena_lock::protected_folders(&root.path) {
+                let dir = root.path.join(&folder);
+                let session = athena_lock::session(&dir);
+                locks.push(json!({"folder": folder, "unlocked": session.is_some(), "since": session.as_ref().map(|s| s.1), "recovery": athena_lock::has_recovery(&athena_lock::Target::Folder(dir.clone()))}));
+                // Desbloqueada: o conteúdo aparece na árvore da Athena (e só nela).
+                let Some((key, _)) = session else { continue };
+                for entry in athena_lock::entries(&dir, &key) {
+                    let path = format!("{folder}/{}", entry.path);
+                    let title = std::path::Path::new(&entry.path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    let note = athena::Note { path: path.clone(), title, modified: entry.modified, bytes: entry.bytes };
+                    if entry.kind == "folder" {
+                        folders.push(path);
+                    } else if path.to_lowercase().ends_with(".md") {
+                        notes.push(note);
+                    } else if athena::is_txt(std::path::Path::new(&path)) {
+                        texts.push(note);
+                    } else if athena::attachment_mime(std::path::Path::new(&path)).is_some() {
+                        files.push(note);
+                    }
+                }
+            }
+            // Arquivos protegidos sozinhos: aparecem com o nome e um cadeado; abertos, como notas.
+            let files_locked: Vec<Value> = athena_lock::protected_files(&root.path).into_iter().filter_map(|path| {
+                let target = athena_lock::protected_file_of(&root.path, &path)?;
+                let session = athena_lock::session(target.path());
+                Some(json!({"path": path, "unlocked": session.is_some(), "since": session.map(|s| s.1), "recovery": athena_lock::has_recovery(&target)}))
+            }).collect();
             json!({
+                "lockedFiles": files_locked,
                 "id": root.id, "kind": root.kind, "name": root.name, "path": root.path.to_string_lossy(), "available": root.available,
                 "obsidian": root.path.join(".obsidian").is_dir(), "git": athena_git::is_repo(&root.path),
-                "folders": folders, "notes": notes, "files": files,
+                "folders": folders, "notes": notes, "files": files, "texts": texts, "protected": locks, "bannerHeight": athena::make_md_banner_height(&root.path),
             })
         }).collect::<Vec<_>>()
     }).await.map_err(|_| "Falha ao ler as notas")?;
@@ -1225,6 +1259,18 @@ pub async fn athena_pick_folder(app: tauri::AppHandle) -> Result<Option<String>,
 #[tauri::command]
 pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: String) -> Result<Value, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    if let Some(opened) = open_file(&dir, &path) {
+        let (target, key) = opened?;
+        let bytes = tauri::async_runtime::spawn_blocking(move || athena_lock::file_read(&target, &key).map(|b| (b, athena_lock::file_modified(&target))))
+            .await.map_err(|_| "Falha ao ler a nota")??;
+        return Ok(json!({"content": String::from_utf8_lossy(&bytes.0), "modified": bytes.1}));
+    }
+    if let Some(place) = protected(&dir, &path) {
+        let key = unlocked(&place)?;
+        let (bytes, entry) = tauri::async_runtime::spawn_blocking(move || athena_lock::read(&place.dir, &key, &place.inner))
+            .await.map_err(|_| "Falha ao ler a nota")??;
+        return Ok(json!({"content": String::from_utf8_lossy(&bytes), "modified": entry.modified}));
+    }
     let (content, modified) = athena::read(&dir, &path)?;
     Ok(json!({"content": content, "modified": modified}))
 }
@@ -1233,6 +1279,17 @@ pub async fn athena_read(state: tauri::State<'_, Core>, root: String, path: Stri
 #[tauri::command]
 pub async fn athena_write(state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: Option<i64>) -> Result<i64, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    if let Some(opened) = open_file(&dir, &path) {
+        let (target, key) = opened?;
+        return tauri::async_runtime::spawn_blocking(move || athena_lock::file_write(&target, &key, content.as_bytes(), expected))
+            .await.map_err(|_| "Falha ao salvar a nota")?;
+    }
+    if let Some(place) = protected(&dir, &path) {
+        let key = unlocked(&place)?;
+        protected_note(&place.inner)?;
+        return tauri::async_runtime::spawn_blocking(move || athena_lock::write(&place.dir, &key, &place.inner, content.as_bytes(), expected).map(|e| e.modified))
+            .await.map_err(|_| "Falha ao salvar a nota")?;
+    }
     athena::write(&dir, &path, &content, expected)
 }
 
@@ -1245,6 +1302,9 @@ pub async fn athena_paste_image(app: tauri::AppHandle, state: tauri::State<'_, C
             return Err("A imagem passa de 15 MB".into());
         }
         let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Imagem inválida")?;
+        if let Some(place) = protected(&dir, &path) {
+            return protected_paste(&place, &before, &after, expected, &bytes);
+        }
         athena::paste_image(&dir, &path, &before, &after, expected, &bytes)
     }).await.map_err(|_| "Falha ao colar a imagem")??;
     let _ = app.emit("notes-updated", json!({"root": root}));
@@ -1252,28 +1312,344 @@ pub async fn athena_paste_image(app: tauri::AppHandle, state: tauri::State<'_, C
 }
 
 #[tauri::command]
-pub async fn athena_add_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64) -> Result<Option<Value>, String> {
-    use std::io::Read;
+pub async fn athena_set_banner(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, content: String, expected: i64, image: String) -> Result<Value, String> {
     use tauri::Emitter;
-    use tauri_plugin_dialog::DialogExt;
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (content, modified) = tauri::async_runtime::spawn_blocking(move || match protected(&dir, &path) {
+        Some(place) => protected_banner(&dir, &place, &content, expected, &image),
+        None => athena::set_banner(&dir, &path, &content, expected, &image),
+    })
+        .await.map_err(|_| "Falha ao definir o banner")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(json!({"content": content, "modified": modified}))
+}
+
+/// Importa para a pasta da raiz arquivos `.txt`/`.md` escolhidos, ou uma pasta inteira (com as
+/// subpastas), como notas `.md`. Os originais ficam onde estão.
+#[tauri::command]
+pub async fn athena_import(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, folder: String, whole_folder: bool) -> Result<Value, String> {
+    use tauri::Emitter;
     let dir = state.athena_path(&state.prefs()?, &root)?;
     let picker = app.clone();
-    let selected = crate::desktop::panel_dialog(&app, move || {
-        picker.dialog().file().add_filter("Imagens", &["png", "jpg", "jpeg", "jfif", "gif", "webp", "bmp", "avif"])
-            .blocking_pick_file().and_then(|file| file.into_path().ok())
-    }).await?;
-    let Some(selected) = selected else { return Ok(None) };
-    let (content, modified) = tauri::async_runtime::spawn_blocking(move || {
-        let file = fs::File::open(selected).map_err(|_| "Não foi possível abrir a imagem")?;
-        if !file.metadata().map_err(|_| "Não foi possível ler a imagem")?.is_file() {
-            return Err("Selecione um arquivo de imagem".to_string());
+    let chosen: Vec<PathBuf> = crate::desktop::panel_dialog(&app, move || {
+        let dialog = picker.dialog().file();
+        if whole_folder {
+            dialog.blocking_pick_folder().and_then(|p| p.into_path().ok()).into_iter().collect()
+        } else {
+            dialog.add_filter("Notas e textos", &["md", "txt"]).blocking_pick_files()
+                .map(|files| files.into_iter().filter_map(|f| f.into_path().ok()).collect()).unwrap_or_default()
         }
-        let mut bytes = Vec::new();
-        file.take(athena::MAX_ATTACHMENT + 1).read_to_end(&mut bytes).map_err(|_| "Não foi possível ler a imagem")?;
-        athena::add_banner(&dir, &path, &content, expected, &bytes)
-    }).await.map_err(|_| "Falha ao adicionar o banner")??;
+    }).await?;
+    if chosen.is_empty() {
+        return Ok(json!({"imported": 0, "skipped": 0, "cancelled": true}));
+    }
+    let (imported, skipped) = tauri::async_runtime::spawn_blocking(move || {
+        let (notes, skipped) = athena::collect_imports(&chosen);
+        let imported = match protected(&dir, &folder) {
+            None => athena::import_into(&dir, &folder, &notes)?,
+            Some(place) => {
+                let key = unlocked(&place)?;
+                let mut taken: std::collections::HashSet<String> = athena_lock::entries(&place.dir, &key).into_iter().map(|e| e.path.to_lowercase()).collect();
+                for (relative, content) in &notes {
+                    let base = if place.inner.is_empty() { relative.clone() } else { format!("{}/{relative}", place.inner) };
+                    let mut target = format!("{base}.md");
+                    let mut n = 2;
+                    while taken.contains(&target.to_lowercase()) {
+                        target = format!("{base} {n}.md");
+                        n += 1;
+                    }
+                    athena_lock::write(&place.dir, &key, &target, content.as_bytes(), None)?;
+                    taken.insert(target.to_lowercase());
+                }
+                notes.len()
+            }
+        };
+        Ok::<_, String>((imported, skipped))
+    }).await.map_err(|_| "Falha ao importar")??;
     let _ = app.emit("notes-updated", json!({"root": root}));
-    Ok(Some(json!({"content": content, "modified": modified})))
+    Ok(json!({"imported": imported, "skipped": skipped}))
+}
+
+// ---- Biblioteca da Athena (livros e mangás) ----
+
+/// Fonte da Biblioteca: a pasta de importados da Ayla ou uma pasta conectada (lida no lugar).
+struct LibrarySource {
+    id: String,
+    name: String,
+    path: PathBuf,
+    imported: bool,
+}
+
+impl Core {
+    fn library_sources(&self, prefs: &Preferences) -> Vec<LibrarySource> {
+        use sha2::{Digest, Sha256};
+        let mut out = vec![LibrarySource { id: "ayla".into(), name: "Importados".into(), path: self.root.join(library::IMPORTED), imported: true }];
+        for folder in &prefs.library_folders {
+            let digest = format!("{:x}", Sha256::digest(folder.as_os_str().as_encoded_bytes()));
+            let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| folder.to_string_lossy().to_string());
+            out.push(LibrarySource { id: format!("pasta:{}", &digest[..16]), name, path: folder.clone(), imported: false });
+        }
+        out
+    }
+    fn reading_file(&self) -> PathBuf {
+        self.root.join("leitura.json")
+    }
+}
+
+/// Livros de todas as fontes e o progresso de leitura.
+#[tauri::command]
+pub async fn library_list(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    let sources = state.library_sources(&state.prefs()?);
+    let file = state.reading_file();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut reading = library::load_reading(&file);
+        let listed: Vec<Value> = sources.into_iter().map(|source| {
+            let available = source.path.is_dir();
+            let mut books = if available { library::scan(&source.path) } else { Vec::new() };
+            let mut folders = if available && source.imported { library::folders(&source.path) } else { Vec::new() };
+            let mut locks = Vec::new();
+            if available && source.imported {
+                // Itens protegidos dos importados: bloqueados, só o nome (das pastas e dos arquivos
+                // sozinhos); abertos, os livros aparecem e o progresso volta para o caminho deles.
+                let mut opened = Vec::new();
+                for folder in athena_lock::protected_folders(&source.path) {
+                    let dir = source.path.join(&folder);
+                    let target = athena_lock::Target::Folder(dir.clone());
+                    let session = athena_lock::session(&dir);
+                    locks.push(json!({"path": folder, "kind": "folder", "unlocked": session.is_some(), "since": session.as_ref().map(|s| s.1), "recovery": athena_lock::has_recovery(&target)}));
+                    let Some((key, _)) = session else { continue };
+                    for entry in athena_lock::entries(&dir, &key) {
+                        let path = format!("{folder}/{}", entry.path);
+                        if entry.kind == "folder" { folders.push(path); }
+                        else if let Some(book) = library::book_at(&path, entry.bytes, entry.modified) { opened.push(book); }
+                    }
+                }
+                for path in athena_lock::protected_files(&source.path).into_iter().filter(|p| library::kind_of(std::path::Path::new(p)).is_some()) {
+                    let Some(target) = athena_lock::protected_file_of(&source.path, &path) else { continue };
+                    let session = athena_lock::session(target.path());
+                    locks.push(json!({"path": path, "kind": "file", "unlocked": session.is_some(), "since": session.as_ref().map(|s| s.1), "recovery": athena_lock::has_recovery(&target)}));
+                    if session.is_some() {
+                        let bytes = fs::metadata(target.path()).map(|m| m.len()).unwrap_or(0);
+                        if let Some(book) = library::book_at(&path, bytes, athena_lock::file_modified(&target)) { opened.push(book); }
+                    }
+                }
+                for book in &opened {
+                    if let Some(progress) = reading.books.get(&protected_progress_key(&source.id, &book.path)).cloned() {
+                        reading.books.insert(library::key(&source.id, &book.path), progress);
+                    }
+                }
+                books.extend(opened);
+                books.sort_by(|a, b| library::natural(&a.series, &b.series).then_with(|| library::natural(&a.path, &b.path)));
+                folders.sort_by(|a, b| library::natural(a, b));
+            }
+            json!({"id": source.id, "name": source.name, "path": source.path.to_string_lossy(), "imported": source.imported,
+                "available": available, "books": books, "folders": folders, "locks": locks})
+        }).collect();
+        // Os nomes dos protegidos não aparecem nas chaves guardadas do progresso.
+        reading.books.retain(|key, _| !key.starts_with("protegido:"));
+        json!({"sources": listed, "reading": reading})
+    }).await.map_err(|_| "Falha ao ler a Biblioteca".into())
+}
+
+/// Conecta uma pasta de livros ou mangás (ex.: a do MAD). Nada é copiado.
+#[tauri::command]
+pub async fn library_add_folder(app: tauri::AppHandle, state: tauri::State<'_, Core>) -> Result<Option<String>, String> {
+    let Some(chosen) = athena_pick_folder(app).await? else { return Ok(None) };
+    let folder = fs::canonicalize(&chosen).map_err(|_| "Pasta indisponível")?;
+    if folder.starts_with(&state.root) {
+        return Err("Essa pasta já é da Ayla".into());
+    }
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler a configuração")?;
+    if !prefs.library_folders.contains(&folder) {
+        prefs.library_folders.push(folder.clone());
+    }
+    store.save(&prefs).map_err(|_| "Não foi possível salvar a pasta")?;
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
+/// Desconecta a pasta (os arquivos e o progresso ficam).
+#[tauri::command]
+pub fn library_remove_folder(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler a configuração")?;
+    let Some(path) = state.library_sources(&prefs).into_iter().find(|s| s.id == id && !s.imported).map(|s| s.path) else {
+        return Err("Pasta não encontrada".into());
+    };
+    prefs.library_folders.retain(|p| *p != path);
+    store.save(&prefs).map_err(|_| "Não foi possível salvar".into())
+}
+
+/// Importa (copia) livros `.epub`/`.cbz`, escolhidos ou de uma pasta inteira, para os Importados.
+#[tauri::command]
+pub async fn library_import(app: tauri::AppHandle, state: tauri::State<'_, Core>, whole_folder: bool) -> Result<Value, String> {
+    let picker = app.clone();
+    let chosen: Vec<PathBuf> = crate::desktop::panel_dialog(&app, move || {
+        let dialog = picker.dialog().file();
+        if whole_folder {
+            dialog.blocking_pick_folder().and_then(|p| p.into_path().ok()).into_iter().collect()
+        } else {
+            dialog.add_filter("Livros e mangás", &library::KINDS).blocking_pick_files()
+                .map(|files| files.into_iter().filter_map(|f| f.into_path().ok()).collect()).unwrap_or_default()
+        }
+    }).await?;
+    if chosen.is_empty() {
+        return Ok(json!({"imported": 0, "skipped": 0, "cancelled": true}));
+    }
+    let target = state.root.join(library::IMPORTED);
+    let (imported, skipped) = tauri::async_runtime::spawn_blocking(move || library::import(&target, &chosen))
+        .await.map_err(|_| "Falha ao importar")??;
+    Ok(json!({"imported": imported, "skipped": skipped}))
+}
+
+/// Guarda onde a leitura parou.
+#[tauri::command]
+pub fn library_progress(state: tauri::State<'_, Core>, source: String, path: String, position: String, fraction: f64, done: bool) -> Result<(), String> {
+    library::safe_book(&path).ok_or("Livro inválido")?;
+    if position.len() > 2048 || !fraction.is_finite() {
+        return Err("Progresso inválido".into());
+    }
+    let stored = progress_key(&state, &source, &path);
+    library::update_reading(&state.reading_file(), |reading| {
+        let entry = reading.books.entry(stored).or_default();
+        // Uma vez terminado, o livro continua marcado como lido mesmo se for relido.
+        *entry = library::Progress { position, fraction: fraction.clamp(0.0, 1.0), done: done || entry.done, at: store::now() };
+    }).map(|_| ())
+}
+
+/// Modo de leitura de uma série (lembrado para os próximos capítulos).
+#[tauri::command]
+pub fn library_mode(state: tauri::State<'_, Core>, source: String, series: String, mode: String) -> Result<(), String> {
+    if !["rtl", "ltr", "double", "vertical"].contains(&mode.as_str()) || series.len() > 2048 {
+        return Err("Modo inválido".into());
+    }
+    library::update_reading(&state.reading_file(), |reading| { reading.modes.insert(library::key(&source, &series), mode); }).map(|_| ())
+}
+
+/// Nova pasta nos importados (as pastas conectadas não são alteradas pela Athena).
+#[tauri::command]
+pub fn library_mkdir(state: tauri::State<'_, Core>, parent: String, name: String) -> Result<String, String> {
+    let root = state.root.join(library::IMPORTED);
+    fs::create_dir_all(&root).map_err(|_| "Não foi possível criar a Biblioteca")?;
+    if !parent.is_empty() && protected(&root, &parent).is_some() {
+        return Err("Pastas protegidas ainda não recebem pastas novas pela Biblioteca".into());
+    }
+    library::mkdir(&root, &parent, &name)
+}
+
+/// Move um livro importado para outra pasta dos importados (arrastar na Biblioteca).
+#[tauri::command]
+pub fn library_move(state: tauri::State<'_, Core>, path: String, folder: String) -> Result<String, String> {
+    let root = state.root.join(library::IMPORTED);
+    if protected(&root, &path).is_some() || protected(&root, &folder).is_some() || athena_lock::protected_file_of(&root, &path).is_some() {
+        return Err("Livros protegidos ainda não são movidos pela Biblioteca".into());
+    }
+    let relative = library::safe_book(&path).ok_or("Livro inválido")?;
+    let name = relative.file_name().and_then(|name| name.to_str()).ok_or("Livro inválido")?;
+    let destination = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+    if athena_lock::protected_file_of(&root, &destination).is_some() {
+        return Err("Já existe um livro protegido com esse nome nessa pasta".into());
+    }
+    library::move_book(&root, &state.reading_file(), "ayla", &path, &folder)
+}
+
+/// Apaga livros escolhidos na Biblioteca: vão para a lixeira do sistema (recuperáveis) e o
+/// progresso deles é esquecido. Vale para os importados e para as pastas conectadas.
+#[tauri::command]
+pub async fn library_trash(state: tauri::State<'_, Core>, source: String, paths: Vec<String>) -> Result<usize, String> {
+    let base = state.library_sources(&state.prefs()?).into_iter().find(|s| s.id == source).map(|s| s.path).ok_or("Fonte não encontrada")?;
+    let file = state.reading_file();
+    tauri::async_runtime::spawn_blocking(move || {
+        let plain = base.clone();
+        let base = fs::canonicalize(&base).map_err(|_| "Pasta indisponível")?;
+        let mut gone = Vec::new();
+        for path in &paths {
+            // Protegidos só saem abertos com a senha, e vão para a lixeira ainda cifrados (pelo
+            // mesmo caminho das sessões abertas).
+            if let Some(place) = protected(&plain, path) {
+                let key = unlocked(&place)?;
+                athena_lock::trash(&place.dir, &key, &place.inner, &plain.join(".trash"))?;
+                gone.push(path.clone());
+                continue;
+            }
+            if let Some(target) = athena_lock::protected_file_of(&plain, path) {
+                athena_lock::session(target.path()).ok_or_else(|| format!("{path} está protegido e bloqueado"))?;
+                trash_image(target.path()).map_err(|_| format!("Não foi possível mover {path} para a lixeira do sistema"))?;
+                athena_lock::end_session(target.path());
+                gone.push(path.clone());
+                continue;
+            }
+            let relative = library::safe_book(path).ok_or("Livro inválido")?;
+            // Só arquivos de fato dentro da fonte (nada fora dela por link simbólico).
+            let target = fs::canonicalize(base.join(&relative)).map_err(|_| format!("{path} não foi encontrado"))?;
+            if !target.starts_with(&base) || !target.is_file() {
+                return Err(format!("{path} não foi encontrado"));
+            }
+            trash_image(&target).map_err(|_| format!("Não foi possível mover {path} para a lixeira do sistema"))?;
+            gone.push(path.clone());
+        }
+        let keys: Vec<String> = gone.iter().flat_map(|p| [library::key(&source, p), protected_progress_key(&source, p)]).collect();
+        library::mark_keys(&file, &keys, false)?;
+        Ok(gone.len())
+    }).await.map_err(|_| "Falha ao apagar".to_string())?
+}
+
+/// Marca vários livros de uma fonte como lidos ou não lidos (seleção múltipla da Biblioteca).
+#[tauri::command]
+pub fn library_mark(state: tauri::State<'_, Core>, source: String, paths: Vec<String>, done: bool) -> Result<(), String> {
+    if paths.len() > 20_000 || paths.iter().any(|p| library::safe_book(p).is_none()) {
+        return Err("Livro inválido".into());
+    }
+    let keys: Vec<String> = paths.iter().map(|path| progress_key(&state, &source, path)).collect();
+    library::mark_keys(&state.reading_file(), &keys, done)
+}
+
+/// Chave do progresso guardada para um livro protegido: sem o nome (só um resumo do caminho).
+fn protected_progress_key(source: &str, path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("protegido:{:x}", Sha256::digest(library::key(source, path).as_bytes()))
+}
+
+/// Chave do progresso de um livro: a comum ou, se estiver protegido nos importados, a resumida.
+fn progress_key(state: &Core, source: &str, path: &str) -> String {
+    if source == "ayla" {
+        let root = state.root.join(library::IMPORTED);
+        if protected(&root, path).is_some() || athena_lock::protected_file_of(&root, path).is_some() {
+            return protected_progress_key(source, path);
+        }
+    }
+    library::key(source, path)
+}
+
+/// `biblioteca-file://localhost/<fonte>/<livro>`: o arquivo do livro, por trechos.
+pub fn library_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let trimmed = request.uri().path().trim_start_matches('/');
+    let Some((source, path)) = trimmed.split_once('/') else { return not_found() };
+    let (Some(source), Some(path)) = (athena::percent_decode(source), athena::percent_decode(path)) else { return not_found() };
+    let Ok(prefs) = state.prefs() else { return not_found() };
+    let Some(base) = state.library_sources(&prefs).into_iter().find(|s| s.id == source).map(|s| s.path) else { return not_found() };
+    let Some(relative) = library::safe_book(&path) else { return not_found() };
+    let range = request.headers().get(tauri::http::header::RANGE).and_then(|v| v.to_str().ok());
+    let mime = if library::kind_of(&relative) == Some("epub") { "application/epub+zip" } else { "application/vnd.comicbook+zip" };
+    // Protegidos (pasta ou arquivo sozinho) saem decifrados da memória, sem cópia nem cache.
+    if let Some(place) = protected(&base, &path) {
+        return match unlocked(&place).and_then(|key| athena_lock::read(&place.dir, &key, &place.inner)) {
+            Ok((bytes, _)) => media::serve_bytes(&bytes, mime, range),
+            Err(_) => not_found(),
+        };
+    }
+    if let Some(target) = athena_lock::protected_file_of(&base, &path) {
+        return match athena_lock::session(target.path()).ok_or(()).and_then(|(key, _)| athena_lock::file_read(&target, &key).map_err(|_| ())) {
+            Ok(bytes) => media::serve_bytes(&bytes, mime, range),
+            Err(_) => not_found(),
+        };
+    }
+    // Só arquivos que estão de fato dentro da fonte (links simbólicos para fora não valem).
+    let (Ok(base), Ok(file)) = (fs::canonicalize(&base), fs::canonicalize(base.join(&relative))) else { return not_found() };
+    if !file.starts_with(&base) || !file.is_file() {
+        return not_found();
+    }
+    media::serve(&file, mime, range)
 }
 
 /// Nota nova numa pasta da raiz (vazia = raiz).
@@ -1283,13 +1659,35 @@ pub async fn athena_create(state: tauri::State<'_, Core>, root: String, folder: 
     let title = athena::file_name(&title);
     // Nota nova pelo botão: vazia, como no Obsidian (o título é o nome do arquivo).
     let content = if empty.unwrap_or(false) { String::new() } else { format!("# {title}\n\n") };
-    athena::create_in(&dir, folder.as_deref().unwrap_or(""), &title, &content)
+    let folder = folder.unwrap_or_default();
+    if let Some(place) = protected(&dir, &folder) {
+        let key = unlocked(&place)?;
+        let taken: Vec<String> = athena_lock::entries(&place.dir, &key).into_iter().map(|e| e.path.to_lowercase()).collect();
+        let inside = |name: &str| if place.inner.is_empty() { name.to_string() } else { format!("{}/{name}", place.inner) };
+        let mut inner = inside(&format!("{title}.md"));
+        let mut n = 2;
+        while taken.contains(&inner.to_lowercase()) {
+            inner = inside(&format!("{title} {n}.md"));
+            n += 1;
+        }
+        athena_lock::write(&place.dir, &key, &inner, content.as_bytes(), None)?;
+        return Ok(format!("{}/{inner}", place.folder));
+    }
+    athena::create_in(&dir, &folder, &title, &content)
 }
 
 #[tauri::command]
 pub async fn athena_mkdir(state: tauri::State<'_, Core>, root: String, parent: Option<String>, name: String) -> Result<String, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
-    athena::mkdir(&dir, parent.as_deref().unwrap_or(""), &name)
+    let parent = parent.unwrap_or_default();
+    if let Some(place) = protected(&dir, &parent) {
+        let key = unlocked(&place)?;
+        let name = athena::file_name(&name);
+        let inner = if place.inner.is_empty() { name } else { format!("{}/{name}", place.inner) };
+        athena_lock::add_folder(&place.dir, &key, &inner)?;
+        return Ok(format!("{}/{inner}", place.folder));
+    }
+    athena::mkdir(&dir, &parent, &name)
 }
 
 /// Nota de hoje (AAAA-MM-DD.md) na raiz indicada, criada se ainda não existir.
@@ -1303,6 +1701,15 @@ pub async fn athena_daily(state: tauri::State<'_, Core>, root: String) -> Result
 #[tauri::command]
 pub async fn athena_trash(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    if let Some(opened) = open_file(&dir, &path) {
+        // Aberto com a senha, vai para a lixeira ainda cifrado.
+        let (target, _) = opened?;
+        return trash_protected_file(&dir, &target);
+    }
+    if let Some(place) = protected(&dir, &path) {
+        let key = unlocked(&place)?;
+        return athena_lock::trash(&place.dir, &key, &place.inner, &dir.join(".trash"));
+    }
     athena::trash(&dir, &path)
 }
 
@@ -1310,34 +1717,118 @@ pub async fn athena_trash(state: tauri::State<'_, Core>, root: String, path: Str
 #[tauri::command]
 pub async fn athena_rename(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    let to = if to.to_lowercase().ends_with(".md") { to } else { format!("{to}.md") };
+    if let Some(opened) = open_file(&dir, &path) {
+        let (target, key) = opened?;
+        let new = move_protected_text(&dir, &target, key, &to)?;
+        return Ok(json!({"path": new, "relinked": 0}));
+    }
+    if athena_lock::protected_file_of(&dir, &to).is_some() {
+        return Err("Já existe uma nota protegida com esse nome nessa pasta".into());
+    }
+    if protected(&dir, &path).is_some() || protected(&dir, &to).is_some() {
+        let name = std::path::Path::new(&to).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        if athena::file_name(&name) != name {
+            return Err("O nome não pode ter / \\ : * ? \" < > | # ^ [ ]".into());
+        }
+        let new = tauri::async_runtime::spawn_blocking(move || move_across(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+        return Ok(json!({"path": new, "relinked": 0}));
+    }
     let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_note(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
     Ok(json!({"path": new, "relinked": changed}))
+}
+
+fn move_protected_text(dir: &std::path::Path, target: &athena_lock::Target, key: athena_lock::Key, to: &str) -> Result<String, String> {
+    let new = athena::safe_text(to).ok_or("Nome ou pasta inválidos")?;
+    let name = new.file_stem().map(|stem| stem.to_string_lossy()).unwrap_or_default();
+    if athena::file_name(&name) != name || protected(dir, to).is_some() {
+        return Err("Nome ou pasta inválidos para um arquivo protegido".into());
+    }
+    let destination = dir.join(format!("{}{}", new.display(), athena_lock::FILE_SUFFIX));
+    if destination.exists() || dir.join(&new).exists() {
+        return Err("Já existe um arquivo com esse nome nessa pasta".into());
+    }
+    if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?; }
+    fs::rename(target.path(), &destination).map_err(|_| "Não foi possível mover o arquivo protegido")?;
+    athena_lock::end_session(target.path());
+    athena_lock::start_session(&destination, key);
+    Ok(to.to_string())
 }
 
 /// Renomeia ou move uma pasta e atualiza os links das notas dela.
 #[tauri::command]
 pub async fn athena_rename_folder(state: tauri::State<'_, Core>, root: String, path: String, to: String) -> Result<Value, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    let (from_place, to_place) = (protected(&dir, &path), protected(&dir, &to));
+    match (&from_place, &to_place) {
+        // A própria pasta protegida muda de nome ou de lugar: os arquivos cifrados vão junto.
+        (Some(place), None) if place.inner.is_empty() => {
+            let session = athena_lock::session(&place.dir).ok_or("Pasta protegida: digite a senha na Athena para abri-la")?;
+            let old = place.dir.clone();
+            let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_folder(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
+            athena_lock::end_session(&old);
+            athena_lock::start_session(&state.athena_path(&state.prefs()?, &root)?.join(&new), session.0);
+            return Ok(json!({"path": new, "relinked": changed}));
+        }
+        (Some(from), Some(target)) if from.dir == target.dir && !from.inner.is_empty() && !target.inner.is_empty() => {
+            let key = unlocked(from)?;
+            athena_lock::rename(&from.dir, &key, &from.inner, &target.inner)?;
+            return Ok(json!({"path": to, "relinked": 0}));
+        }
+        (None, None) => {}
+        _ => return Err("Pastas inteiras ainda não entram nem saem de uma pasta protegida; mova as notas".into()),
+    }
     let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_folder(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
     Ok(json!({"path": new, "relinked": changed}))
 }
 
-/// Tags de todas as raízes, com as notas de cada uma.
+/// Tags e conexões das notas, extraídas na mesma passagem pelos arquivos.
 #[tauri::command]
-pub async fn athena_tags(state: tauri::State<'_, Core>) -> Result<Vec<Value>, String> {
+pub async fn athena_overview(state: tauri::State<'_, Core>) -> Result<Value, String> {
     let roots: Vec<AthenaRoot> = state.athena_roots(&state.prefs()?).into_iter().filter(|r| r.path.is_dir()).collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut map: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
-        for root in roots {
-            for note in athena::list(&root.path) {
-                let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
-                for tag in athena::tags(&text) {
-                    map.entry(tag).or_default().push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+    tauri::async_runtime::spawn_blocking(move || athena_overview_for(roots))
+        .await.map_err(|_| "Falha ao ler as conexões das notas".into())
+}
+
+fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    let mut tags = BTreeMap::<String, Vec<Value>>::new();
+    let mut nodes = Vec::new();
+    let mut edges = BTreeSet::new();
+    for root in roots {
+        let mut notes = athena::list(&root.path);
+        notes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        let base = nodes.len();
+        let mut paths = HashMap::<String, usize>::new();
+        for (index, note) in notes.iter().enumerate() {
+            nodes.push(json!({"root": root.id, "rootName": root.name, "path": note.path, "title": note.title}));
+            let path = note.path.to_lowercase();
+            let path = path.trim_end_matches(".md");
+            for suffix in std::iter::once(path).chain(path.match_indices('/').map(|(i, _)| &path[i + 1..])) {
+                paths.entry(suffix.to_owned()).and_modify(|other| {
+                    let previous = &notes[*other];
+                    if note.path.len() < previous.path.len()
+                        || (note.path.len() == previous.path.len() && note.modified > previous.modified) {
+                        *other = index;
+                    }
+                }).or_insert(index);
+            }
+        }
+        for (index, note) in notes.iter().enumerate() {
+            let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
+            for tag in athena::tags(&text) {
+                tags.entry(tag).or_default().push(nodes[base + index].clone());
+            }
+            for target in athena::graph_targets(&text) {
+                let target = target.to_lowercase();
+                if let Some(&other) = paths.get(target.trim_end_matches(".md")).filter(|&&other| other != index) {
+                    edges.insert([base + index.min(other), base + index.max(other)]);
                 }
             }
         }
-        map.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect()
-    }).await.map_err(|_| "Falha ao ler as tags".into())
+    }
+    let tags: Vec<_> = tags.into_iter().map(|(tag, notes)| json!({"tag": tag, "notes": notes})).collect();
+    json!({"tags": tags, "graph": {"nodes": nodes, "edges": edges}})
 }
 
 /// Imagem anexada a uma nota (![[foto.png]]), procurada pelo nome na raiz, como data URL.
@@ -1479,7 +1970,351 @@ pub async fn athena_git_tick(app: &tauri::AppHandle, boot: bool) {
 #[tauri::command]
 pub fn athena_trash_folder(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
-    athena::trash_folder(&dir, &path)
+    trash_folder_in(&dir, &path)
+}
+
+/// Apagar pasta: uma pasta protegida só sai (inteira ou em parte) aberta com a senha; uma pasta
+/// comum com uma protegida dentro não sai.
+fn trash_folder_in(dir: &std::path::Path, path: &str) -> Result<(), String> {
+    if let Some(place) = protected(&dir, &path) {
+        let key = unlocked(&place)?;
+        if place.inner.is_empty() {
+            // A pasta inteira vai para a lixeira ainda cifrada, com a proteção junto.
+            athena::trash_folder(dir, path)?;
+            athena_lock::end_session(&place.dir);
+            return Ok(());
+        }
+        return athena_lock::trash(&place.dir, &key, &place.inner, &dir.join(".trash"));
+    }
+    if let Some(item) = locked_inside(&dir.join(path)) {
+        return Err(format!("Esta pasta tem \"{item}\", protegido e bloqueado; abra-o com a senha antes de apagar a pasta"));
+    }
+    athena::trash_folder(dir, path)
+}
+
+/// Primeira pasta ou arquivo protegido e bloqueado dentro da pasta, se houver.
+fn locked_inside(dir: &std::path::Path) -> Option<String> {
+    athena_lock::protected_folders(dir).into_iter().find(|folder| athena_lock::session(&dir.join(folder)).is_none())
+        .or_else(|| athena_lock::protected_files(dir).into_iter()
+            .find(|file| athena_lock::protected_file_of(dir, file).is_some_and(|t| athena_lock::session(t.path()).is_none())))
+}
+
+// ---- Pastas protegidas da Athena ----
+
+/// Caminho dentro de uma pasta protegida: a pasta (no disco e relativa à raiz) e o caminho interno.
+struct Protected {
+    dir: PathBuf,
+    folder: String,
+    inner: String,
+}
+
+fn protected(root: &std::path::Path, path: &str) -> Option<Protected> {
+    let folder = athena_lock::protected_folder_of(root, path)?;
+    let inner = path.trim_matches('/').strip_prefix(&folder).unwrap_or("").trim_start_matches('/').to_string();
+    Some(Protected { dir: root.join(&folder), folder, inner })
+}
+
+fn unlocked(place: &Protected) -> Result<athena_lock::Key, String> {
+    athena_lock::session(&place.dir).map(|(key, _)| key).ok_or_else(|| "Pasta protegida: digite a senha na Athena para abri-la".into())
+}
+
+fn protected_note(inner: &str) -> Result<(), String> {
+    let lower = inner.to_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".txt") { Ok(()) } else { Err("Nota inválida".into()) }
+}
+
+/// Imagem colada numa nota protegida: fica cifrada na mesma pasta, em `Imagens/<nota>/`.
+fn protected_paste(place: &Protected, before: &str, after: &str, expected: i64, bytes: &[u8]) -> Result<(String, i64), String> {
+    let key = unlocked(place)?;
+    protected_note(&place.inner)?;
+    if bytes.len() as u64 > athena::MAX_ATTACHMENT {
+        return Err("A imagem passa de 15 MB".into());
+    }
+    let extension = athena::image_extension(bytes).ok_or("Formato de imagem incompatível")?;
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|_| "Não foi possível gerar o nome da imagem")?;
+    let name = format!("Imagem-{}.{extension}", random.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let title = std::path::Path::new(&place.inner).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let image = format!("Imagens/{}/{name}", athena::file_name(&title));
+    athena_lock::write(&place.dir, &key, &image, bytes, None)?;
+    // Links pelo caminho a partir da raiz; títulos com sintaxe wiki usam o nome único.
+    let target = if title.contains(['[', ']', '#', '|']) { name } else { format!("{}/{image}", place.folder) };
+    let content = format!("{before}![[{target}]]{after}");
+    match athena_lock::write(&place.dir, &key, &place.inner, content.as_bytes(), Some(expected)) {
+        Ok(entry) => Ok((target, entry.modified)),
+        Err(error) => {
+            let _ = athena_lock::remove(&place.dir, &key, &image);
+            Err(error)
+        }
+    }
+}
+
+/// Banner de uma nota protegida: só imagens da mesma pasta protegida.
+fn protected_banner(root: &std::path::Path, place: &Protected, content: &str, expected: i64, image: &str) -> Result<(String, i64), String> {
+    let key = unlocked(place)?;
+    protected_note(&place.inner)?;
+    let target = protected(root, image).filter(|p| p.dir == place.dir).ok_or("Escolha uma imagem desta mesma pasta protegida")?;
+    let is_image = athena::attachment_mime(std::path::Path::new(&target.inner)).is_some_and(|m| m.starts_with("image/"));
+    if !is_image || !athena_lock::entries(&place.dir, &key).iter().any(|e| e.path == target.inner && e.kind == "file") {
+        return Err("Escolha uma imagem desta mesma pasta protegida".into());
+    }
+    let updated = athena::with_banner(content, image.trim_matches('/'));
+    let entry = athena_lock::write(&place.dir, &key, &place.inner, updated.as_bytes(), Some(expected))?;
+    Ok((updated, entry.modified))
+}
+
+/// Move uma nota ou anexo entre lugares comuns e pastas protegidas (ou dentro de uma). O destino é
+/// gravado antes de a origem sair; nada fica decifrado no disco a não ser quando o destino é comum.
+fn move_across(root: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
+    let to = to.trim_matches('/').to_string();
+    let (source, target) = (protected(root, from), protected(root, &to));
+    if let (Some(a), Some(b)) = (&source, &target) {
+        if a.dir == b.dir {
+            let key = unlocked(a)?;
+            athena_lock::rename(&a.dir, &key, &a.inner, &b.inner)?;
+            return Ok(to);
+        }
+    }
+    let bytes = match &source {
+        Some(place) => athena_lock::read(&place.dir, &unlocked(place)?, &place.inner)?.0,
+        None => {
+            let path = athena::safe_folder(from).filter(|p| !p.as_os_str().is_empty()).ok_or("Arquivo inválido")?;
+            fs::read(root.join(path)).map_err(|_| "Arquivo não encontrado")?
+        }
+    };
+    match &target {
+        Some(place) => {
+            let key = unlocked(place)?;
+            if place.inner.is_empty() || athena_lock::entries(&place.dir, &key).iter().any(|e| e.path == place.inner) {
+                return Err("Já existe um arquivo com esse nome nessa pasta".into());
+            }
+            athena_lock::write(&place.dir, &key, &place.inner, &bytes, None)?;
+        }
+        None => {
+            let path = athena::safe_folder(&to).filter(|p| !p.as_os_str().is_empty()).ok_or("Destino inválido")?;
+            let path = root.join(path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?;
+            }
+            let mut file = fs::File::create_new(&path).map_err(|_| "Já existe um arquivo com esse nome nessa pasta")?;
+            use std::io::Write;
+            file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|_| "Não foi possível gravar o arquivo")?;
+        }
+    }
+    match &source {
+        Some(place) => athena_lock::remove(&place.dir, &unlocked(place)?, &place.inner)?,
+        None => fs::remove_file(root.join(from)).map_err(|_| "Não foi possível tirar o arquivo da origem")?,
+    }
+    Ok(to)
+}
+
+/// Mídia de uma pasta protegida desbloqueada (pelo caminho ou, como nos links do Obsidian, pelo
+/// nome). `None`: não é de pasta protegida.
+fn protected_media(state: &Core, root: &str, target: &str) -> Option<Result<(Vec<u8>, &'static str), String>> {
+    let dir = state.athena_path(&state.prefs().ok()?, root).ok()?;
+    let target = target.split('#').next().unwrap_or(target).trim();
+    let found = if let Some(place) = protected(&dir, target) {
+        Some(place)
+    } else if athena::find_attachment(&dir, target).is_some() {
+        None
+    } else {
+        let name = target.rsplit('/').next().unwrap_or(target).to_lowercase();
+        athena_lock::protected_folders(&dir).into_iter().find_map(|folder| {
+            let place = dir.join(&folder);
+            let (key, _) = athena_lock::session(&place)?;
+            let entry = athena_lock::entries(&place, &key).into_iter()
+                .find(|e| e.kind == "file" && e.path.rsplit('/').next().unwrap_or(&e.path).to_lowercase() == name)?;
+            Some(Protected { dir: place, folder: folder.clone(), inner: entry.path })
+        })
+    }?;
+    Some((|| {
+        let mime = athena::attachment_mime(std::path::Path::new(&found.inner)).ok_or("Tipo de arquivo não mostrado")?;
+        let key = unlocked(&found)?;
+        Ok((athena_lock::read(&found.dir, &key, &found.inner)?.0, mime))
+    })())
+}
+
+// ---------- Itens protegidos (pastas e arquivos) e a chave de recuperação global ----------
+
+impl Core {
+    /// Pasta de uma raiz da Athena ou da Biblioteca (`biblioteca`: os importados).
+    fn item_root(&self, root: &str) -> Result<PathBuf, String> {
+        if root == "biblioteca" {
+            let dir = self.root.join(library::IMPORTED);
+            fs::create_dir_all(&dir).map_err(|_| "Não foi possível criar a Biblioteca")?;
+            return Ok(dir);
+        }
+        self.athena_path(&self.prefs()?, root)
+    }
+    fn recovery_file(&self) -> PathBuf {
+        self.root.join("recuperacao.json")
+    }
+    /// Parte pública da chave de recuperação global deste computador, se já foi criada ou ativada.
+    fn global_public(&self) -> Option<[u8; 32]> {
+        let value: Value = serde_json::from_slice(&fs::read(self.recovery_file()).ok()?).ok()?;
+        base64::engine::general_purpose::STANDARD.decode(value["public"].as_str()?).ok()?.try_into().ok()
+    }
+    fn save_global_public(&self, public: &[u8; 32]) -> Result<(), String> {
+        let body = json!({"version": 1, "public": base64::engine::general_purpose::STANDARD.encode(public)});
+        let file = self.recovery_file();
+        let temporary = file.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(&body).unwrap_or_default()).and_then(|_| fs::rename(&temporary, &file))
+            .map_err(|_| "Não foi possível guardar a chave de recuperação".into())
+    }
+}
+
+/// O item protegido no caminho: a pasta protegida (o próprio caminho) ou o arquivo protegido sozinho.
+fn lock_target(dir: &std::path::Path, path: &str) -> Option<athena_lock::Target> {
+    match protected(dir, path) {
+        Some(place) if place.inner.is_empty() => Some(athena_lock::Target::Folder(place.dir)),
+        Some(_) => None,
+        None => athena_lock::protected_file_of(dir, path),
+    }
+}
+
+/// Item aberto: a chave na memória e a cópia para a chave global atual garantida.
+fn open_item(target: &athena_lock::Target, key: athena_lock::Key, global: Option<[u8; 32]>) -> i64 {
+    if let Some(public) = global {
+        let _ = athena_lock::ensure_global(target, &key, &public);
+    }
+    athena_lock::start_session(target.path(), key)
+}
+
+/// Chave de recuperação global: criada neste computador ou ativada com o código.
+#[tauri::command]
+pub fn athena_recovery_status(state: tauri::State<'_, Core>) -> Value {
+    json!({"configured": state.global_public().is_some()})
+}
+
+/// Cria a chave de recuperação global e devolve o código (mostrado uma única vez). Itens já
+/// protegidos passam a usá-la quando forem abertos com a senha.
+#[tauri::command]
+pub async fn athena_recovery_create(state: tauri::State<'_, Core>) -> Result<String, String> {
+    let (code, public) = tauri::async_runtime::spawn_blocking(athena_lock::new_global).await.map_err(|_| "Falha ao criar a chave")??;
+    state.save_global_public(&public)?;
+    Ok(code)
+}
+
+/// Ativa neste computador a chave global já criada em outro (com o código anotado).
+#[tauri::command]
+pub async fn athena_recovery_activate(state: tauri::State<'_, Core>, code: String) -> Result<(), String> {
+    // Pastas e arquivos protegidos já existentes (Notas e Biblioteca): o código precisa abrir algum
+    // deles, para um erro de digitação não virar uma chave que ninguém tem.
+    let mut dirs: Vec<PathBuf> = state.athena_roots(&state.prefs()?).into_iter().filter(|r| r.path.is_dir()).map(|r| r.path).collect();
+    dirs.push(state.root.join(library::IMPORTED));
+    tauri::async_runtime::spawn_blocking(move || {
+        let public = athena_lock::global_public(&code)?;
+        let known: Vec<[u8; 32]> = dirs.iter().flat_map(|dir| {
+            athena_lock::protected_folders(dir).into_iter().map(|f| athena_lock::Target::Folder(dir.join(f)))
+                .chain(athena_lock::protected_files(dir).into_iter().filter_map(|f| athena_lock::protected_file_of(dir, &f)))
+                .filter_map(|t| athena_lock::global_of(&t)).collect::<Vec<_>>()
+        }).collect();
+        if !known.is_empty() && !known.contains(&public) {
+            return Err("Este código não abre nenhum item protegido daqui; confira o que foi digitado".to_string());
+        }
+        Ok(public)
+    }).await.map_err(|_| "Falha ao conferir a chave".to_string())?.and_then(|public| state.save_global_public(&public))
+}
+
+/// Protege uma pasta ou um arquivo (nota, texto ou livro) com senha. Sem chave de recuperação
+/// global neste computador, cria uma e devolve o código, que só existe nesta resposta.
+#[tauri::command]
+pub async fn athena_protect(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, password: String, file: bool) -> Result<Value, String> {
+    use tauri::Emitter;
+    let dir = state.item_root(&root)?;
+    let (recovery, public) = match state.global_public() {
+        Some(public) => (None, public),
+        None => {
+            let (code, public) = tauri::async_runtime::spawn_blocking(athena_lock::new_global).await.map_err(|_| "Falha ao criar a chave")??;
+            (Some(code), public)
+        }
+    };
+    let count = tauri::async_runtime::spawn_blocking(move || if file {
+        athena_lock::protect_file(&dir, &path, &password, &public).map(|_| 1)
+    } else {
+        athena_lock::protect(&dir, &path, &password, &public)
+    }).await.map_err(|_| "Falha ao proteger")??;
+    // A chave pública só fica guardada depois de ter protegido algo com ela.
+    if recovery.is_some() {
+        state.save_global_public(&public)?;
+    }
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(json!({"count": count, "recovery": recovery}))
+}
+
+/// Senha esquecida: a chave de recuperação define uma senha nova e já abre o item.
+#[tauri::command]
+pub async fn athena_recover(state: tauri::State<'_, Core>, root: String, path: String, code: String, password: String) -> Result<i64, String> {
+    let target = lock_target(&state.item_root(&root)?, &path).ok_or("Este item não está protegido")?;
+    let global = state.global_public();
+    tauri::async_runtime::spawn_blocking(move || athena_lock::recover(&target, &code, &password).map(|key| open_item(&target, key, global)))
+        .await.map_err(|_| "Falha ao recuperar")?
+}
+
+/// Abre um item protegido nesta execução da Ayla. Devolve o momento da senha (segundos Unix).
+#[tauri::command]
+pub async fn athena_unlock(state: tauri::State<'_, Core>, root: String, path: String, password: String) -> Result<i64, String> {
+    let target = lock_target(&state.item_root(&root)?, &path).ok_or("Este item não está protegido")?;
+    let global = state.global_public();
+    tauri::async_runtime::spawn_blocking(move || athena_lock::unlock(&target, &password).map(|key| open_item(&target, key, global)))
+        .await.map_err(|_| "Falha ao conferir a senha")?
+}
+
+/// Volta a bloquear o item (a chave sai da memória).
+#[tauri::command]
+pub fn athena_lock(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    if let Some(target) = lock_target(&state.item_root(&root)?, &path) {
+        athena_lock::end_session(target.path());
+    }
+    Ok(())
+}
+
+/// Tira a proteção (com a senha): os arquivos voltam a ser comuns.
+#[tauri::command]
+pub async fn athena_unprotect(app: tauri::AppHandle, state: tauri::State<'_, Core>, root: String, path: String, password: String) -> Result<usize, String> {
+    use tauri::Emitter;
+    let target = lock_target(&state.item_root(&root)?, &path).ok_or("Este item não está protegido")?;
+    let count = tauri::async_runtime::spawn_blocking(move || {
+        let key = athena_lock::unlock(&target, &password)?;
+        let count = match &target {
+            athena_lock::Target::Folder(dir) => athena_lock::unprotect(dir, &key)?,
+            athena_lock::Target::File(_) => { athena_lock::unprotect_file(&target, &key)?; 1 }
+        };
+        athena_lock::end_session(target.path());
+        Ok::<_, String>(count)
+    }).await.map_err(|_| "Falha ao tirar a proteção")??;
+    let _ = app.emit("notes-updated", json!({"root": root}));
+    Ok(count)
+}
+
+/// Troca a senha de um item protegido.
+#[tauri::command]
+pub async fn athena_change_password(state: tauri::State<'_, Core>, root: String, path: String, current: String, password: String) -> Result<(), String> {
+    let target = lock_target(&state.item_root(&root)?, &path).ok_or("Este item não está protegido")?;
+    tauri::async_runtime::spawn_blocking(move || athena_lock::change_password(&target, &current, &password))
+        .await.map_err(|_| "Falha ao trocar a senha")?
+}
+
+/// Arquivo protegido para a lixeira da raiz, ainda cifrado (sem sobrescrever).
+fn trash_protected_file(dir: &std::path::Path, target: &athena_lock::Target) -> Result<(), String> {
+    let bin = dir.join(".trash");
+    fs::create_dir_all(&bin).map_err(|_| "Não foi possível criar a lixeira")?;
+    let name = target.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mut destination = bin.join(&name);
+    let mut n = 2;
+    while destination.exists() {
+        destination = bin.join(format!("{n} {name}"));
+        n += 1;
+    }
+    fs::rename(target.path(), &destination).map_err(|_| "Não foi possível mover para a lixeira")?;
+    athena_lock::end_session(target.path());
+    Ok(())
+}
+
+/// Arquivo protegido sozinho e aberto: o alvo e a chave (`None` se o caminho não é um).
+fn open_file(dir: &std::path::Path, path: &str) -> Option<Result<(athena_lock::Target, athena_lock::Key), String>> {
+    let target = athena_lock::protected_file_of(dir, path)?;
+    Some(athena_lock::session(target.path()).map(|(key, _)| (target, key)).ok_or_else(|| "Arquivo protegido: digite a senha na Athena para abri-lo".into()))
 }
 
 /// Anexo (imagem, vídeo ou PDF) de uma raiz pelo nome ou caminho, como nos links do Obsidian.
@@ -1608,6 +2443,21 @@ pub fn athena_file(state: &Core, request: &tauri::http::Request<Vec<u8>>) -> tau
     let trimmed = request.uri().path().trim_start_matches('/');
     let Some((root, target)) = trimmed.split_once('/') else { return not_found() };
     let (Some(root), Some(target)) = (athena::percent_decode(root), athena::percent_decode(target)) else { return not_found() };
+    if !root.starts_with("iris:") {
+        match protected_media(state, &root, &target) {
+            Some(Ok((bytes, mime))) => {
+                // Sem miniaturas (seriam cópias no disco): imagens vão inteiras; vídeo e PDF mostram o ícone.
+                let thumb = request.uri().query().is_some_and(|q| q.split('&').any(|p| p == "miniatura"));
+                if thumb && !mime.starts_with("image/") {
+                    return not_found();
+                }
+                let range = request.headers().get(tauri::http::header::RANGE).and_then(|v| v.to_str().ok());
+                return media::serve_bytes(&bytes, mime, range);
+            }
+            Some(Err(_)) => return not_found(),
+            None => {}
+        }
+    }
     let Ok(path) = readable_media_path(state, &root, &target) else { return not_found() };
     let mime = athena::attachment_mime(&path).unwrap_or("application/octet-stream");
     media_response(state, request, &path, mime)
@@ -1697,6 +2547,20 @@ fn kind_of_mime(mime: &str) -> &'static str {
 #[tauri::command]
 pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: String, folder: String) -> Result<String, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let to = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+    if athena::is_txt(std::path::Path::new(&path)) {
+        if let Some(opened) = open_file(&dir, &path) {
+            let (target, key) = opened?;
+            return move_protected_text(&dir, &target, key, &to);
+        }
+        if athena_lock::protected_file_of(&dir, &to).is_some() {
+            return Err("Já existe um texto protegido com esse nome nessa pasta".into());
+        }
+    }
+    if protected(&dir, &path).is_some() || protected(&dir, &folder).is_some() {
+        return move_across(&dir, &path, &to);
+    }
     athena::move_attachment(&dir, &path, &folder)
 }
 
@@ -1710,7 +2574,12 @@ pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Opt
             stored_mime(&file).ok_or("Este tipo de arquivo não é uma mídia da Ayla")?;
             state.root.join(&file.path)
         }
-        (None, Some(root), Some(path)) => readable_media_path(&state, &root, &path)?,
+        (None, Some(root), Some(path)) => {
+            if !root.starts_with("iris:") && protected(&state.athena_path(&state.prefs()?, &root)?, &path).is_some() {
+                return Err("Arquivos de pastas protegidas só abrem na Athena".into());
+            }
+            readable_media_path(&state, &root, &path)?
+        }
         _ => return Err("Arquivo não informado".into()),
     };
     media::open_in_system(&target)
@@ -1764,6 +2633,9 @@ pub async fn iris_trash_image(app: tauri::AppHandle, file: Option<String>, root:
 #[tauri::command]
 pub fn athena_open_obsidian(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    if protected(&dir, &path).is_some() || athena_lock::protected_file_of(&dir, &path).is_some() {
+        return Err("O Obsidian não abre notas protegidas da Athena".into());
+    }
     let relative = athena::safe_relative(&path).ok_or("Nota inválida")?;
     let link = athena_git::obsidian_link(&dir.join(relative));
     std::process::Command::new("xdg-open").arg(link).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o Obsidian".into())
@@ -3302,6 +4174,117 @@ mod tests {
         assert!(find(&pending.id).is_none(), "anexo não enviado fica de fora");
         assert!(find(&text.id).is_none(), "texto não é mídia");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn progresso_de_livro_protegido_nao_guarda_o_nome() {
+        let key = protected_progress_key("ayla", "Diário secreto/Capitulo 1.cbz");
+        assert!(key.starts_with("protegido:") && !key.contains("Diário") && !key.contains("Capitulo"));
+        assert_eq!(key, protected_progress_key("ayla", "Diário secreto/Capitulo 1.cbz"));
+        assert_ne!(key, protected_progress_key("ayla", "Diário secreto/Capitulo 2.cbz"));
+    }
+
+    #[test]
+    fn protected_folder_moves_paste_and_banner_stay_encrypted() {
+        let root = std::env::temp_dir().join(format!("ayla-protected-{}", store::id()));
+        fs::create_dir_all(root.join("Senhas")).unwrap();
+        fs::write(root.join("Senhas/Email.md"), "segredo").unwrap();
+        fs::write(root.join("Solta.md"), "vai entrar").unwrap();
+        fs::write(root.join("foto.png"), b"\x89PNG\r\n\x1a\nfoto").unwrap();
+        let (_, public) = athena_lock::new_global().unwrap();
+        athena_lock::protect(&root, "Senhas", "senha forte 123", &public).unwrap();
+        let place = protected(&root, "Senhas/Email.md").unwrap();
+        assert_eq!((place.folder.as_str(), place.inner.as_str()), ("Senhas", "Email.md"));
+        assert_eq!(protected(&root, "Senhas").unwrap().inner, "");
+        assert!(protected(&root, "Solta.md").is_none());
+
+        // Bloqueada: nada entra, nada sai, e não pode ser apagada (nem ela, nem a pasta de cima).
+        assert!(move_across(&root, "Solta.md", "Senhas/Solta.md").is_err());
+        assert!(root.join("Solta.md").is_file());
+        assert!(trash_folder_in(&root, "Senhas").is_err());
+        assert!(trash_folder_in(&root, "Senhas/Pessoal").is_err());
+        fs::create_dir_all(root.join("Cofre")).unwrap();
+        fs::rename(root.join("Senhas"), root.join("Cofre/Senhas")).unwrap();
+        assert!(trash_folder_in(&root, "Cofre").is_err(), "pasta de cima também não");
+        assert_eq!(locked_inside(&root).as_deref(), Some("Cofre/Senhas"));
+        fs::rename(root.join("Cofre/Senhas"), root.join("Senhas")).unwrap();
+        assert!(root.join("Senhas").join(athena_lock::LOCK_FILE).is_file() && !root.join(".trash").exists(), "nada foi apagado");
+
+        let dir = root.join("Senhas");
+        athena_lock::start_session(&dir, athena_lock::unlock(&athena_lock::Target::Folder(dir.clone()), "senha forte 123").unwrap());
+        // Arquivo protegido sozinho: aparece em locked_inside enquanto bloqueado.
+        fs::write(root.join("Diario.md"), "segredo").unwrap();
+        athena_lock::protect_file(&root, "Diario.md", "senha forte 123", &public).unwrap();
+        assert_eq!(locked_inside(&root).as_deref(), Some("Diario.md"));
+        let file = athena_lock::protected_file_of(&root, "Diario.md").unwrap();
+        athena_lock::start_session(file.path(), athena_lock::unlock(&file, "senha forte 123").unwrap());
+        assert_eq!(move_across(&root, "Solta.md", "Senhas/Pessoal/Solta.md").unwrap(), "Senhas/Pessoal/Solta.md");
+        assert!(!root.join("Solta.md").exists(), "o original sai do disco");
+        assert_eq!(move_across(&root, "foto.png", "Senhas/foto.png").unwrap(), "Senhas/foto.png");
+        assert!(move_across(&root, "Senhas/Email.md", "Senhas/Pessoal/Solta.md").is_err(), "não sobrescreve");
+
+        let (embed, stamp) = protected_paste(&protected(&root, "Senhas/Email.md").unwrap(), "segredo ", "", i64::MAX, b"\x89PNG\r\n\x1a\ncolada").unwrap();
+        assert!(embed.starts_with("Senhas/Imagens/Email/Imagem-") && embed.ends_with(".png"));
+        let (updated, _) = protected_banner(&root, &protected(&root, "Senhas/Email.md").unwrap(), &format!("segredo ![[{embed}]]"), stamp, "Senhas/foto.png").unwrap();
+        assert!(updated.starts_with("---\nbanner: Senhas/foto.png\n---"));
+        assert!(protected_banner(&root, &protected(&root, "Senhas/Email.md").unwrap(), &updated, i64::MAX, "Senhas/Email.md").is_err(), "só imagens");
+
+        // De volta para fora: decifrado só no destino comum.
+        assert_eq!(move_across(&root, "Senhas/Pessoal/Solta.md", "Solta.md").unwrap(), "Solta.md");
+        assert_eq!(fs::read_to_string(root.join("Solta.md")).unwrap(), "vai entrar");
+        let on_disk: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert!(on_disk.iter().all(|n| n.ends_with(".athena") || n == athena_lock::LOCK_FILE), "{on_disk:?}");
+        assert_eq!(locked_inside(&root), None, "aberta, pode sair");
+        athena_lock::end_session(&dir);
+        assert!(athena::list(&root).iter().all(|n| !n.path.starts_with("Senhas")));
+        assert!(athena::attachments(&root).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn move_texto_protegido_sem_decifrar_nem_sobrescrever() {
+        let root = std::env::temp_dir().join(format!("ayla-protected-text-{}", store::id()));
+        fs::create_dir_all(root.join("Destino")).unwrap();
+        fs::write(root.join("Diario.txt"), "texto protegido").unwrap();
+        fs::write(root.join("Destino/Diario.txt"), "outro texto").unwrap();
+        let (_, public) = athena_lock::new_global().unwrap();
+        athena_lock::protect_file(&root, "Diario.txt", "senha forte 123", &public).unwrap();
+        let target = athena_lock::protected_file_of(&root, "Diario.txt").unwrap();
+        let key = athena_lock::unlock(&target, "senha forte 123").unwrap();
+        let encrypted = fs::read(target.path()).unwrap();
+
+        assert!(move_protected_text(&root, &target, key.clone(), "Destino/Diario.txt").is_err());
+        assert_eq!(fs::read_to_string(root.join("Destino/Diario.txt")).unwrap(), "outro texto");
+        assert_eq!(move_protected_text(&root, &target, key, "Destino/Notas.txt").unwrap(), "Destino/Notas.txt");
+        assert!(!target.path().exists() && !root.join("Destino/Notas.txt").exists());
+        let (moved, key) = open_file(&root, "Destino/Notas.txt").unwrap().unwrap();
+        assert_eq!(fs::read(moved.path()).unwrap(), encrypted);
+        assert_eq!(athena_lock::file_read(&moved, &key).unwrap(), b"texto protegido");
+        athena_lock::end_session(moved.path());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn athena_overview_connects_existing_notes_within_each_root() {
+        let tmp = std::env::temp_dir().join(format!("ayla-graph-{}", store::id()));
+        let first = tmp.join("primeiro");
+        let second = tmp.join("segundo");
+        fs::create_dir_all(first.join("pastas")).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("A.md"), "# A\n#aventura [[B#Seção|apelido]] [[B]] [Mapa](<pastas/Mapa de teste.md#Norte>)\n`[[Isolada]]`\n~~~\n[[Isolada]]\n~~~\n[[A]] [[Ausente]]").unwrap();
+        fs::write(first.join("B.md"), "[[A]]").unwrap();
+        fs::write(first.join("Isolada.md"), "Nota sem relação.").unwrap();
+        fs::write(first.join("pastas/Mapa de teste.md"), "").unwrap();
+        fs::write(second.join("A.md"), "[[B]]").unwrap();
+        let overview = athena_overview_for(vec![
+            AthenaRoot { id: "one".into(), kind: "vault", name: "Primeiro".into(), path: first, available: true },
+            AthenaRoot { id: "two".into(), kind: "vault", name: "Segundo".into(), path: second, available: true },
+        ]);
+        assert_eq!(overview["graph"]["nodes"].as_array().unwrap().len(), 5);
+        assert_eq!(overview["graph"]["edges"], json!([[0, 1], [0, 3]]));
+        assert_eq!(overview["tags"][0]["tag"], "aventura");
+        assert_eq!(overview["tags"][0]["notes"][0]["root"], "one");
+        fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]

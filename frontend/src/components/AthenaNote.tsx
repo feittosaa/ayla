@@ -12,6 +12,36 @@ export type Note = { path: string; title: string; modified: number; bytes: numbe
 export type Tab = { root: string; path: string; pinned: boolean; editing: boolean };
 
 
+/** Escolha do banner entre as imagens da mesma raiz da nota, com busca e miniaturas. */
+function BannerPicker({ root, rootName, images, onPick, onClose }: {
+  root: string; rootName: string; images: Note[]; onPick: (path: string) => void; onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = images.filter(image => words.every(word => image.path.toLowerCase().includes(word)))
+    .sort((a, b) => b.modified - a.modified).slice(0, 120);
+  return <div className="dialog-backdrop" onClick={onClose}>
+    <div className="dialog banner-picker" role="dialog" aria-modal="true" aria-labelledby="banner-picker-title"
+      onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === 'Escape') onClose(); }}>
+      <h2 id="banner-picker-title">Escolher banner</h2>
+      <p>Imagens de <b>{rootName}</b>.</p>
+      {images.length > 0 && <input className="organ-search" type="search" autoFocus value={query} placeholder="Buscar imagem pelo nome ou pasta"
+        aria-label="Buscar imagem" onChange={event => setQuery(event.target.value)}
+        onKeyDown={event => { if (event.key === 'Enter' && shown[0]) onPick(shown[0].path); }} />}
+      {!images.length ? <p role="status">Nenhuma imagem em {rootName}. Coloque uma imagem dentro dessa pasta para usá-la como banner.</p>
+        : !shown.length ? <p role="status">Nenhuma imagem encontrada.</p>
+        : <ul className="banner-choices">{shown.map(image => <li key={image.path}>
+          <button type="button" title={image.path} onClick={() => onPick(image.path)}>
+            <img src={attachmentUrl(root, image.path, true)} alt="" loading="lazy" decoding="async" />
+            <span>{image.path.slice(image.path.lastIndexOf('/') + 1)}</span>
+            {folderOf(image.path) && <small>{folderOf(image.path)}</small>}
+          </button>
+        </li>)}</ul>}
+      <div className="row-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button></div>
+    </div>
+  </div>;
+}
+
 function Banner({ url, settings, onChange }: {
   url: string; settings: BannerSettings; onChange?: (key: 'banner_height' | 'banner_y', value: number) => void;
 }) {
@@ -69,6 +99,11 @@ type Props = {
   tab: Tab;
   /** Notas da mesma raiz, para sugerir links ao digitar [[. */
   notes: Note[];
+  /** Imagens da mesma raiz (cofre, projeto ou Athena): as únicas que podem virar banner. */
+  images: Note[];
+  rootName: string;
+  /** Altura padrão dos banners no make-md do cofre, para ficar igual ao Obsidian. */
+  bannerHeight?: number;
   /** Muda quando a nota pode ter mudado fora daqui (conversa, Git): recarrega se não houver edição pendente. */
   revision: number;
   onEditing: (editing: boolean) => void;
@@ -93,6 +128,7 @@ type Props = {
 export default function AthenaNote(props: Props) {
   const { tab, notes, revision } = props;
   const [content, setContent] = useState<string | null>(null); const [failed, setFailed] = useState('');
+  const [choosingBanner, setChoosingBanner] = useState(false);
   const [backlinks, setBacklinks] = useState<{ path: string; title: string }[]>([]);
   const [renaming, setRenaming] = useState<string | null>(() => props.askTitle ? titleOf(props.tab.path) : null);
   /** Evita gravar o nome duas vezes (Enter seguido do blur do campo). */
@@ -194,7 +230,9 @@ export default function AthenaNote(props: Props) {
     return true;
   }
 
-  function addBanner() {
+  /** Usa como banner uma imagem escolhida entre as da mesma raiz da nota. */
+  function addBanner(image: string) {
+    setChoosingBanner(false);
     if (pasteJob.current || stamp.current === null) return;
     setPasting(true);
     pasteJob.current = (async () => {
@@ -202,14 +240,12 @@ export default function AthenaNote(props: Props) {
         await saving.current;
         const expected = stamp.current;
         if (expected === null) return;
-        const result = await native<{ content: string; modified: number } | null>('athena_add_banner', {
-          root: tab.root, path: tab.path, content: latest.current, expected,
+        const result = await native<{ content: string; modified: number }>('athena_set_banner', {
+          root: tab.root, path: tab.path, content: latest.current, expected, image,
         });
-        if (result) {
-          apply(result);
-          events.current.onStatus('Salva');
-          events.current.onSaved();
-        }
+        apply(result);
+        events.current.onStatus('Salva');
+        events.current.onSaved();
       } catch (error) {
         events.current.onError(errorText(error));
       } finally {
@@ -280,11 +316,12 @@ export default function AthenaNote(props: Props) {
   if (failed) return <div className="note-scroll"><article className="note-page"><h1 className="note-title">{title}</h1><p role="alert" className="app-error">{failed}</p></article></div>;
   if (content === null) return <div className="note-scroll" aria-busy="true" />;
   return <div className="note-scroll" onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
-    {note.banner ? <Banner key={note.banner.target} url={attachmentUrl(tab.root, note.banner.target)} settings={note.banner}
+    {note.banner ? <Banner key={note.banner.target} url={attachmentUrl(tab.root, note.banner.target)} settings={note.banner.height || !props.bannerHeight ? note.banner : { ...note.banner, height: props.bannerHeight }}
       onChange={tab.editing && !pasting ? (key, value) => change(changeBanner(latest.current, key, value)) : undefined} />
       : <div className="note-banner-margin">
-        <button type="button" className="ghost-button" disabled={pasting} onClick={addBanner}>Adicionar banner</button>
+        <button type="button" className="ghost-button" disabled={pasting} aria-haspopup="dialog" onClick={() => setChoosingBanner(true)}>Adicionar banner</button>
       </div>}
+    {choosingBanner && <BannerPicker root={tab.root} rootName={props.rootName} images={props.images} onPick={addBanner} onClose={() => setChoosingBanner(false)} />}
     <article className="note-page">
       {renaming !== null
         ? <form onSubmit={e => { e.preventDefault(); rename(renaming); }}><input className="athena-rename" autoFocus value={renaming} maxLength={120} placeholder="Título" aria-label="Título da nota (também o nome do arquivo)" onFocus={e => e.target.select()} onChange={e => setRenaming(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { renamingNow.current = true; setRenaming(null); props.onTitled?.(); } }} onBlur={() => rename(renaming)} /></form>

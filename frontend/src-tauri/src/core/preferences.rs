@@ -51,6 +51,8 @@ pub struct Preferences {
     pub iris_folders: Vec<PathBuf>,
     /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
+    /// Pastas de livros e mangás conectadas à Biblioteca da Athena (lidas no lugar, sem cópia).
+    pub library_folders: Vec<PathBuf>,
     /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
     pub athena_git: bool,
     /// Modo de resposta escolhido na conversa ("local", "auto" ou "cloud"); vale para as
@@ -75,7 +77,7 @@ pub struct Appearance {
     pub roundness: u8,
     /// Opacidade do fundo da janela, em %: 100 é opaco.
     pub opacity: u8,
-    /// Variante do ícone de cada espaço.
+    /// Variante do ícone de cada espaço (a Athena tem só as variantes 3 e 4).
     pub icon_ayla: u8,
     pub icon_athena: u8,
 }
@@ -84,7 +86,7 @@ impl Default for Appearance {
         Self {
             mode: "escuro".into(), accent: "#ff9f43".into(),
             dark_background: "#111214".into(), light_background: "#f6f6f4".into(),
-            roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 1,
+            roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 3,
         }
     }
 }
@@ -93,7 +95,7 @@ impl Appearance {
         ["escuro", "claro", "sistema"].contains(&self.mode.as_str())
             && hex_color(&self.accent) && hex_color(&self.dark_background) && hex_color(&self.light_background)
             && self.roundness <= 150 && (40..=100).contains(&self.opacity)
-            && (1..=3).contains(&self.icon_ayla) && (1..=4).contains(&self.icon_athena)
+            && (1..=3).contains(&self.icon_ayla) && (3..=4).contains(&self.icon_athena)
     }
 }
 
@@ -168,6 +170,7 @@ impl Default for Preferences {
             iris_folder: None,
             iris_folders: Vec::new(),
             athena_vaults: Vec::new(),
+            library_folders: Vec::new(),
             athena_git: true,
             response_source: String::new(),
             appearance: Appearance::default(),
@@ -221,6 +224,7 @@ impl Preferences {
         self.iris_folder = saved.iris_folder.clone();
         self.iris_folders = saved.iris_folders.clone();
         self.athena_vaults = saved.athena_vaults.clone();
+        self.library_folders = saved.library_folders.clone();
         self.athena_folder = saved.athena_folder.clone();
         self.response_source = saved.response_source.clone();
         // Salva à parte (save_appearance); um rascunho antigo da tela não a desfaz.
@@ -251,6 +255,8 @@ impl Preferences {
             || self.athena_folder.chars().any(char::is_control)
             || (!self.athena_folder.is_empty() && !std::path::Path::new(&self.athena_folder).is_absolute())
             || self.athena_vaults.len() > 50
+            || self.library_folders.len() > 50
+            || self.library_folders.iter().any(|p| !p.is_absolute())
             || self.athena_vaults.iter().any(|v| v.is_empty() || v.chars().count() > 4096 || v.chars().any(char::is_control) || !std::path::Path::new(v).is_absolute())
             || self.version != VERSION
             || self.percent() < 5
@@ -315,6 +321,10 @@ impl PreferenceStore {
                         value.context_tokens = Preferences::default().context_tokens;
                     }
                     value.version = VERSION;
+                }
+                // Os ícones 1 e 2 da Athena saíram (22/11/2026): quem os usava passa ao 3, o padrão.
+                if matches!(value.appearance.icon_athena, 1 | 2) {
+                    value.appearance.icon_athena = 3;
                 }
                 value.validate()?;
                 Ok(value)
@@ -405,10 +415,14 @@ mod tests {
             Appearance { opacity: 39, ..Appearance::default() },
             Appearance { icon_ayla: 4, ..Appearance::default() },
             Appearance { icon_athena: 0, ..Appearance::default() },
+            Appearance { icon_athena: 2, ..Appearance::default() },
         ] {
             prefs.appearance = broken;
             assert!(store.save(&prefs).is_err());
         }
+        let saved = fs::read_to_string(root.join("preferences.json")).unwrap();
+        fs::write(root.join("preferences.json"), saved.replace("\"icon_athena\": 4", "\"icon_athena\": 1").replace("\"icon_athena\":4", "\"icon_athena\":1")).unwrap();
+        assert_eq!(store.load().unwrap().appearance.icon_athena, 3, "ícones removidos voltam ao padrão");
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -6,7 +6,7 @@ export type Mode = 'escuro' | 'claro';
 
 export const DEFAULT_APPEARANCE: Appearance = {
   mode: 'escuro', accent: '#ff9f43', dark_background: '#111214', light_background: '#f6f6f4',
-  roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 1,
+  roundness: 100, opacity: 100, icon_ayla: 1, icon_athena: 3,
 };
 
 export const ACCENTS = ['#ff9f43', '#f2c14e', '#5ac18e', '#4fb3d9', '#6f8cff', '#a77bf3', '#ec6fa6', '#e8604c'];

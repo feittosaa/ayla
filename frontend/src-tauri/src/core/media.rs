@@ -42,8 +42,21 @@ fn fail(status: StatusCode) -> Response<Vec<u8>> {
 /// Resposta com o arquivo (ou o trecho pedido). Cabeçalhos bloqueiam scripts (SVG) e indicam
 /// que o arquivo aceita trechos, como os vídeos precisam.
 pub fn serve(path: &Path, mime: &str, range: Option<&str>) -> Response<Vec<u8>> {
-    let Ok(mut file) = fs::File::open(path) else { return fail(StatusCode::NOT_FOUND) };
+    let Ok(file) = fs::File::open(path) else { return fail(StatusCode::NOT_FOUND) };
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    serve_from(file, size, mime, range)
+}
+
+/// Igual a `serve`, a partir de um conteúdo já na memória (arquivos decifrados de pastas protegidas,
+/// que não podem ganhar cópia nem miniatura no disco).
+pub fn serve_bytes(bytes: &[u8], mime: &str, range: Option<&str>) -> Response<Vec<u8>> {
+    let mut response = serve_from(std::io::Cursor::new(bytes), bytes.len() as u64, mime, range);
+    // Nada decifrado vai para o cache do WebKit no disco.
+    response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    response
+}
+
+fn serve_from(mut file: impl Read + Seek, size: u64, mime: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let base = || Response::builder().header(header::CONTENT_TYPE, mime).header(header::ACCEPT_RANGES, "bytes")
         .header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'")
         .header(header::CACHE_CONTROL, "no-cache")

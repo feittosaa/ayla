@@ -171,6 +171,22 @@ pub fn run() {
                 responder.respond(response);
             });
         })
+        // Biblioteca da Athena: livros (EPUB) e mangás (CBZ) das fontes, por trechos.
+        .register_asynchronous_uri_scheme_protocol("biblioteca-file", |context, request, responder| {
+            use tauri::http::{Response, StatusCode};
+            if context.webview_label() != "main" {
+                responder.respond(Response::builder().status(StatusCode::FORBIDDEN).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = match app.try_state::<Core>() {
+                    Some(core) => core::services::library_file(&core, &request),
+                    None => Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Vec::new()).unwrap_or_default(),
+                };
+                responder.respond(response);
+            });
+        })
         // Iris: imagens, vídeos e PDFs guardados na Ayla (anexos do chat e imagens geradas).
         .register_asynchronous_uri_scheme_protocol("iris-file", |context, request, responder| {
             use tauri::http::{Response, StatusCode};
@@ -306,12 +322,32 @@ pub fn run() {
             core::services::athena_backlinks,
             core::services::athena_rename,
             core::services::athena_rename_folder,
-            core::services::athena_tags,
+            core::services::athena_overview,
             core::services::athena_attachment,
             core::services::athena_read,
             core::services::athena_write,
             core::services::athena_paste_image,
-            core::services::athena_add_banner,
+            core::services::athena_set_banner,
+            core::services::athena_import,
+            core::services::library_list,
+            core::services::library_add_folder,
+            core::services::library_remove_folder,
+            core::services::library_import,
+            core::services::library_progress,
+            core::services::library_mode,
+            core::services::library_mark,
+            core::services::library_trash,
+            core::services::library_mkdir,
+            core::services::library_move,
+            core::services::athena_protect,
+            core::services::athena_unlock,
+            core::services::athena_lock,
+            core::services::athena_unprotect,
+            core::services::athena_change_password,
+            core::services::athena_recover,
+            core::services::athena_recovery_status,
+            core::services::athena_recovery_create,
+            core::services::athena_recovery_activate,
             core::services::athena_create,
             core::services::athena_daily,
             core::services::athena_trash,
@@ -338,6 +374,7 @@ pub fn run() {
             core::organs::organ_status,
             core::organs::organ_install,
             core::organs::organ_start,
+            core::organs::organ_theme,
             core::organs::organ_remove,
             core::organs::organ_open_separate,
             core::organs::organ_local_words,

@@ -229,6 +229,7 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 /* Athena: notas */
 .athena-actions { display: flex; gap: 6px; }
 .athena-actions .new-chat { flex: 1; }
+.app-shell .athena-actions .athena-import { display: inline-flex; align-items: center; gap: 5px; }
 .athena-new input, .app-shell .organ-search { width: 100%; }
 .app-shell .conversation-item.athena-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; height: auto; text-align: left; }
 .athena-item .athena-title { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -246,7 +247,9 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .organ-sidebar { flex-basis: 288px; flex-shrink: 0; }
 .athena-suggest { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px; border-radius: calc(8px * var(--ayla-round, 1)); background: var(--ayla-panel); font-size: 12px; color: var(--ayla-text-soft); }
 .athena-suggest span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.athena-tree { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+/* A rolagem vai até a borda da lateral: a barra (sobreposta no GTK) fica nessa faixa e não cobre as
+ * ações no fim das linhas (bolinha de seleção, lixeira). */
+.athena-tree { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin-right: -10px; padding-right: 10px; }
 .tree-section { display: flex; flex-direction: column; gap: 1px; }
 .tree-row { display: flex; align-items: center; gap: 4px; min-height: 28px; padding: 2px 6px; border-radius: calc(6px * var(--ayla-round, 1)); cursor: pointer; color: var(--ayla-text-soft); font-size: 13.5px; user-select: none; }
 .tree-row:hover { background: var(--ayla-hover); color: var(--ayla-text); }
@@ -265,10 +268,13 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .tree-row .tree-trash { display: none; flex: 0 0 auto; margin-left: auto; color: var(--ayla-text-faint); }
 .app-shell .tree-row:hover .tree-trash, .app-shell .tree-row:focus-within .tree-trash { display: inline-flex; }
 .app-shell .tree-row .tree-trash:hover { color: #ff9b8c; }
+.app-shell .tree-row .tree-trash.tree-protect { margin-left: auto; }
+.app-shell .tree-row .tree-trash.tree-protect + .tree-trash { margin-left: 0; }
+.app-shell .tree-row .tree-trash.tree-protect:hover { color: var(--ayla-accent); }
 .app-shell .tree-row .icon-button.tiny { min-height: 22px; width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 1; }
 .tree-add { padding: 2px 6px; }
 .app-shell .tree-add input { width: 100%; min-height: 30px; padding: 4px 8px; font-size: 13px; }
-.markdown a.note-link { color: var(--ayla-accent); text-decoration: none; border-bottom: 1px dashed currentColor; cursor: pointer; }
+.athena .markdown a.note-link { color: var(--ayla-accent); text-decoration: underline; cursor: pointer; }
 .athena-backlinks { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--ayla-border-soft); display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
 .athena-backlinks h2 { width: 100%; margin: 0 0 4px; font-size: 13px; color: var(--ayla-text-faint); font-weight: 600; }
 .confirm-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
@@ -314,6 +320,34 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .note-banner-resize:hover:not(:disabled), .app-shell .note-banner-resize:focus-visible { background: var(--ayla-accent); opacity: .65; }
 .note-banner-margin { box-sizing: border-box; min-height: 48px; max-width: 1080px; margin: 0 auto; padding: 6px 48px; }
 .note-banner-margin > button { opacity: 0; }
+.import-dialog h2, .lock-dialog h2 { display: flex; align-items: center; gap: 8px; }
+.import-dialog .import-hint { font-size: 12.5px; color: var(--ayla-text-faint); }
+.import-dialog .import-result { color: var(--ayla-text); }
+.text-file .text-editor { box-sizing: border-box; width: 100%; min-height: 60vh; padding: 12px 14px; border: 1px solid var(--ayla-border-soft); border-radius: calc(8px * var(--ayla-round, 1)); background: var(--ayla-control); color: var(--ayla-text); font: 14px/1.6 ui-monospace, monospace; resize: vertical; }
+.text-file .text-view { margin: 0; white-space: pre-wrap; word-break: break-word; font: 14px/1.6 ui-monospace, monospace; color: var(--ayla-text); }
+.lock-form { display: flex; flex-direction: column; gap: 12px; }
+.lock-form ul.lock-warnings { margin: 0; padding-left: 18px; color: var(--ayla-text-soft); font-size: 13px; line-height: 1.6; }
+.lock-form .lock-aware { flex-direction: row; align-items: flex-start; gap: 8px; }
+.lock-form .lock-error { color: var(--ayla-danger, #e5484d); font-size: 13px; }
+.lock-dialog h2 { display: flex; align-items: center; gap: 8px; }
+.locked-view { box-sizing: border-box; max-width: 420px; margin: 12vh auto 0; padding: 0 24px; display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--ayla-text-soft); }
+.locked-view h1 { margin: 0; color: var(--ayla-text); font-size: 22px; font-weight: 600; }
+.locked-view .lock-form { width: 100%; text-align: left; }
+.locked-view .lock-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.lock-code { display: block; padding: 12px 14px; border: 1px solid var(--ayla-border); border-radius: calc(8px * var(--ayla-round, 1)); background: var(--ayla-control); color: var(--ayla-text); font: 600 15px/1.5 ui-monospace, monospace; letter-spacing: .04em; text-align: center; word-break: break-all; user-select: all; }
+.lock-form .lock-code-input { font-family: ui-monospace, monospace; letter-spacing: .03em; }
+.lock-form .lock-forgot { align-self: flex-start; }
+.lock-form .lock-hint { color: var(--ayla-text-faint); font-size: 12.5px; }
+.app-shell .tree-tools .lock-missing { color: var(--ayla-accent); }
+.tree-row.locked { color: var(--ayla-text-soft); }
+.tree-lock { display: inline-flex; color: var(--ayla-text-faint); margin-left: 4px; }
+.banner-picker { width: min(720px, 100%); max-height: min(640px, calc(100vh - 40px)); }
+.banner-choices { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 0; padding: 2px; list-style: none; }
+.banner-choices button { width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 6px; border: 1px solid var(--ayla-border-soft); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-sidebar); color: var(--ayla-text); text-align: left; cursor: pointer; }
+.banner-choices button:hover, .banner-choices button:focus-visible { border-color: var(--ayla-accent); outline: none; }
+.banner-choices img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: calc(6px * var(--ayla-round, 1)); background: var(--ayla-hover); }
+.banner-choices span, .banner-choices small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.banner-choices small { color: var(--ayla-text-faint); font-size: 11px; }
 .note-banner-margin:hover > button, .note-banner-margin:focus-within > button { opacity: 1; }
 @media (hover: none) { .note-banner-margin > button { opacity: 1; } }
 .note-banner-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 8px 24px; border-bottom: 1px solid var(--ayla-border-soft); }
@@ -387,7 +421,19 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .note-tabs .icon-button.active { color: var(--ayla-accent); }
 .app-shell .note-mode .icon-button.active { background: var(--ayla-hover); }
 .note-tabs .athena-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.athena-panel { flex: 0 0 290px; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; background: var(--ayla-sidebar); border-left: 1px solid var(--ayla-border-soft); font-size: 13px; }
+.athena-panel { flex: 0 0 290px; min-width: 0; max-width: 36%; display: flex; flex-direction: column; overflow: hidden; background: var(--ayla-sidebar); border-left: 1px solid var(--ayla-border-soft); font-size: 13px; }
+.athena-git-panel { min-height: 0; overflow-y: auto; }
+.athena-graph { position: relative; display: flex; flex-direction: column; flex: 0 0 var(--athena-graph-height, min(55%, 460px)); min-height: min(140px, 100%); max-height: 100%; margin-top: auto; border-top: 1px solid var(--ayla-border-soft); }
+.athena-panel[data-git="true"] .athena-graph { flex-basis: var(--athena-graph-height, min(44%, 360px)); min-height: min(140px, 60%); max-height: calc(100% - 48px); }
+.graph-height-handle { position: absolute; z-index: 2; inset: 0 0 auto; height: 9px; cursor: row-resize; touch-action: none; outline: none; }
+.graph-height-handle::after { content: ""; position: absolute; left: 50%; top: 3px; width: 28px; height: 2px; border-radius: 2px; background: var(--ayla-border-strong); transform: translateX(-50%); }
+.graph-height-handle:hover::after, .graph-height-handle:focus-visible::after, .graph-height-handle:active::after { background: var(--ayla-accent); }
+.athena-graph canvas { display: block; flex: 1 1 0; width: 100%; min-height: 0; cursor: grab; touch-action: none; }
+.athena-graph canvas[data-hover="true"] { cursor: pointer; }
+.athena-graph canvas:active { cursor: grabbing; }
+.athena-graph canvas:focus-visible { outline: 2px solid var(--ayla-accent); outline-offset: -2px; }
+.graph-caption, .graph-message { margin: 0; padding: 8px 14px; color: var(--ayla-text-faint); }
+.graph-caption { min-height: 32px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-head { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 8px 0 14px; border-bottom: 1px solid var(--ayla-border-soft); }
 .panel-head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .app-shell .panel-head .icon-button { width: 30px; height: 30px; min-height: 30px; padding: 0; color: var(--ayla-text-faint); }
@@ -612,3 +658,92 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .icon-choice { display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; min-height: 64px; padding: 0; border: 2px solid var(--ayla-border-soft); border-radius: calc(14px * var(--ayla-round, 1)); background: var(--ayla-control); color: var(--ayla-text); }
 .app-shell button.icon-choice[aria-pressed=true], .app-shell .icon-choice[aria-pressed=true] { border-color: var(--ayla-accent); color: var(--ayla-accent); }
 .icon-choice.soon { opacity: 0.45; }
+
+/* Athena: animações curtas e discretas (abrir nota, abas, pastas, diálogos, busca). */
+@keyframes athena-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes athena-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes athena-drop { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@keyframes athena-pop { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes athena-tab { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.athena .note-pane > .note-scroll, .athena .note-pane > .athena-welcome { animation: athena-rise 200ms cubic-bezier(.2, .7, .3, 1) backwards; }
+.athena .note-pane { animation: athena-fade 160ms ease-out backwards; }
+.athena .note-tab { animation: athena-tab 140ms ease-out backwards; }
+.athena .athena-tree .tree-drop > .tree-drop, .athena .athena-tree .tree-drop > .tree-row.note, .athena .athena-tree .tree-row.hit { animation: athena-drop 140ms ease-out backwards; }
+.athena .tree-caret { transition: transform 140ms ease; }
+.athena .tree-row { transition: background-color 120ms ease, color 120ms ease; }
+.athena .dialog-backdrop { animation: athena-fade 140ms ease-out backwards; }
+.athena .dialog { animation: athena-pop 180ms cubic-bezier(.2, .7, .3, 1) backwards; }
+.athena .note-banner-controls, .athena .locked-view { animation: athena-rise 180ms ease-out backwards; }
+.athena .athena-graph canvas { animation: athena-fade 260ms ease-out backwards; }
+@media (prefers-reduced-motion: reduce) {
+  .athena .note-pane, .athena .note-pane > .note-scroll, .athena .note-pane > .athena-welcome, .athena .note-tab,
+  .athena .athena-tree .tree-drop > .tree-drop, .athena .athena-tree .tree-drop > .tree-row.note, .athena .athena-tree .tree-row.hit,
+  .athena .dialog-backdrop, .athena .dialog, .athena .note-banner-controls, .athena .locked-view, .athena .athena-graph canvas { animation: none; }
+  .athena .tree-caret, .athena .tree-row { transition: none; }
+}
+
+/* Athena: alternância Notas/Biblioteca e a Biblioteca. */
+.athena-switch { display: flex; gap: 2px; margin: 0 12px 8px; padding: 2px; border-radius: calc(8px * var(--ayla-round, 1)); background: var(--ayla-control); }
+.app-shell .athena-switch button { flex: 1; min-height: 28px; padding: 2px 8px; border: 0; border-radius: calc(6px * var(--ayla-round, 1)); background: transparent; color: var(--ayla-text-soft); font-size: 13px; }
+.app-shell .athena-switch button.active { background: var(--ayla-hover-strong); color: var(--ayla-text); font-weight: 600; }
+.tree-row.book.checked { background: var(--ayla-hover); color: var(--ayla-text); }
+.note-scroll.reader.full { background: var(--ayla-bg); }
+.tree-row.book .book-state { color: var(--ayla-text-faint); }
+/* Bolinha de seleção: aparece ao passar o mouse e em todas as linhas durante a seleção. */
+.app-shell .select-dot { flex: 0 0 auto; width: 15px; height: 15px; min-height: 0; margin-left: 4px; padding: 0; border: 1.5px solid var(--ayla-text-faint); border-radius: 50%; background: transparent; opacity: 0; transition: opacity 120ms ease, background-color 120ms ease, border-color 120ms ease; }
+.app-shell .tree-row:hover .select-dot, .app-shell .select-dot:focus-visible, .app-shell .athena-tree.selecting .select-dot, .app-shell .select-dot[aria-checked="true"], .app-shell .select-dot[aria-checked="mixed"] { opacity: 1; }
+.app-shell .select-dot:hover { border-color: var(--ayla-accent); }
+.app-shell .select-dot[aria-checked="true"] { border-color: var(--ayla-accent); background: var(--ayla-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.6 2.5L12 5.5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 11px no-repeat; }
+.app-shell .select-dot[aria-checked="mixed"] { border-color: var(--ayla-accent); background: radial-gradient(circle, var(--ayla-accent) 0 3px, transparent 3.5px); }
+.tree-row.checked { background: var(--ayla-hover); color: var(--ayla-text); }
+.tree-row.drop-target { background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); box-shadow: inset 0 0 0 1px var(--ayla-accent); }
+.athena-selection { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; border-top: 1px solid var(--ayla-border-soft); }
+.athena-selection > span { font-size: 12px; color: var(--ayla-text-faint); }
+.athena-selection .athena-actions { flex-wrap: wrap; }
+.athena-selection .athena-actions > button { flex: 1 1 auto; min-height: 44px; white-space: nowrap; }
+.athena-selection .athena-actions > button[aria-label="Limpar a seleção"] { flex: 0 0 auto; }
+.athena-selection .confirm-inline { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.athena-selection .confirm-question { flex: 1 1 100%; font-size: 12.5px; color: var(--ayla-text-soft); }
+.athena-selection .confirm-inline button { flex: 1 1 auto; }
+@media (prefers-reduced-motion: reduce) { .app-shell .select-dot { transition: none; } }
+.tree-row.book.done .tree-name { color: var(--ayla-text-faint); }
+.tree-row.book.done .book-state { color: var(--ayla-accent); }
+
+/* Leitor de livros e mangás. */
+.note-scroll.reader { display: flex; flex-direction: column; overflow: hidden; }
+.reader-bar { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 4px 12px; border-bottom: 1px solid var(--ayla-border-soft); }
+.reader-title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; white-space: nowrap; }
+.reader-title b { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.reader-title small, .reader-where { color: var(--ayla-text-faint); font-size: 12.5px; white-space: nowrap; }
+.reader-modes { display: flex; gap: 2px; padding: 0 6px; border-left: 1px solid var(--ayla-border-soft); border-right: 1px solid var(--ayla-border-soft); }
+.app-shell .reader-bar .icon-button { width: 30px; height: 30px; min-height: 30px; padding: 0; font-size: 14px; color: var(--ayla-text-soft); }
+.app-shell .reader-bar .icon-button.active { color: var(--ayla-accent); background: var(--ayla-hover); }
+.reader-progress { height: 2px; background: var(--ayla-border-soft); }
+.reader-progress span { display: block; height: 100%; background: var(--ayla-accent); transition: width 160ms ease; }
+.reader-body { position: relative; flex: 1; min-height: 0; outline: none; }
+.reader-wait, .reader-error { margin: 24px; color: var(--ayla-text-soft); }
+.reader-finished { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 10px 16px; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); }
+.reader-body.comic.paged { display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; user-select: none; }
+.comic-spread { display: flex; align-items: center; justify-content: center; gap: 0; height: 100%; width: 100%; }
+.reader-body.comic.double.rtl .comic-spread, .reader-body.comic.rtl .comic-spread { flex-direction: row-reverse; }
+.comic-spread img { max-height: 100%; max-width: 100%; object-fit: contain; }
+.reader-body.comic.double .comic-spread img { max-width: 50%; }
+.comic-placeholder { width: min(60%, 600px); height: 90%; border-radius: 4px; background: var(--ayla-control); animation: pdf-wait 1.2s ease-in-out infinite alternate; }
+.reader-body.comic.vertical { overflow-y: auto; display: flex; flex-direction: column; align-items: center; }
+.comic-strip { width: min(100%, 900px); }
+.comic-strip img { display: block; width: 100%; height: auto; }
+.comic-strip .comic-placeholder { width: 100%; height: 120vh; }
+.app-shell .comic-end { margin: 24px 0 48px; }
+.reader-body.epub { display: flex; flex-direction: column; }
+.reader-controls { display: flex; justify-content: flex-end; gap: 6px; padding: 6px 12px; }
+.reader-controls select { max-width: 50%; }
+.epub-host { position: relative; flex: 1; min-height: 0; }
+.epub-host foliate-view, .epub-host .epub-view { display: block; width: 100%; height: 100%; }
+.app-shell .reader-side { position: absolute; z-index: 1; top: 48px; bottom: 0; width: 7%; min-width: 36px; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--ayla-text-faint); font-size: 30px; line-height: 1; cursor: pointer; }
+.app-shell .reader-side span { opacity: .45; transition: opacity 120ms ease; }
+.app-shell .reader-side:hover span, .app-shell .reader-side:focus-visible span { opacity: 1; color: var(--ayla-text); }
+.app-shell .reader-side.left { left: 0; }
+.app-shell .reader-side.right { right: 0; }
+.app-shell .reader-side:hover { background: linear-gradient(90deg, var(--ayla-hover), transparent); }
+.app-shell .reader-side.right:hover { background: linear-gradient(270deg, var(--ayla-hover), transparent); }
+@media (prefers-reduced-motion: reduce) { .reader-progress span { transition: none; } .comic-placeholder { animation: none; } }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type FormEvent } from 'react';
 import AppearanceSettings from './components/AppearanceSettings';
 import BrandMark from './components/BrandMark';
-import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, useMode, useSystemIcon, type Appearance } from './services/Appearance';
+import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, palette, useMode, useSystemIcon, type Appearance } from './services/Appearance';
 import { DesktopSettings } from './components/DesktopIntegration';
 import { quickStyle, useDesktopView } from './services/DesktopView';
 import Space from './components/Space';
@@ -15,7 +15,7 @@ import Athena from './components/Athena';
 import Iris from './components/Iris';
 import AthenaSettings from './components/AthenaSettings';
 import { OrganIcon, OrganInstallDialog, OrganSettings, OrganSpace } from './components/Organ';
-import { useOrgan } from './services/Organ';
+import { shareAppearance, useOrgan } from './services/Organ';
 import { ChevronLeftIcon, ChevronRightIcon, ExpandIcon, SettingsIcon } from './components/Icons';
 import { desktopSnapshot, supports, errorText, formatBytes, gib, native, savePreferences, type Preferences, type Profile, type Project, type Snapshot } from './services/Desktop';
 import './App.css';
@@ -60,7 +60,11 @@ export default function App() {
     if (preview && (Object.keys(preview) as (keyof Appearance)[]).every(k => preview[k] === savedLook[k])) setPreview(null);
   }, [preview, savedLook]);
   const mode = useMode(look);
-  useLayoutEffect(() => applyAppearance(look, mode), [look, mode]);
+  useLayoutEffect(() => {
+    applyAppearance(look, mode);
+    // A Moneta, aberta dentro da Ayla, acompanha fundo, superfícies, texto e o modo claro ou escuro.
+    shareAppearance(palette(look, mode), mode === 'claro');
+  }, [look, mode]);
   useSystemIcon(savedLook, useMode(savedLook), Boolean(snapshot));
   useLayoutEffect(() => {
     const generation = view.pending;

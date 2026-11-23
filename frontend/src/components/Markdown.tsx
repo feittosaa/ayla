@@ -58,7 +58,8 @@ export default function Markdown({ text, onNoteLink, onTag, media, onAttachment,
   const components: Components = {
     a: ({ href, children }) => {
       const internal = href?.startsWith(WIKI) || href?.startsWith(TAG);
-      const web = href && (/^https?:\/\//i.test(href) ? href : href.startsWith('//') ? `https:${href}` : undefined);
+      // Endereços "www." soltos viram http:// no GFM; abrem como https://, igual ao editor.
+      const web = href && (/^http:\/\/www\./i.test(href) ? `https://${href.slice(7)}` : /^https?:\/\//i.test(href) ? href : href.startsWith('//') ? `https:${href}` : undefined);
       const openWeb = () => { if (web) void native('open_web', { url: web }).catch(e => onWebError?.(errorText(e))); };
       return <a href={web || href} title={href?.startsWith(WIKI) ? decodeURIComponent(href.slice(WIKI.length)) : web || href} className={href?.startsWith(TAG) ? 'note-tag' : internal ? 'note-link' : undefined} onAuxClick={web ? event => { if (event.button === 1) { event.preventDefault(); openWeb(); } } : undefined} onClick={event => {
         event.preventDefault();

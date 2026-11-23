@@ -56,14 +56,15 @@ export function changeBanner(text: string, key: 'banner_height' | 'banner_y', va
   if (!block || block.index !== 0) return text;
   const [, opening, newline, properties, closing] = block;
   const field = new RegExp(`^${key}:[^\\r\\n]*`, 'm');
-  const line = `${key}: ${key === 'banner_y' ? value / 100 : value}`;
+  // Como o make-md: posição em porcentagem (0–100), gravada entre aspas.
+  const line = key === 'banner_y' ? `${key}: "${Math.round(Math.min(100, Math.max(0, value)) * 10) / 10}"` : `${key}: ${value}`;
   const updated = field.test(properties) ? properties.replace(field, line) : properties + line + newline;
   return opening + updated + closing + text.slice(block[0].length);
 }
 
 /** Propriedades do Obsidian (frontmatter YAML no início da nota): `chave: valor`, listas
- * (`- item` ou `[a, b]`). O banner segue o make-md/Banners: `banner` (caminho, [[imagem]] ou
- * ![[imagem]]) e `banner_y` (0–100, ou 0–1). Endereços da web não viram banner. */
+ * (`- item` ou `[a, b]`). O banner segue o make-md: `banner` (caminho na raiz; também [[imagem]] ou
+ * ![[imagem]]) e `banner_y` (porcentagem, 0–100). Endereços da web não viram banner. */
 export function frontmatter(text: string): Frontmatter {
   const match = frontmatterBlock.exec(text);
   if (!match || match.index !== 0) return { properties: [], banner: null, body: text };
@@ -80,7 +81,8 @@ export function frontmatter(text: string): Frontmatter {
   const value = (key: string) => properties.find(p => p.key === key)?.values[0] ?? '';
   const target = value('banner').replace(/^!?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$/, '$1').trim();
   let y = Number.parseFloat(value('banner_y'));
-  if (!Number.isFinite(y)) y = 50; else if (y <= 1) y *= 100;
+  // Versões anteriores da Ayla gravavam uma fração sem aspas (`banner_y: 0.19`); o make-md grava "19".
+  if (!Number.isFinite(y)) y = 50; else if (/^banner_y:[ \t]*0?\.\d+[ \t]*$/m.test(match[3])) y *= 100;
   const height = Number.parseInt(value('banner_height'), 10);
   const banner = target && !/^[a-z]+:\/\//i.test(target) ? {
     target, y: Math.min(100, Math.max(0, y)),

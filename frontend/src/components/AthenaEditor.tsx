@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
-import { markdown } from '@codemirror/lang-markdown';
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxTree } from '@codemirror/language';
 import { Annotation, Compartment, EditorState, Transaction, type Range } from '@codemirror/state';
 import { Decoration, EditorView, keymap, placeholder, ViewPlugin, WidgetType, type ViewUpdate } from '@codemirror/view';
@@ -28,7 +28,10 @@ const localTarget = (value: string) => {
   try { return decodeURIComponent(value); }
   catch { return value; }
 };
+// Markdown com GFM (como o modo Ver e o Obsidian): endereços soltos (https://… e www.…) viram
+// links clicáveis, além de tachado e caixas de tarefa.
 const language = markdown({
+  base: markdownLanguage,
   extensions: {
     defineNodes: ['AthenaLink'],
     parseInline: [{

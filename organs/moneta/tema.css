@@ -1,12 +1,12 @@
 /* Camada de compatibilidade visual da Moneta dentro da Ayla.
  *
- * A Ayla serve este arquivo depois das variáveis dela (--ayla-*) em /__ayla/tema.css e o inclui
- * em toda página da Moneta aberta pela Ayla. Fundos, superfícies, bordas, texto e fontes seguem a
- * Ayla; o destaque e os gráficos continuam os da Moneta. O tema claro da Moneta também passa a
- * usar o fundo escuro da Ayla, com as cores de texto ajustadas para manter o contraste.
+ * A Ayla serve este arquivo em /__ayla/tema.css, depois das variáveis dela (--ayla-*, com a
+ * aparência atual: fundo escolhido, modo claro ou escuro) e o inclui em toda página da Moneta
+ * aberta pela Ayla. Fundos, superfícies, bordas, texto e fontes seguem a Ayla; o destaque e os
+ * gráficos continuam os da Moneta. O claro ou escuro da Moneta acompanha o modo da Ayla
+ * (/__ayla/tema.js), e as tintas de cada modo continuam as da própria Moneta.
  */
 :root, :root[data-theme=light] {
-  color-scheme: dark;
   --canvas: var(--ayla-bg);
   --sidebar: var(--ayla-sidebar);
   --panel: var(--ayla-panel);
@@ -21,35 +21,30 @@
   --disabled: var(--ayla-hover);
   --disabled-text: var(--ayla-disabled);
   --nav-active: var(--ayla-hover);
+  --grain: none;
+  --serif: var(--ayla-font-main);
+  font-family: var(--ayla-font-main);
+}
+
+:root:not([data-theme=light]) {
+  color-scheme: dark;
   --hover: #ffffff08;
   --hover-soft: #ffffff05;
   --grid: #ffffff0b;
   --backdrop: #000a;
   --shadow: #000a;
   --dot-ring: #ffffff55;
-  --grain: none;
-  --serif: var(--ayla-font-main);
-  font-family: var(--ayla-font-main);
 }
 
-/* No tema claro da Moneta, as tintas escuras perderiam contraste sobre o fundo da Ayla. */
 :root[data-theme=light] {
-  --accent-ink: #ff4814;
-  --accent-soft: #ff9478;
-  --positive: #69CA92;
-  --negative: #ff6b5b;
-  --toast: #38251b;
-  --toast-line: #824326;
-  --track: #392e28;
-  --expense-ink: #f2a900;
-  --invoice-ink: #f3d36b;
-  --hero-line: #71341d;
-  --hero-bg: linear-gradient(107deg, #301b13 20%, #572414 64%, #94380f);
-  --hero-eyebrow: #ffe5d5;
-  --hero-note: #ead2c4;
-  --hero-frame: #ffe5d530;
+  color-scheme: light;
+  --hover: #0000000a;
+  --hover-soft: #00000006;
+  --grid: #0000000f;
+  --backdrop: #1f232680;
+  --shadow: #3b2a1a33;
+  --dot-ring: #00000030;
 }
-:root[data-theme=light] :is(.brand, .locked-card) img { filter: none; }
 
 body { background: var(--canvas); }
 :is(body, button, input, select, textarea) { font-family: var(--ayla-font-main); }
