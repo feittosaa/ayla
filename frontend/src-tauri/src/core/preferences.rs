@@ -51,6 +51,8 @@ pub struct Preferences {
     pub iris_folders: Vec<PathBuf>,
     /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
+    /// Pastas de livros e mangás conectadas à Biblioteca da Athena (lidas no lugar, sem cópia).
+    pub library_folders: Vec<PathBuf>,
     /// Versionar as notas com Git (seguindo o obsidian-git do cofre), quando a pasta for um repositório.
     pub athena_git: bool,
     /// Modo de resposta escolhido na conversa ("local", "auto" ou "cloud"); vale para as
@@ -168,6 +170,7 @@ impl Default for Preferences {
             iris_folder: None,
             iris_folders: Vec::new(),
             athena_vaults: Vec::new(),
+            library_folders: Vec::new(),
             athena_git: true,
             response_source: String::new(),
             appearance: Appearance::default(),
@@ -221,6 +224,7 @@ impl Preferences {
         self.iris_folder = saved.iris_folder.clone();
         self.iris_folders = saved.iris_folders.clone();
         self.athena_vaults = saved.athena_vaults.clone();
+        self.library_folders = saved.library_folders.clone();
         self.athena_folder = saved.athena_folder.clone();
         self.response_source = saved.response_source.clone();
         // Salva à parte (save_appearance); um rascunho antigo da tela não a desfaz.
@@ -251,6 +255,8 @@ impl Preferences {
             || self.athena_folder.chars().any(char::is_control)
             || (!self.athena_folder.is_empty() && !std::path::Path::new(&self.athena_folder).is_absolute())
             || self.athena_vaults.len() > 50
+            || self.library_folders.len() > 50
+            || self.library_folders.iter().any(|p| !p.is_absolute())
             || self.athena_vaults.iter().any(|v| v.is_empty() || v.chars().count() > 4096 || v.chars().any(char::is_control) || !std::path::Path::new(v).is_absolute())
             || self.version != VERSION
             || self.percent() < 5

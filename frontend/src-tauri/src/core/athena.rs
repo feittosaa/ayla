@@ -38,6 +38,138 @@ pub fn safe_relative(relative: &str) -> Option<PathBuf> {
     ok.then(|| path.to_path_buf())
 }
 
+/// Caminho seguro de um texto que a Athena abre e edita: nota `.md` ou arquivo `.txt`.
+pub fn safe_text(relative: &str) -> Option<PathBuf> {
+    safe_relative(relative).or_else(|| {
+        let path = Path::new(relative);
+        let ok = !relative.is_empty() && relative.len() <= 1024
+            && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+            && path.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.')));
+        ok.then(|| path.to_path_buf())
+    })
+}
+
+pub fn is_txt(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+}
+
+/// Arquivos `.txt` da raiz (abrem como texto na Athena), dos mais recentes aos mais antigos.
+pub fn texts(root: &Path) -> Vec<Note> {
+    let mut out = Vec::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(kind) = entry.file_type() else { continue };
+            if name.starts_with('.') {
+                continue;
+            }
+            let relative = dir.join(&name);
+            if kind.is_dir() {
+                pending.push(relative);
+            } else if kind.is_file() && is_txt(&relative) {
+                let Ok(meta) = entry.metadata() else { continue };
+                out.push(Note { path: relative_string(&relative), title: name, modified: modified(&meta), bytes: meta.len() });
+                if out.len() >= MAX_NOTES {
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// Texto de um arquivo importado: UTF-8 (sem BOM) ou, se não for, Latin-1/Windows-1252.
+pub fn decode_text(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => bytes.iter().map(|&b| match b {
+            0x80 => '€', 0x91 => '‘', 0x92 => '’', 0x93 => '“', 0x94 => '”', 0x96 => '–', 0x97 => '—', 0x85 => '…',
+            other => other as char,
+        }).collect(),
+    }
+}
+
+/// Notas a importar de arquivos ou pastas fora da Athena: caminho relativo de destino (com as
+/// subpastas da pasta de origem, sem extensão) e o texto. Pastas e arquivos ocultos e links
+/// simbólicos ficam de fora; arquivos grandes demais são contados como ignorados.
+pub fn collect_imports(sources: &[PathBuf]) -> (Vec<(String, String)>, usize) {
+    let mut out = Vec::new();
+    let mut skipped = 0;
+    // `None`: não é .md nem .txt; `Some(None)`: ignorado (grande demais ou ilegível).
+    let one = |path: &Path, relative: &Path| -> Option<Option<(String, String)>> {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if ext != "md" && ext != "txt" {
+            return None;
+        }
+        let small = fs::metadata(path).is_ok_and(|m| m.len() <= MAX_NOTE_BYTES);
+        Some(small.then(|| fs::read(path).ok()).flatten().map(|bytes| {
+            let target = relative.with_extension("").components().map(|c| file_name(&c.as_os_str().to_string_lossy())).collect::<Vec<_>>().join("/");
+            (target, decode_text(&bytes))
+        }))
+    };
+    let mut add = |found: Option<Option<(String, String)>>, out: &mut Vec<(String, String)>| match found {
+        Some(Some(note)) => out.push(note),
+        Some(None) => skipped += 1,
+        None => {}
+    };
+    for source in sources {
+        let Ok(meta) = fs::symlink_metadata(source) else { add(Some(None), &mut out); continue };
+        let Some(name) = source.file_name() else { continue };
+        if meta.is_file() {
+            add(one(source, Path::new(name)), &mut out);
+            continue;
+        }
+        if !meta.is_dir() {
+            continue;
+        }
+        let mut pending = vec![PathBuf::from(name)];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(source.parent().unwrap_or(Path::new("/")).join(&dir)) else { continue };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                let Ok(kind) = entry.file_type() else { continue };
+                if entry_name.starts_with('.') || kind.is_symlink() {
+                    continue;
+                }
+                let relative = dir.join(&entry_name);
+                if kind.is_dir() {
+                    pending.push(relative);
+                } else if kind.is_file() {
+                    add(one(&entry.path(), &relative), &mut out);
+                }
+            }
+            if out.len() >= MAX_NOTES {
+                break;
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    (out, skipped)
+}
+
+/// Importa as notas coletadas para a pasta da raiz, sem sobrescrever (nomes repetidos ganham " 2").
+pub fn import_into(root: &Path, folder: &str, notes: &[(String, String)]) -> Result<usize, String> {
+    let folder = safe_folder(folder).ok_or("Pasta inválida")?;
+    let mut count = 0;
+    for (relative, content) in notes {
+        let base = folder.join(relative);
+        let mut target = base.with_extension("md");
+        let mut n = 2;
+        while root.join(&target).exists() {
+            target = PathBuf::from(format!("{} {n}.md", base.to_string_lossy()));
+            n += 1;
+        }
+        write(root, &relative_string(&target), content, None)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn modified(meta: &fs::Metadata) -> i64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -123,7 +255,7 @@ pub fn scan_attachments(root: &Path, limit: Option<usize>) -> (Vec<Note>, Vec<St
 /// Move um anexo para outra pasta da mesma raiz (sem sobrescrever). Links pelo nome continuam
 /// valendo, porque os anexos são procurados pelo nome.
 pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, String> {
-    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some()).ok_or("Arquivo inválido")?;
+    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some() || is_txt(p)).ok_or("Arquivo inválido")?;
     let name = from_path.file_name().ok_or("Arquivo inválido")?;
     let to_path = safe_folder(folder).ok_or("Pasta inválida")?.join(name);
     if !root.join(&from_path).is_file() {
@@ -180,7 +312,7 @@ pub fn mkdir(root: &Path, parent: &str, name: &str) -> Result<String, String> {
 
 /// Conteúdo e data de modificação de uma nota.
 pub fn read(root: &Path, relative: &str) -> Result<(String, i64), String> {
-    let path = root.join(safe_relative(relative).ok_or("Nota inválida")?);
+    let path = root.join(safe_text(relative).ok_or("Nota inválida")?);
     let meta = fs::metadata(&path).map_err(|_| "Nota não encontrada")?;
     if meta.len() > MAX_NOTE_BYTES {
         return Err("Esta nota é grande demais para abrir aqui".into());
@@ -192,7 +324,7 @@ pub fn read(root: &Path, relative: &str) -> Result<(String, i64), String> {
 /// Grava uma nota. Com `expected`, recusa se o arquivo mudou por fora (ex.: no Obsidian) desde
 /// que foi aberto. Devolve a nova data de modificação.
 pub fn write(root: &Path, relative: &str, content: &str, expected: Option<i64>) -> Result<i64, String> {
-    let path = root.join(safe_relative(relative).ok_or("Nota inválida")?);
+    let path = root.join(safe_text(relative).ok_or("Nota inválida")?);
     if content.len() as u64 > MAX_NOTE_BYTES {
         return Err("Nota grande demais".into());
     }
@@ -304,7 +436,8 @@ pub fn links_to(target: &str, note_path: &str) -> bool {
 
 /// Move a nota para `.trash/` (lixeira do Obsidian) em vez de apagar.
 pub fn trash(root: &Path, relative: &str) -> Result<(), String> {
-    let relative = safe_relative(relative).ok_or("Nota inválida")?;
+    let relative = safe_text(relative).ok_or("Nota inválida")?;
+    let extension = relative.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "md".into());
     let source = root.join(&relative);
     if !source.is_file() {
         return Err("Nota não encontrada".into());
@@ -312,10 +445,10 @@ pub fn trash(root: &Path, relative: &str) -> Result<(), String> {
     let bin = root.join(".trash");
     fs::create_dir_all(&bin).map_err(|_| "Não foi possível criar a lixeira")?;
     let stem = relative.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let mut target = bin.join(format!("{stem}.md"));
+    let mut target = bin.join(format!("{stem}.{extension}"));
     let mut n = 2;
     while target.exists() {
-        target = bin.join(format!("{stem} {n}.md"));
+        target = bin.join(format!("{stem} {n}.{extension}"));
         n += 1;
     }
     fs::rename(&source, &target).map_err(|_| "Não foi possível mover a nota para a lixeira".into())
@@ -997,6 +1130,53 @@ mod tests {
         assert_eq!(read(&root, &note).unwrap().0, format!("{embed}{another}"));
         assert_eq!(attachments(&root).len(), 2);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn txt_abre_e_importacao_traz_txt_e_md_como_notas() {
+        let root = temp();
+        let outside = temp();
+        fs::write(root.join("lista.txt"), "compras").unwrap();
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::write(root.join(".obsidian/x.txt"), "oculto").unwrap();
+        assert_eq!(texts(&root).iter().map(|n| n.path.as_str()).collect::<Vec<_>>(), ["lista.txt"]);
+        assert!(list(&root).is_empty(), "txt não vira nota na lista de notas");
+        let (text, stamp) = read(&root, "lista.txt").unwrap();
+        assert_eq!(text, "compras");
+        write(&root, "lista.txt", "compras e mais", Some(stamp)).unwrap();
+        assert!(read(&root, "../fora.txt").is_err() && read(&root, ".oculto.txt").is_err());
+
+        // Pasta de fora: .txt e .md com subpastas; outros tipos, ocultos e links ficam de fora.
+        let src = outside.join("Antigas");
+        fs::create_dir_all(src.join("Viagens/2019")).unwrap();
+        fs::create_dir_all(src.join(".git")).unwrap();
+        fs::write(src.join("Ideias.md"), "# Ideias\n[[Link]]").unwrap();
+        fs::write(src.join("Viagens/2019/Roma.txt"), b"\xEF\xBB\xBFRoma").unwrap();
+        fs::write(src.join("Viagens/acentos.txt"), b"Caf\xe9 \x93antigo\x94").unwrap();
+        fs::write(src.join("foto.png"), b"png").unwrap();
+        fs::write(src.join(".git/HEAD"), "ref").unwrap();
+        fs::write(src.join("grande.txt"), vec![b'a'; MAX_NOTE_BYTES as usize + 1]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("Antigas/Ideias.md"), src.join("atalho.md")).unwrap();
+        let (notes, skipped) = collect_imports(&[src.clone(), outside.join("ausente.txt")]);
+        let paths: Vec<&str> = notes.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["Antigas/Ideias", "Antigas/Viagens/2019/Roma", "Antigas/Viagens/acentos"]);
+        assert_eq!(skipped, 2, "o grande e o ausente");
+        assert_eq!(notes[1].1, "Roma", "sem BOM");
+        assert_eq!(notes[2].1, "Café “antigo”", "Windows-1252");
+        fs::create_dir_all(root.join("Importadas/Antigas")).unwrap();
+        fs::write(root.join("Importadas/Antigas/Ideias.md"), "já existia").unwrap();
+        assert_eq!(import_into(&root, "Importadas", &notes).unwrap(), 3);
+        assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias.md")).unwrap(), "já existia", "não sobrescreve");
+        assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias 2.md")).unwrap(), "# Ideias\n[[Link]]");
+        assert!(root.join("Importadas/Antigas/Viagens/2019/Roma.md").is_file());
+        assert_eq!(fs::read_to_string(src.join("Ideias.md")).unwrap(), "# Ideias\n[[Link]]", "original intacto");
+        let (single, _) = collect_imports(&[src.join("Viagens/acentos.txt")]);
+        assert_eq!(single[0].0, "acentos");
+        trash(&root, "lista.txt").unwrap();
+        assert!(root.join(".trash/lista.txt").is_file());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]

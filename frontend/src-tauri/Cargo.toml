@@ -52,6 +52,9 @@ kamadak-exif = "0.6"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
 zeroize = "1"
+# Chave de recuperação global das pastas e arquivos protegidos: cada item guarda uma cópia da
+# chave dele cifrada para a chave pública global; só o código anotado abre (BSD-3, Rust puro).
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 
 # Mesma versão usada pelo Tauri (wry): libera o microfone na janela da Ayla no Linux.
 [target.'cfg(target_os = "linux")'.dependencies]

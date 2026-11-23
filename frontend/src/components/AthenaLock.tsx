@@ -2,28 +2,28 @@ import { useState, type FormEvent } from 'react';
 import { LockIcon } from './Icons';
 import { errorText } from '../services/Desktop';
 
-/** O que o diálogo faz com a pasta: proteger, abrir, trocar a senha, tirar a proteção, recuperar
- * com a chave (senha esquecida) ou criar uma chave de recuperação nova. */
-export type LockMode = 'protect' | 'unlock' | 'password' | 'unprotect' | 'recover' | 'recovery';
+/** O que o diálogo faz com a pasta ou o arquivo: proteger, abrir, trocar a senha, tirar a proteção
+ * ou recuperar com a chave de recuperação global (senha esquecida). */
+export type LockMode = 'protect' | 'unlock' | 'password' | 'unprotect' | 'recover';
 export const MIN_PASSWORD = 8;
 /** Depois da senha, a pasta fica livre por 10 minutos; passado isso, bloqueia ao sair dela. */
 export const UNLOCK_GRACE_MS = 10 * 60_000;
 
 const titles: Record<LockMode, string> = {
   protect: 'Proteger com senha', unlock: 'Pasta protegida', password: 'Trocar a senha', unprotect: 'Tirar a proteção',
-  recover: 'Esqueci a senha', recovery: 'Chave de recuperação',
+  recover: 'Esqueci a senha',
 };
 const actions: Record<LockMode, string> = {
   protect: 'Proteger', unlock: 'Abrir', password: 'Trocar a senha', unprotect: 'Tirar a proteção',
-  recover: 'Definir a senha nova', recovery: 'Criar chave nova',
+  recover: 'Definir a senha nova',
 };
 
 /** Resposta de um envio: a chave de recuperação, quando uma acabou de ser criada. */
 export type LockResult = string | void;
 
 /** Formulário de senha das pastas protegidas da Athena (num diálogo ou dentro de uma aba). */
-function LockForm({ mode, folder, git, recovery, onSubmit, onCancel, onForgot, autoFocus = true }: {
-  mode: LockMode; folder: string; git?: boolean; recovery?: boolean; autoFocus?: boolean;
+function LockForm({ mode, folder, file = false, git, recovery, onSubmit, onCancel, onForgot, autoFocus = true }: {
+  mode: LockMode; folder: string; file?: boolean; git?: boolean; recovery?: boolean; autoFocus?: boolean;
   onSubmit: (secret: string, next: string) => Promise<LockResult>; onCancel?: () => void; onForgot?: () => void;
 }) {
   const [secret, setSecret] = useState('');
@@ -46,18 +46,19 @@ function LockForm({ mode, folder, git, recovery, onSubmit, onCancel, onForgot, a
   }
   return <form className="lock-form" onSubmit={e => void submit(e)}>
     {mode === 'protect' && <>
-      <p>Os arquivos de <b>{name}</b> (notas, imagens e PDFs) vão ficar cifrados no disco{git ? ' e no GitHub' : ''}. Só a Athena os mostra, depois da senha; a Iris e a conversa com a IA não os veem.</p>
+      {file
+        ? <p>O conteúdo de <b>{name}</b> vai ficar cifrado no disco{git ? ' e no GitHub' : ''}; o nome continua visível. Só a Athena o mostra, depois da senha; a Iris e a conversa com a IA não o veem.</p>
+        : <p>Os arquivos de <b>{name}</b> (notas, imagens, PDFs e livros) vão ficar cifrados no disco{git ? ' e no GitHub' : ''}. Só a Athena os mostra, depois da senha; a Iris e a conversa com a IA não os veem.</p>}
       <ul className="lock-warnings">
-        <li>Em seguida, a Athena mostra uma <b>chave de recuperação</b>, a única forma de abrir a pasta se você esquecer a senha.</li>
-        <li>O Obsidian deixa de abrir o que estiver nesta pasta.</li>
+        <li>Se você esquecer a senha, só a <b>chave de recuperação global</b> da Athena abre de novo. Se ela ainda não existir, a Athena a mostra em seguida, uma única vez.</li>
+        <li>O Obsidian deixa de abrir {file ? 'este arquivo' : 'o que estiver nesta pasta'}.</li>
         {git && <li>Versões antigas que já estão no histórico do Git continuam legíveis lá.</li>}
         <li>Cada arquivo pode ter até 100 MB.</li>
       </ul>
     </>}
-    {mode === 'unlock' && <p>Digite a senha de <b>{name}</b>. Ela fica aberta por 10 minutos; depois disso, bloqueia quando você sair dela.</p>}
-    {mode === 'unprotect' && <p>Os arquivos de <b>{name}</b> voltam a ser comuns, legíveis no disco, no Obsidian e no Git.</p>}
-    {mode === 'recover' && <p>Digite a chave de recuperação de <b>{name}</b> (a que começa com ATHENA-) e escolha uma senha nova. A chave continua valendo depois.</p>}
-    {mode === 'recovery' && <p>{recovery ? 'A chave de recuperação atual deixa de valer e uma nova é criada.' : `${name} ainda não tem chave de recuperação: sem ela, esquecer a senha perde os arquivos.`} Digite a senha da pasta.</p>}
+    {mode === 'unlock' && <p>Digite a senha de <b>{name}</b>. {file ? 'O arquivo fica aberto' : 'A pasta fica aberta'} por 10 minutos; depois disso, bloqueia quando você sair {file ? 'dele' : 'dela'}.</p>}
+    {mode === 'unprotect' && <p>{file ? <><b>{name}</b> volta a ser um arquivo comum</> : <>Os arquivos de <b>{name}</b> voltam a ser comuns</>}, legível no disco, no Obsidian e no Git.</p>}
+    {mode === 'recover' && <p>Digite a chave de recuperação global da Athena (a que começa com ATHENA-) e escolha uma senha nova para <b>{name}</b>. A chave continua valendo depois.</p>}
     {mode === 'recover'
       ? <label>Chave de recuperação<input className="lock-code-input" autoFocus={autoFocus} autoComplete="off" spellCheck={false} autoCapitalize="characters" placeholder="ATHENA-XXXX-XXXX-…" value={secret} onChange={e => setSecret(e.target.value)} /></label>
       : <label>{mode === 'password' ? 'Senha atual' : 'Senha'}
@@ -72,16 +73,16 @@ function LockForm({ mode, folder, git, recovery, onSubmit, onCancel, onForgot, a
     </div>
     {mode === 'unlock' && onForgot && (recovery
       ? <button type="button" className="link-button lock-forgot" onClick={onForgot}>Esqueci a senha</button>
-      : <p className="lock-hint">Esta pasta não tem chave de recuperação.</p>)}
+      : <p className="lock-hint">Este item ainda não tem chave de recuperação: ele ganha a global quando for aberto com a senha.</p>)}
   </form>;
 }
 
 /** Chave de recuperação recém-criada: mostrada uma única vez, só fecha depois de confirmar. */
-function RecoveryCode({ code, onDone }: { code: string; onDone: () => void }) {
+export function RecoveryCode({ code, onDone }: { code: string; onDone: () => void }) {
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   return <div className="lock-form">
-    <p>Guarde esta chave fora deste computador (papel, gerenciador de senhas). Com ela você define uma senha nova se esquecer a atual, em qualquer computador. <b>Ela não será mostrada de novo</b>, e quem a tiver consegue abrir a pasta.</p>
+    <p>Esta é a <b>chave de recuperação global</b> da Athena: com ela você define uma senha nova para qualquer pasta ou arquivo protegido, em qualquer computador. Guarde fora deste computador (papel, gerenciador de senhas). <b>Ela não será mostrada de novo</b>, e quem a tiver consegue abrir todos os itens protegidos.</p>
     <code className="lock-code" aria-label="Chave de recuperação">{code}</code>
     <div className="row-actions">
       <button type="button" className="ghost-button" onClick={() => void navigator.clipboard.writeText(code).then(() => setCopied(true), () => setCopied(false))}>{copied ? 'Copiada' : 'Copiar'}</button>
@@ -92,7 +93,7 @@ function RecoveryCode({ code, onDone }: { code: string; onDone: () => void }) {
 }
 
 export function LockDialog(props: {
-  mode: LockMode; folder: string; git?: boolean; recovery?: boolean;
+  mode: LockMode; folder: string; file?: boolean; git?: boolean; recovery?: boolean;
   onSubmit: (mode: LockMode, secret: string, next: string) => Promise<LockResult>; onClose: () => void;
 }) {
   const [mode, setMode] = useState(props.mode);
@@ -104,17 +105,17 @@ export function LockDialog(props: {
       <h2 id="lock-title"><LockIcon size={18} /> {code ? 'Chave de recuperação' : titles[mode]}</h2>
       {code
         ? <RecoveryCode code={code} onDone={props.onClose} />
-        : <LockForm key={mode} mode={mode} folder={props.folder} git={props.git} recovery={props.recovery} onCancel={props.onClose} onForgot={() => setMode('recover')}
+        : <LockForm key={mode} mode={mode} folder={props.folder} file={props.file} git={props.git} recovery={props.recovery} onCancel={props.onClose} onForgot={() => setMode('recover')}
             onSubmit={async (secret, next) => { const result = await props.onSubmit(mode, secret, next); if (result) setCode(result); else props.onClose(); }} />}
     </div>
   </div>;
 }
 
 /** Aba de uma nota ou arquivo de pasta bloqueada: pede a senha no lugar do conteúdo. */
-export function LockedView({ folder, recovery, onUnlock, onForgot }: { folder: string; recovery?: boolean; onUnlock: (password: string) => Promise<void>; onForgot: () => void }) {
+export function LockedView({ folder, file, recovery, onUnlock, onForgot }: { folder: string; file?: boolean; recovery?: boolean; onUnlock: (password: string) => Promise<void>; onForgot: () => void }) {
   return <div className="note-scroll"><div className="locked-view">
     <LockIcon size={32} />
     <h1>{folder.slice(folder.lastIndexOf('/') + 1)}</h1>
-    <LockForm mode="unlock" folder={folder} recovery={recovery} onSubmit={password => onUnlock(password)} onForgot={onForgot} />
+    <LockForm mode="unlock" folder={folder} file={file} recovery={recovery} onSubmit={password => onUnlock(password)} onForgot={onForgot} />
   </div></div>;
 }
