@@ -11,6 +11,7 @@ export const SidebarIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y=
 export const ComputerIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M2 20h20" /></Icon>;
 export const CloudIcon = ({ size }: Props) => <Icon size={size}><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 0 0 4.5 12.5 3.5 3.5 0 0 0 6 19z" /></Icon>;
 export const PaperclipIcon = ({ size }: Props) => <Icon size={size}><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></Icon>;
+export const ScreenIcon = ({ size }: Props) => <Icon size={size}><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" /><circle cx="12" cy="12" r="2.5" /></Icon>;
 export const SlidersIcon = ({ size }: Props) => <Icon size={size}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></Icon>;
 export const MicIcon = ({ size }: Props) => <Icon size={size}><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" /></Icon>;
 export const ExpandIcon = ({ size }: Props) => <Icon size={size}><path d="M5 19 19 5M8 5h11v11" /></Icon>;
@@ -27,6 +28,8 @@ export const DownloadIcon = ({ size }: Props) => <Icon size={size}><path d="M12 
 export const PencilIcon = ({ size }: Props) => <Icon size={size}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></Icon>;
 export const EyeIcon = ({ size }: Props) => <Icon size={size}><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></Icon>;
 export const TrashIcon = ({ size }: Props) => <Icon size={size}><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" /></Icon>;
+export const DatabaseIcon = ({ size }: Props) => <Icon size={size}><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></Icon>;
+export const WarningIcon = ({ size }: Props) => <Icon size={size}><path d="M12 3 2 20h20L12 3z" /><path d="M12 10v4M12 17.5v.01" /></Icon>;
 /** Quadrado cheio: parar gravação ou resposta. */
 export const StopIcon = ({ size = 16 }: Props) => <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor" /></svg>;
 export const LockIcon = ({ size }: Props) => <Icon size={size}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></Icon>;

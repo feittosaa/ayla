@@ -408,6 +408,32 @@ impl Runtime {
             }
         }
     }
+    /// Contexto do worker: embeddings usam 2048; o automático sobe para 32K quando o modelo é do
+    /// catálogo (consumo medido) e roda numa placa de vídeo com folga.
+    pub fn context_for(&self, model: &Model, prefs: &Preferences) -> u32 {
+        if model.capability == Capability::Embedding { return 2048; }
+        let gpu = || find_binary(&self.root.join("llama-vulkan"), "llama-server").is_some()
+            && hardware::detect().gpus.iter().filter_map(|g| g.vram_total_bytes).max().unwrap_or(0) >= 8 << 30;
+        auto_context(prefs.context_is_auto(), model.memory_bytes.is_some(), gpu).unwrap_or(prefs.context_tokens)
+    }
+    /// Workers que sobraram de uma Ayla que caiu sem encerrar (ex.: `kill -9`, travamento): na
+    /// abertura da instância principal nenhum outro processo pode estar usando estes executáveis,
+    /// então qualquer um que rode a partir da pasta de runtimes é sobra e ocupa RAM/VRAM à toa.
+    pub fn reap_orphans(&self) -> usize {
+        let Ok(root) = self.root.canonicalize() else { return 0 };
+        let me = std::process::id();
+        let mut stopped = 0;
+        for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+            if pid == me { continue; }
+            let Ok(exe) = fs::read_link(entry.path().join("exe")) else { continue };
+            if !exe.starts_with(&root) { continue; }
+            if std::process::Command::new("kill").arg(pid.to_string()).status().is_ok_and(|s| s.success()) {
+                stopped += 1;
+            }
+        }
+        stopped
+    }
     /// Encerra o modelo de conversa/voz; o worker de memória segue seu próprio ciclo.
     pub fn stop(&self) {
         Self::stop_slot(&self.worker);
@@ -495,7 +521,7 @@ impl Runtime {
         let slot = self.slot(model);
         let stop = || Self::stop_slot(slot);
         // Embeddings usam contexto fixo: entradas curtas e um processo pequeno.
-        let context = if memory { 2048 } else { prefs.context_tokens };
+        let context = self.context_for(model, prefs);
         {
             let mut guard = slot.lock().map_err(|_| "Modelo ocupado")?;
             if let Some(worker) = guard.as_mut() {
@@ -557,16 +583,8 @@ impl Runtime {
         if component == "llama-cpu" || memory {
             command.args(["-ngl", "0"]);
         } else {
-            let hw = hardware::detect();
-            let vram = hw
-                .gpus
-                .iter()
-                .filter_map(|g| g.vram_total_bytes)
-                .max()
-                .unwrap_or(0);
-            let margin = ((vram.saturating_mul(100 - u64::from(prefs.percent())) / 100)
-                / (1024 * 1024))
-                .max(512);
+            // A placa de vídeo fica para o modelo, menos a reserva do sistema; o perfil limita a RAM.
+            let margin = super::models::GPU_RESERVE / (1024 * 1024);
             command.args([
                 "-ngl",
                 "auto",
@@ -578,6 +596,10 @@ impl Runtime {
         }
         if let Some(projector) = &model.companion {
             command.arg("--mmproj").arg(projector);
+        }
+        // MTP do próprio modelo: 2 tokens por passo deram +43% de geração (benchmark de 23/11/2026).
+        if !memory && model.mtp() {
+            command.args(["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]);
         }
         if model.capability == Capability::Embedding {
             // O GGUF informa pooling; não impor mean a modelos que exigem CLS/last.
@@ -810,6 +832,11 @@ pub async fn run_tool(mut command: Command, cancel: &CancellationToken, limit: D
     }
 }
 
+/// 32K só no automático, para modelo com consumo medido e com placa de vídeo (avaliada por último).
+fn auto_context(auto: bool, measured: bool, gpu: impl FnOnce() -> bool) -> Option<u32> {
+    (auto && measured && gpu()).then_some(super::preferences::GPU_CONTEXT)
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.stop_all();
@@ -870,6 +897,10 @@ pub async fn stream_chat(
                 break;
             }
             let event: Value = serde_json::from_str(data).map_err(|_| "Resposta inválida")?;
+            // llama.cpp manda no último trecho os tempos de leitura do prompt e de geração.
+            if event["timings"].is_object() {
+                report(json!({"type":"timings","timings":event["timings"]}));
+            }
             if event["choices"][0]["finish_reason"].as_str() == Some("length") {
                 return Err("O modelo atingiu o limite de geração. Ajuste o contexto ou use um modelo menor.".into());
             }
@@ -901,6 +932,34 @@ pub async fn stream_chat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_context_needs_a_measured_model_and_a_gpu() {
+        assert_eq!(auto_context(true, true, || true), Some(32768));
+        assert_eq!(auto_context(true, true, || false), None);
+        assert_eq!(auto_context(true, false, || panic!("modelo importado nem consulta a GPU")), None);
+        assert_eq!(auto_context(false, true, || true), None);
+    }
+
+    #[test]
+    fn orphans_from_the_runtimes_folder_are_stopped_and_others_are_kept() {
+        let root = std::env::temp_dir().join(format!("ayla-reap-{}", std::process::id()));
+        let bin = root.join("llama-cpu");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("llama-server");
+        fs::copy("/usr/bin/sleep", &fake).unwrap();
+        let mut orphan = std::process::Command::new(&fake).arg("60").spawn().unwrap();
+        let mut other = std::process::Command::new("/usr/bin/sleep").arg("60").spawn().unwrap();
+        // Espera o exec trocar a imagem do processo.
+        while fs::read_link(format!("/proc/{}/exe", orphan.id())).map_or(true, |e| !e.starts_with(&bin)) { std::thread::sleep(Duration::from_millis(5)); }
+        let runtime = Runtime::new(root.clone());
+        assert_eq!(runtime.reap_orphans(), 1);
+        assert!(orphan.wait().unwrap().code().is_none(), "encerrado por sinal");
+        assert!(other.try_wait().unwrap().is_none(), "processo de fora continua");
+        other.kill().unwrap();
+        let _ = other.wait();
+        fs::remove_dir_all(root).unwrap();
+    }
     use std::io::Write;
     #[test]
     fn thinking_is_enabled_only_for_reasoning_requests() {
@@ -946,6 +1005,9 @@ mod tests {
             capabilities: &[Capability::Text, Capability::Reasoning, Capability::Vision],
             measured_bytes: 1000,
             runtime: "llama",
+            gpu_bytes: 0,
+            gpu_only: false,
+            mtp: false,
             files: Box::leak(Box::new([
                 super::super::models::CatalogFile { url: url("/w"), bytes: 7, sha256: digest(b"weights"), projector: false },
                 super::super::models::CatalogFile { url: url("/p"), bytes: 4, sha256: projector_sha, projector: true },
@@ -1209,6 +1271,42 @@ mod tests {
                 .unwrap();
             assert!(find_binary(&root.join(artifact.id), artifact.binary).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use base64::Engine;
+    /// Rode com AYLA_MODEL_CACHE=/var/tmp/ayla-benchmark: instala o Qwen3.6 35B do catálogo pelo cache
+    /// (tamanho e SHA-256 conferidos) e conversa pelo runtime Vulkan já instalado, com MTP e imagem.
+    #[tokio::test]
+    #[ignore = "modelo de 12,6 GB e placa de vídeo reais"]
+    async fn catalog_moe_runs_on_the_gpu_with_mtp_vision_and_timings() {
+        let root = std::env::temp_dir().join(format!("ayla-gpu-real-{}", super::super::store::id()));
+        fs::create_dir_all(root.join("runtimes")).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        std::os::unix::fs::symlink(format!("{home}/.local/share/dev.feit.ayla/runtimes/llama-vulkan"), root.join("runtimes").join("llama-vulkan")).unwrap();
+        let entry = super::super::models::catalog().iter().find(|e| e.id == "qwen3.6-35b-a3b").unwrap();
+        let token = CancellationToken::new();
+        let model = install_model(&root.join("models"), entry, &token, |_| {}).await.unwrap();
+        assert!(model.mtp() && model.companion.is_some() && model.memory_bytes.is_some());
+        let runtime = Runtime::new(root.join("runtimes"));
+        let prefs = Preferences::default();
+        assert_eq!(runtime.context_for(&model, &prefs), 32768, "contexto automático com GPU");
+        let image = fs::read("/tmp/claude-1000/-home-feit-Documents-programming-ayla/f52c5660-6ce4-448b-8115-42b55203c568/scratchpad/img.png").unwrap();
+        let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(image));
+        let messages = vec![json!({"role":"user","content":[{"type":"text","text":"De que obra é esta capa? Responda em uma frase."},{"type":"image_url","image_url":{"url":url}}]})];
+        let mut timings = Value::Null;
+        let start = Instant::now();
+        let (text, first, _) = runtime.local_chat(&model, Capability::Vision, &prefs, messages, &token, |e| if e["type"] == "timings" { timings = e["timings"].clone(); }).await.unwrap();
+        eprintln!("{} ms até o 1º token, {} ms no total; resposta: {text}; tempos: {timings}", first.unwrap_or(0), start.elapsed().as_millis());
+        assert!(text.contains("One Piece"), "{text}");
+        assert!(timings["predicted_per_second"].as_f64().unwrap() > 0.0);
+        assert!(timings["draft_n"].as_u64().unwrap_or(0) > 0 || timings.get("draft_n_accepted").is_some(), "MTP ativo: {timings}");
+        runtime.stop_all();
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

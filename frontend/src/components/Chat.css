@@ -158,3 +158,71 @@
 .cloud-references { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--ayla-border-soft); border-radius: calc(10px * var(--ayla-round, 1)); }
 .cloud-references legend { padding: 0 4px; font-weight: 600; }
 .cloud-references small { color: var(--ayla-text-faint); }
+
+/* Bases de dados na barra lateral: recolhidas ao abrir; a escolhida fica marcada no destaque. */
+.app-shell .sidebar-toggle { flex: 1; display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 4px 4px 2px 0; padding: 0 10px; border: 0; border-radius: calc(10px * var(--ayla-round, 1)); background: transparent; color: var(--ayla-text-soft); font-size: 13px; font-weight: 500; text-align: left; cursor: pointer; }
+.sidebar-toggle svg { transition: transform 120ms ease; }
+.sidebar-toggle[aria-expanded=true] svg { transform: rotate(90deg); }
+.app-shell .sidebar-toggle:hover { background: var(--ayla-hover); color: var(--ayla-text); }
+.app-shell .conversation-item.base-item { display: flex; align-items: center; gap: 10px; }
+.base-item span { overflow: hidden; text-overflow: ellipsis; }
+.app-shell .conversation-item.base-item[aria-pressed=true] { background: var(--ayla-selected); color: var(--ayla-accent); }
+.base-chip { color: var(--ayla-accent); }
+
+/* Origem sob a resposta (base consultada, busca externa). */
+.message-notice { margin: 6px 0 0; color: var(--ayla-text-faint); font-size: 12px; }
+.file-chip.link-chip { cursor: pointer; color: inherit; font: inherit; }
+.file-chip.link-chip:hover { border-color: var(--ayla-accent); color: var(--ayla-text); }
+
+/* Imagens encontradas. */
+.image-results { margin-top: 10px; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.image-card { margin: 0; display: flex; flex-direction: column; border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); overflow: hidden; background: var(--ayla-bg); }
+.image-thumb { display: block; padding: 0; border: 0; background: var(--ayla-control); aspect-ratio: 4 / 3; cursor: zoom-in; }
+.image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.image-card figcaption { display: flex; flex-direction: column; gap: 4px; padding: 8px; font-size: 12px; }
+.image-credit { color: var(--ayla-text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.license-badge { align-self: flex-start; padding: 1px 7px; border-radius: 999px; background: var(--ayla-control); color: var(--ayla-text-faint); font-size: 11px; }
+.license-badge.free { background: color-mix(in srgb, var(--ayla-accent) 18%, transparent); color: var(--ayla-accent); }
+.image-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.image-actions .ghost-button { min-height: 26px; padding: 0 8px; font-size: 12px; }
+.image-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 0; color: var(--ayla-text-faint); font-size: 12px; }
+.image-lightbox { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; background: rgb(0 0 0 / 82%); }
+.image-lightbox img { max-width: 100%; max-height: calc(100% - 70px); object-fit: contain; }
+.image-lightbox-bar { display: flex; align-items: center; gap: 12px; width: min(960px, 100%); padding: 8px 12px; border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text); }
+.image-lightbox-bar > span:first-child { display: flex; flex-direction: column; flex: 1; min-width: 0; font-size: 13px; }
+.image-lightbox-bar small { color: var(--ayla-text-faint); }
+
+/* Diálogo das bases. */
+.bases-dialog { width: min(620px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
+.bases-dialog h2 { margin: 0; }
+.bases-dialog h3 { margin: 4px 0 0; font-size: 13px; color: var(--ayla-text-faint); font-weight: 500; }
+.bases-catalog { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bases-catalog li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); }
+.bases-catalog .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bases-link { display: flex; gap: 8px; }
+.bases-link input { flex: 1; min-width: 0; }
+.bases-report { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-bg); font-size: 13px; }
+.bases-report p { margin: 0; }
+.bases-tables { margin: 0; padding-left: 18px; color: var(--ayla-text-soft); font-size: 12px; }
+.dialog-actions { justify-content: flex-end; }
+.sources-list { display: flex; flex-direction: column; }
+.sources-group { margin: 6px 12px 2px 26px; font-size: 11px; color: var(--ayla-text-faint); }
+.source-warning { display: inline-flex; margin-left: auto; padding-left: 6px; color: var(--ayla-accent-soft); flex-shrink: 0; }
+
+/* Rolagem da barra lateral: fina, com espaço próprio (não cobre os ícones) e discreta até o mouse chegar. */
+.conversation-list { scrollbar-gutter: stable; }
+.conversation-list::-webkit-scrollbar { width: 6px; }
+.conversation-list::-webkit-scrollbar-track { background: transparent; }
+.conversation-list::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--ayla-border); }
+.conversation-list:hover::-webkit-scrollbar-thumb { background: var(--ayla-border-strong); }
+.image-count { color: var(--ayla-text-faint); font-size: 12px; white-space: nowrap; }
+.image-expired { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--ayla-text-faint); font-size: 12px; }
+
+/* Conversa com resposta em andamento (pensando ou escrevendo): três pontos que respiram devagar. */
+.conversation-spinner { display: inline-flex; gap: 3px; margin-right: 8px; vertical-align: 2px; }
+.conversation-spinner i { width: 4px; height: 4px; border-radius: 50%; background: var(--ayla-accent); opacity: .25; animation: conversation-breathe 1.8s ease-in-out infinite; }
+.conversation-spinner i:nth-child(2) { animation-delay: .3s; }
+.conversation-spinner i:nth-child(3) { animation-delay: .6s; }
+@keyframes conversation-breathe { 0%, 100% { opacity: .25; transform: scale(.85); } 40% { opacity: .9; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .conversation-spinner i { animation-duration: 3.6s; } }
