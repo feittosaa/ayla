@@ -317,6 +317,66 @@ fn hypr_batch(commands: &str) -> bool {
 }
 fn is_hypr() -> bool { std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() }
 
+/// Janela da Ayla pelo título inicial no compositor ("Ayla" = conversa; "Athena" = bloco de notas).
+fn window_label(client: &Value) -> Option<&'static str> {
+    match client["initialTitle"].as_str()? { "Ayla" => Some("main"), "Athena" => Some(ATHENA_WINDOW), _ => None }
+}
+
+/// Onde estão as janelas agora (Hyprland): workspace, flutuante, posição e tamanho. Guardado ao
+/// reiniciar a Ayla, para cada janela voltar ao monitor e ao workspace em que estava.
+pub fn window_places() -> Value {
+    if !is_hypr() { return Value::Null; }
+    let Some(clients) = hypr_json("clients") else { return Value::Null };
+    let pid = u64::from(std::process::id());
+    let places: serde_json::Map<String, Value> = clients.as_array().into_iter().flatten()
+        .filter(|c| c["pid"].as_u64() == Some(pid) && c["mapped"] != false)
+        .filter_map(|c| Some((window_label(c)?.to_string(), json!({
+            "workspace": c["workspace"]["id"], "workspace_name": c["workspace"]["name"],
+            "floating": c["floating"], "at": c["at"], "size": c["size"],
+        }))))
+        .collect();
+    Value::Object(places)
+}
+
+/// Comandos do `hyprctl --batch` que devolvem a janela `address` ao lugar guardado.
+fn place_commands(place: &Value, client: &Value) -> Option<String> {
+    let address = client["address"].as_str()?;
+    let id = place["workspace"].as_i64()?;
+    let workspace = if id > 0 { id.to_string() } else { format!("name:{}", place["workspace_name"].as_str()?) };
+    let mut commands = Vec::new();
+    if client["workspace"]["id"].as_i64() != Some(id) {
+        commands.push(format!("dispatch movetoworkspacesilent {workspace},address:{address}"));
+    }
+    let floating = place["floating"].as_bool().unwrap_or(false);
+    if client["floating"].as_bool().unwrap_or(false) != floating {
+        commands.push(format!("dispatch togglefloating address:{address}"));
+    }
+    if floating {
+        if let (Some(w), Some(h)) = (place["size"][0].as_i64(), place["size"][1].as_i64()) { commands.push(format!("dispatch resizewindowpixel exact {w} {h},address:{address}")); }
+        if let (Some(x), Some(y)) = (place["at"][0].as_i64(), place["at"][1].as_i64()) { commands.push(format!("dispatch movewindowpixel exact {x} {y},address:{address}")); }
+    }
+    (!commands.is_empty()).then(|| commands.join(" ; "))
+}
+
+/// Depois de reiniciar: espera cada janela guardada aparecer (até 20 s) e a devolve ao lugar.
+pub fn restore_places(places: Value) {
+    let Some(mut pending) = places.as_object().cloned().filter(|p| !p.is_empty() && is_hypr()) else { return };
+    std::thread::spawn(move || {
+        let pid = u64::from(std::process::id());
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let Some(clients) = hypr_json("clients") else { continue };
+            for client in clients.as_array().into_iter().flatten().filter(|c| c["pid"].as_u64() == Some(pid)) {
+                let Some(label) = window_label(client) else { continue };
+                if let Some(place) = pending.remove(label) {
+                    if let Some(commands) = place_commands(&place, client) { hypr_batch(&commands); }
+                }
+            }
+            if pending.is_empty() { break; }
+        }
+    });
+}
+
 /// A pessoa está olhando para a Ayla? No Hyprland, pergunta ao compositor qual janela está ativa
 /// (o GTK no Wayland pode continuar "em foco" com a janela escondida). Fora dele, só conta uma
 /// janela visível e com foco.
@@ -673,6 +733,18 @@ pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn janelas_voltam_ao_workspace_e_a_posicao() {
+        let athena = json!({"initialTitle":"Athena","address":"0xa","workspace":{"id":1},"floating":false});
+        assert_eq!(window_label(&athena), Some("athena"));
+        assert_eq!(window_label(&json!({"initialTitle":"Ayla · Visão rápida · 9"})), None, "o painel rápido fica de fora");
+        let tiled = json!({"workspace":3,"workspace_name":"3","floating":false,"at":[0,0],"size":[10,10]});
+        assert_eq!(place_commands(&tiled, &athena).as_deref(), Some("dispatch movetoworkspacesilent 3,address:0xa"));
+        let floating = json!({"workspace":-98,"workspace_name":"special:notas","floating":true,"at":[100,200],"size":[800,600]});
+        assert_eq!(place_commands(&floating, &athena).as_deref(), Some("dispatch movetoworkspacesilent name:special:notas,address:0xa ; dispatch togglefloating address:0xa ; dispatch resizewindowpixel exact 800 600,address:0xa ; dispatch movewindowpixel exact 100 200,address:0xa"));
+        let same = json!({"workspace":1,"workspace_name":"1","floating":false});
+        assert_eq!(place_commands(&same, &athena), None, "já está no lugar");
+    }
     #[test]
     fn positions_the_panel_on_the_focused_scaled_rotated_output() {
         let m=json!({"id":3,"x":-900,"y":70,"width":1800,"height":1200,"scale":1.5,"transform":1,"reserved":[18,30,0,12],"activeWorkspace":{"id":4}});

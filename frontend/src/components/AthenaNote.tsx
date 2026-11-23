@@ -116,7 +116,6 @@ type Props = {
   askTitle?: boolean;
   onTitled?: () => void;
   onSaved: () => void;
-  onTag: (tag: string) => void;
   onStatus: (text: string) => void;
   onError: (text: string) => void;
   /** Entrega a função que grava o que falta (antes de apagar, mover ou abrir no Obsidian). */
@@ -352,11 +351,11 @@ export default function AthenaNote(props: Props) {
             {note.properties.length > 0 && <dl className="note-properties" aria-label="Propriedades">
               {note.properties.map(p => <div key={p.key} className="note-property"><dt>{p.key}</dt><dd>{p.values.length
                 ? p.values.map(v => p.key === 'tags' || p.key === 'tag'
-                  ? <button key={v} className="tag-chip" onClick={() => props.onTag(v.replace(/^#/, '').toLowerCase())}>#{v.replace(/^#/, '')}</button>
+                  ? <span key={v} className="property-chip">#{v.replace(/^#/, '')}</span>
                   : <span key={v} className="property-chip">{v}</span>)
                 : <span className="property-empty">vazio</span>}</dd></div>)}
             </dl>}
-            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} onTag={props.onTag} media={fileMedia} onAttachment={props.onAttachment} onWebError={props.onError} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
+            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} media={fileMedia} onAttachment={props.onAttachment} onWebError={props.onError} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
             {backlinks.length > 0 && <section className="athena-backlinks"><h2>Mencionada em</h2>{backlinks.map(b => <button key={b.path} className="link-button" onClick={() => props.onOpen(b.path)}>{b.title}</button>)}</section>}
           </>}
     </article>

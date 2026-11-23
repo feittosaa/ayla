@@ -211,6 +211,10 @@ pub fn run() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             let core = Core::open(directory.clone()).map_err(io::Error::other)?;
+            // Reinício: as janelas voltam ao workspace e ao monitor em que estavam (Hyprland).
+            if let Some(saved) = std::fs::read_to_string(directory.join(OPEN_WINDOWS)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+                desktop::restore_places(saved["places"].clone());
+            }
             let _ = std::fs::remove_file(directory.join(OPEN_WINDOWS));
             // Workers de uma Ayla que caiu sem encerrar continuariam ocupando RAM e VRAM.
             let reaped = core.runtime.reap_orphans();
@@ -228,7 +232,8 @@ pub fn run() {
                     // poder reabri-las; o arquivo some na próxima abertura.
                     let open: Vec<&str> = ["main", desktop::ATHENA_WINDOW].into_iter()
                         .filter(|label| exit.get_webview_window(label).is_some_and(|w| w.is_visible().unwrap_or(false))).collect();
-                    let _ = std::fs::write(exit.state::<Core>().root.join(OPEN_WINDOWS), serde_json::to_string(&open).unwrap_or_default());
+                    let saved = serde_json::json!({"windows": open, "places": desktop::window_places()});
+                    let _ = std::fs::write(exit.state::<Core>().root.join(OPEN_WINDOWS), saved.to_string());
                     exit.exit(0);
                 });
             }
@@ -420,6 +425,8 @@ pub fn run() {
             core::research::automatic_check,
             core::services::set_response_source,
             core::services::source_remove,
+            core::services::calendar_range,
+            core::services::calendar_save,
             core::pad::pad_open_dialog,
             core::pad::pad_save_dialog,
             core::pad::pad_read,

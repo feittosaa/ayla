@@ -228,9 +228,9 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 }
 
 /* Athena: notas */
-.athena-actions { display: flex; gap: 6px; }
+.athena-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .athena-actions .new-chat { flex: 1; }
-.app-shell .athena-actions .athena-import { display: inline-flex; align-items: center; gap: 5px; }
+.app-shell .athena-actions .athena-import, .app-shell .athena-actions button[aria-pressed] { display: inline-flex; align-items: center; gap: 5px; }
 .athena-new input, .app-shell .organ-search { width: 100%; }
 .app-shell .conversation-item.athena-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; height: auto; text-align: left; }
 .athena-item .athena-title { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -272,6 +272,11 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .tree-row .tree-trash.tree-protect { margin-left: auto; }
 .app-shell .tree-row .tree-trash.tree-protect + .tree-trash { margin-left: 0; }
 .app-shell .tree-row .tree-trash.tree-protect:hover { color: var(--ayla-accent); }
+/* Fixar no topo (só notas da Athena): o pino vem antes das outras ferramentas; fixada, fica sempre visível. */
+.app-shell .tree-row .tree-trash.tree-pin { margin-left: 0; }
+.app-shell .tree-row .tree-trash.tree-pin:hover { color: var(--ayla-accent); }
+.app-shell .tree-row.pinned .tree-pin { display: inline-flex; color: var(--ayla-accent); }
+.app-shell .athena-actions .athena-import.active { background: var(--ayla-selected); color: var(--ayla-text); }
 .app-shell .tree-row .icon-button.tiny { min-height: 22px; width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 1; }
 .tree-add { padding: 2px 6px; }
 .app-shell .tree-add input { width: 100%; min-height: 30px; padding: 4px 8px; font-size: 13px; }
@@ -283,13 +288,6 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .confirm-inline button { min-height: 30px; padding: 4px 10px; font-size: 13px; }
 
 /* Athena: tags, renomear, mover, editor */
-.athena-tags { display: flex; flex-direction: column; gap: 6px; }
-.athena-tags > .link-button { align-self: flex-start; font-size: 13px; color: var(--ayla-text-soft); }
-.tag-list { display: flex; flex-wrap: wrap; gap: 4px; max-height: 140px; overflow-y: auto; }
-.app-shell .tag-chip { min-height: 24px; padding: 2px 8px; border-radius: calc(999px * var(--ayla-round, 1)); font-size: 12px; background: var(--ayla-panel); }
-.app-shell .tag-chip.active { border-color: var(--ayla-accent); color: var(--ayla-accent); }
-.tag-chip small { color: var(--ayla-text-faint); }
-.tree-filter { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-weight: 600; color: var(--ayla-accent); }
 .app-shell .athena-toolbar button { min-height: 30px; min-width: 32px; padding: 2px 8px; font-size: 13px; }
 .app-shell .link-suggest button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding: 6px 8px; border: 0; background: none; text-align: left; font-size: 13px; }
 .app-shell .link-suggest button:hover { background: var(--ayla-hover); }
@@ -416,6 +414,9 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .note-tab.pinned .tab-button { display: none; }
 .app-shell .note-tab.pinned:hover .tab-button { display: inline-flex; }
 .note-tab.pinned:hover .tab-pin { display: none; }
+/* Pino sempre à esquerda do título: aparece com o mouse em cima e fica visível (no destaque) quando fixada. */
+.app-shell .note-tab .tab-pin-button { order: -1; }
+.app-shell .note-tab.pinned .tab-pin-button { display: inline-flex; color: var(--ayla-accent); }
 .app-shell .note-tab .tab-button:hover { background: var(--ayla-border-soft); color: var(--ayla-text); }
 .app-shell .note-tabs .icon-button { flex: 0 0 auto; width: 34px; height: 34px; min-height: 34px; padding: 0; color: var(--ayla-text-faint); }
 .app-shell .note-tabs .icon-button:hover { color: var(--ayla-text); }
