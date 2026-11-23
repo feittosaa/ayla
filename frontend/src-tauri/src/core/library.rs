@@ -240,22 +240,30 @@ pub fn move_book(root: &Path, reading: &Path, source: &str, path: &str, folder: 
     if from == to {
         return Ok(as_text(&to));
     }
-    if !root.join(&from).is_file() {
+    let _guard = READING.lock().map_err(|_| "Progresso ocupado")?;
+    let origin = root.join(&from);
+    let destination = root.join(&to);
+    if !origin.is_file() {
         return Err("Livro não encontrado".into());
     }
     if !root.join(to.parent().unwrap_or(Path::new(""))).is_dir() {
         return Err("Pasta não encontrada".into());
     }
-    if root.join(&to).exists() {
+    if destination.exists() {
         return Err("Já existe um livro com esse nome nessa pasta".into());
     }
-    fs::rename(root.join(&from), root.join(&to)).map_err(|_| "Não foi possível mover o livro")?;
+    fs::rename(&origin, &destination).map_err(|_| "Não foi possível mover o livro")?;
     let (old, new) = (as_text(&from), as_text(&to));
-    update_reading(reading, |r| {
-        if let Some(progress) = r.books.remove(&key(source, &old)) {
-            r.books.insert(key(source, &new), progress);
+    let mut progress = load_reading(reading);
+    if let Some(position) = progress.books.remove(&key(source, &old)) {
+        progress.books.insert(key(source, &new), position);
+        if let Err(error) = save_reading(reading, &progress) {
+            if origin.exists() || fs::rename(&destination, &origin).is_err() {
+                return Err(format!("O livro está em {new}, mas não foi possível transferir o progresso nem desfazer a mudança"));
+            }
+            return Err(error);
         }
-    })?;
+    }
     Ok(new)
 }
 
@@ -328,6 +336,25 @@ mod tests {
         let mut names = vec!["Capitulo_10.cbz", "Capitulo_9.cbz", "Capitulo_100.cbz", "capitulo_010b.cbz", "Capitulo_002.cbz"];
         names.sort_by(|a, b| natural(a, b));
         assert_eq!(names, ["Capitulo_002.cbz", "Capitulo_9.cbz", "Capitulo_10.cbz", "capitulo_010b.cbz", "Capitulo_100.cbz"]);
+    }
+
+    #[test]
+    fn livro_fica_na_origem_se_o_progresso_nao_puder_ser_salvo() {
+        let root = temp();
+        let reading = root.join("leitura.json");
+        fs::create_dir(root.join("Destino")).unwrap();
+        fs::write(root.join("Livro.epub"), b"livro").unwrap();
+        let original = key("ayla", "Livro.epub");
+        update_reading(&reading, |state| {
+            state.books.insert(original.clone(), Progress { position: "cfi".into(), ..Progress::default() });
+        }).unwrap();
+        fs::create_dir(reading.with_extension("json.tmp")).unwrap();
+
+        assert!(move_book(&root, &reading, "ayla", "Livro.epub", "Destino").is_err());
+        assert_eq!(fs::read(root.join("Livro.epub")).unwrap(), b"livro");
+        assert!(!root.join("Destino/Livro.epub").exists());
+        assert_eq!(load_reading(&reading).books[&original].position, "cfi");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

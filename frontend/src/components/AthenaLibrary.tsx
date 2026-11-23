@@ -36,10 +36,11 @@ function continuing(library: Library): Item[] {
  * pasta e importar), linha de contexto, busca e a árvore (continuar lendo, fontes, séries e
  * capítulos). Uma bolinha ao passar o mouse seleciona capítulos ou séries inteiras para marcar
  * como lidos ou não lidos. */
-export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGuard, onLockNow }: {
+export function LibraryPanel({ library, current, onOpen, onReload, onMark, onMoved, onGuard, onLockNow }: {
   library: Library | null; current?: { source: string; path: string };
   onOpen: (source: string, path: string) => void; onReload: () => Promise<void>;
   onMark: (source: string, paths: string[], done: boolean) => Promise<unknown>;
+  onMoved: (from: string, to: string) => void;
   /** Senha de uma pasta ou livro dos importados: proteger, abrir, trocar ou tirar. */
   onGuard: (mode: LockMode, path: string, file: boolean) => void;
   onLockNow: (path: string) => void;
@@ -57,13 +58,19 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
   /** Nova pasta nos importados (caminho da pasta de cima) e o livro sendo arrastado. */
   const [adding, setAdding] = useState<string | null>(null);
   const [folderName, setFolderName] = useState('');
-  const [drag, setDrag] = useState<{ path: string; title: string; x: number; y: number; target: string | null } | null>(null);
+  const [drag, setDrag] = useState<{ title: string; x: number; y: number; target: string | null } | null>(null);
   const swallow = useRef(false);
   const flip = (list: string[], key: string) => list.includes(key) ? list.filter(k => k !== key) : [...list, key];
   const items = useMemo(() => library ? continuing(library) : [], [library]);
   const state = (source: string, book: Book) => library?.reading.books[readingKey(source, book.path)];
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = (book: Book) => words.every(w => `${book.series} ${book.title}`.toLowerCase().includes(w));
+  const movable = useMemo(() => new Map(library?.sources.find(source => source.imported)?.books
+    .filter(book => !book.protected).map(book => [readingKey('ayla', book.path), book])), [library]);
+  const selectedToMove = selected.flatMap(key => {
+    const book = movable.get(key);
+    return book ? [book] : [];
+  });
 
   async function connect() {
     setBusy(true); setError(''); setNotice('');
@@ -80,35 +87,66 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
       await onReload();
     } catch (e) { setError(errorText(e)); }
   }
-  /** Arrastar um livro importado até uma pasta dos importados (ou a raiz Importados). */
+  async function moveBooks(books: Book[], folder: string) {
+    setBusy(true); setError(''); setNotice('');
+    const handled = new Set<string>();
+    const failed: string[] = [];
+    let count = 0;
+    try {
+      for (const book of books) {
+        try {
+          if (book.series !== folder) {
+            const path = await native<string>('library_move', { path: book.path, folder });
+            onMoved(book.path, path);
+            count++;
+          }
+          handled.add(readingKey('ayla', book.path));
+        } catch (e) { failed.push(`${book.title} — ${errorText(e)}`); }
+      }
+      setSelected(previous => previous.filter(key => !handled.has(key)));
+      setAnchor(null);
+      if (count) {
+        setClosed(previous => previous.filter(id => id !== 'ayla'));
+        setOpen(previous => [...new Set([...previous, `ayla|${folder}`])]);
+        setNotice(`${count} ${count === 1 ? 'livro movido' : 'livros movidos'} para ${folder || 'Importados'}.`);
+      }
+      await onReload();
+      if (failed.length) setError(`${count ? `${count} ${count === 1 ? 'livro movido.' : 'livros movidos.'} ` : ''}Falha em ${failed.length} ${failed.length === 1 ? 'livro' : 'livros'}. ${failed[0]}`);
+    } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  }
+  /** Arrastar um livro importado ou a seleção até uma pasta dos importados. */
   const startDrag = (book: Book) => (event: ReactPointerEvent) => {
-    if (event.button !== 0) return;
+    if (busy || event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
+    const withSelection = selected.includes(readingKey('ayla', book.path));
+    const books = withSelection ? selectedToMove : [book];
+    if (withSelection && books.length !== selected.length) return;
     const origin = { x: event.clientX, y: event.clientY };
     let moving = false;
     const under = (x: number, y: number) => {
       const found = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>('[data-library-folder]');
-      return found ? found.dataset.libraryFolder ?? '' : null;
+      const folder = found?.dataset.libraryFolder;
+      return folder !== undefined && books.some(book => book.series !== folder) ? folder : null;
     };
     const move = (ev: PointerEvent) => {
       if (!moving && Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) < 5) return;
+      if (!moving) window.getSelection()?.removeAllRanges();
       moving = true;
-      setDrag({ path: book.path, title: book.title, x: ev.clientX, y: ev.clientY, target: under(ev.clientX, ev.clientY) });
+      setDrag({ title: books.length === 1 ? book.title : `${books.length} livros`, x: ev.clientX, y: ev.clientY, target: under(ev.clientX, ev.clientY) });
     };
-    const up = (ev: PointerEvent) => {
+    const finish = (target: string | null) => {
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel); window.removeEventListener('keydown', key);
       setDrag(null);
       if (!moving) return;
       swallow.current = true;
       setTimeout(() => { swallow.current = false; }, 0);
-      const target = under(ev.clientX, ev.clientY);
-      if (target === null || target === book.series) return;
-      void native<string>('library_move', { path: book.path, folder: target }).then(() => {
-        setOpen(prev => [...new Set([...prev, `ayla|${target}`])]);
-        setNotice(`"${book.title}" movido para ${target || 'Importados'}.`);
-        return onReload();
-      }, e => setError(errorText(e)));
+      if (target !== null) void moveBooks(books, target);
     };
+    const up = (ev: PointerEvent) => finish(under(ev.clientX, ev.clientY));
+    const cancel = () => finish(null);
+    const key = (ev: KeyboardEvent) => { if (ev.key === 'Escape') cancel(); };
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel); window.addEventListener('keydown', key);
   };
   async function disconnect(id: string) {
     try { await native('library_remove_folder', { id }); await onReload(); } catch (e) { setError(errorText(e)); }
@@ -172,8 +210,8 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
     return <div key={`${list.id}|${key}`} role="treeitem" aria-selected={checked}
       className={['tree-row note book', progress?.done ? 'done' : '', checked ? 'checked' : ''].join(' ')}
       aria-current={current?.source === source && current.path === book.path ? 'page' : undefined}
-      style={{ paddingLeft: 20 + depth * 14 }} title={`${book.path}\n${book.kind.toUpperCase()}${source === 'ayla' ? '\nArraste para uma pasta para mover' : ''}`}
-      onPointerDown={source === 'ayla' ? startDrag(book) : undefined}
+      style={{ paddingLeft: 20 + depth * 14 }} title={`${book.path}\n${book.kind.toUpperCase()}${source === 'ayla' && !book.protected ? '\nArraste para uma pasta para mover' : ''}`}
+      onPointerDown={source === 'ayla' && !book.protected ? startDrag(book) : undefined}
       onClick={() => { if (!swallow.current) onOpen(source, book.path); }}>
       <span className="tree-name">{label}</span>
       {hint && <small>{hint}</small>}
@@ -193,7 +231,7 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
       {error || notice || <>Livros importados vão para <b>Importados</b></>}
     </p>
     <input className="organ-search" type="search" value={query} placeholder="Buscar livros e séries" aria-label="Buscar na Biblioteca" onChange={e => setQuery(e.target.value)} />
-    <nav className={selected.length ? 'athena-tree library-tree selecting' : 'athena-tree library-tree'} role="tree" aria-label="Biblioteca" aria-multiselectable="true">
+    <nav className={selected.length ? 'athena-tree library-tree selecting' : 'athena-tree library-tree'} role="tree" aria-label="Biblioteca" aria-multiselectable="true" inert={busy}>
       {!library ? <p className="sidebar-label">Carregando a Biblioteca…</p> : <>
         {!words.length && items.length > 0 && <div className="tree-section">
           <p className="sidebar-label">Continuar lendo</p>
@@ -261,7 +299,7 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
               }
               return <div key={key} role="group">
                 <div className={['tree-row folder', chosen ? 'checked' : '', drag && drag.target === name && source.imported ? 'drop-target' : ''].join(' ')} role="treeitem" aria-expanded={expanded}
-                  style={{ paddingLeft: 18 + level * 14 }} data-library-folder={source.imported ? name : undefined} onClick={() => setOpen(prev => flip(prev, key))}>
+                  style={{ paddingLeft: 18 + level * 14 }} data-library-folder={source.imported && !guard ? name : undefined} onClick={() => setOpen(prev => flip(prev, key))}>
                   <span className={expanded ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span>
                   <span className="tree-name">{label}</span><small>{read}/{inSeries.length}</small>
                   {guard?.path === name && <span className="tree-lock" title="Pasta protegida, aberta"><UnlockIcon size={12} /></span>}
@@ -278,8 +316,10 @@ export function LibraryPanel({ library, current, onOpen, onReload, onMark, onGua
         })}
       </>}
     </nav>
-    {selected.length > 0 && <div className="athena-selection" role="toolbar" aria-label="Capítulos selecionados">
+    {selected.length > 0 && <div className="athena-selection" role="toolbar" aria-label="Capítulos selecionados" aria-busy={busy}>
       <span>{selected.length} {selected.length === 1 ? 'selecionado' : 'selecionados'}</span>
+      <span>{selectedToMove.length === selected.length
+        ? 'Arraste a seleção para uma pasta em Importados.' : 'Para mover, selecione apenas livros importados sem senha.'}</span>
       <div className="athena-actions">
         <button className="new-chat" disabled={busy} onClick={() => void mark(true)}>Marcar como lido</button>
         <button className="ghost-button" disabled={busy} onClick={() => void mark(false)}>Não lido</button>

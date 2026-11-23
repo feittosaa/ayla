@@ -1544,7 +1544,13 @@ pub fn library_move(state: tauri::State<'_, Core>, path: String, folder: String)
     if protected(&root, &path).is_some() || protected(&root, &folder).is_some() || athena_lock::protected_file_of(&root, &path).is_some() {
         return Err("Livros protegidos ainda não são movidos pela Biblioteca".into());
     }
-    library::move_book(&state.root.join(library::IMPORTED), &state.reading_file(), "ayla", &path, &folder)
+    let relative = library::safe_book(&path).ok_or("Livro inválido")?;
+    let name = relative.file_name().and_then(|name| name.to_str()).ok_or("Livro inválido")?;
+    let destination = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+    if athena_lock::protected_file_of(&root, &destination).is_some() {
+        return Err("Já existe um livro protegido com esse nome nessa pasta".into());
+    }
+    library::move_book(&root, &state.reading_file(), "ayla", &path, &folder)
 }
 
 /// Apaga livros escolhidos na Biblioteca: vão para a lixeira do sistema (recuperáveis) e o
@@ -1714,20 +1720,11 @@ pub async fn athena_rename(state: tauri::State<'_, Core>, root: String, path: St
     let to = if to.to_lowercase().ends_with(".md") { to } else { format!("{to}.md") };
     if let Some(opened) = open_file(&dir, &path) {
         let (target, key) = opened?;
-        let name = std::path::Path::new(&to).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if athena::file_name(&name) != name || protected(&dir, &to).is_some() {
-            return Err("Nome ou pasta inválidos para um arquivo protegido".into());
-        }
-        let new = athena::safe_relative(&to).ok_or("Nome ou pasta inválidos")?;
-        let destination = dir.join(format!("{}{}", new.to_string_lossy(), athena_lock::FILE_SUFFIX));
-        if destination.exists() || dir.join(&new).exists() {
-            return Err("Já existe uma nota com esse nome nessa pasta".into());
-        }
-        if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?; }
-        fs::rename(target.path(), &destination).map_err(|_| "Não foi possível renomear")?;
-        athena_lock::end_session(target.path());
-        athena_lock::start_session(&destination, key);
-        return Ok(json!({"path": to, "relinked": 0}));
+        let new = move_protected_text(&dir, &target, key, &to)?;
+        return Ok(json!({"path": new, "relinked": 0}));
+    }
+    if athena_lock::protected_file_of(&dir, &to).is_some() {
+        return Err("Já existe uma nota protegida com esse nome nessa pasta".into());
     }
     if protected(&dir, &path).is_some() || protected(&dir, &to).is_some() {
         let name = std::path::Path::new(&to).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -1739,6 +1736,23 @@ pub async fn athena_rename(state: tauri::State<'_, Core>, root: String, path: St
     }
     let (new, changed) = tauri::async_runtime::spawn_blocking(move || athena::rename_note(&dir, &path, &to)).await.map_err(|_| "Falha ao renomear")??;
     Ok(json!({"path": new, "relinked": changed}))
+}
+
+fn move_protected_text(dir: &std::path::Path, target: &athena_lock::Target, key: athena_lock::Key, to: &str) -> Result<String, String> {
+    let new = athena::safe_text(to).ok_or("Nome ou pasta inválidos")?;
+    let name = new.file_stem().map(|stem| stem.to_string_lossy()).unwrap_or_default();
+    if athena::file_name(&name) != name || protected(dir, to).is_some() {
+        return Err("Nome ou pasta inválidos para um arquivo protegido".into());
+    }
+    let destination = dir.join(format!("{}{}", new.display(), athena_lock::FILE_SUFFIX));
+    if destination.exists() || dir.join(&new).exists() {
+        return Err("Já existe um arquivo com esse nome nessa pasta".into());
+    }
+    if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?; }
+    fs::rename(target.path(), &destination).map_err(|_| "Não foi possível mover o arquivo protegido")?;
+    athena_lock::end_session(target.path());
+    athena_lock::start_session(&destination, key);
+    Ok(to.to_string())
 }
 
 /// Renomeia ou move uma pasta e atualiza os links das notas dela.
@@ -2533,9 +2547,18 @@ fn kind_of_mime(mime: &str) -> &'static str {
 #[tauri::command]
 pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: String, folder: String) -> Result<String, String> {
     let dir = state.athena_path(&state.prefs()?, &root)?;
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let to = if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") };
+    if athena::is_txt(std::path::Path::new(&path)) {
+        if let Some(opened) = open_file(&dir, &path) {
+            let (target, key) = opened?;
+            return move_protected_text(&dir, &target, key, &to);
+        }
+        if athena_lock::protected_file_of(&dir, &to).is_some() {
+            return Err("Já existe um texto protegido com esse nome nessa pasta".into());
+        }
+    }
     if protected(&dir, &path).is_some() || protected(&dir, &folder).is_some() {
-        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let to = if folder.is_empty() { name } else { format!("{folder}/{name}") };
         return move_across(&dir, &path, &to);
     }
     athena::move_attachment(&dir, &path, &folder)
@@ -4216,6 +4239,29 @@ mod tests {
         assert!(athena::list(&root).iter().all(|n| !n.path.starts_with("Senhas")));
         assert!(athena::attachments(&root).is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn move_texto_protegido_sem_decifrar_nem_sobrescrever() {
+        let root = std::env::temp_dir().join(format!("ayla-protected-text-{}", store::id()));
+        fs::create_dir_all(root.join("Destino")).unwrap();
+        fs::write(root.join("Diario.txt"), "texto protegido").unwrap();
+        fs::write(root.join("Destino/Diario.txt"), "outro texto").unwrap();
+        let (_, public) = athena_lock::new_global().unwrap();
+        athena_lock::protect_file(&root, "Diario.txt", "senha forte 123", &public).unwrap();
+        let target = athena_lock::protected_file_of(&root, "Diario.txt").unwrap();
+        let key = athena_lock::unlock(&target, "senha forte 123").unwrap();
+        let encrypted = fs::read(target.path()).unwrap();
+
+        assert!(move_protected_text(&root, &target, key.clone(), "Destino/Diario.txt").is_err());
+        assert_eq!(fs::read_to_string(root.join("Destino/Diario.txt")).unwrap(), "outro texto");
+        assert_eq!(move_protected_text(&root, &target, key, "Destino/Notas.txt").unwrap(), "Destino/Notas.txt");
+        assert!(!target.path().exists() && !root.join("Destino/Notas.txt").exists());
+        let (moved, key) = open_file(&root, "Destino/Notas.txt").unwrap().unwrap();
+        assert_eq!(fs::read(moved.path()).unwrap(), encrypted);
+        assert_eq!(athena_lock::file_read(&moved, &key).unwrap(), b"texto protegido");
+        athena_lock::end_session(moved.path());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
