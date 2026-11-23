@@ -45,7 +45,7 @@ export type Message = { origin?: ReplyOrigin | null; role: 'user' | 'assistant';
 export type ImageItem = { provider: string; id: string; thumb: string; full: string; page: string; author: string; author_url: string; license: 'livre' | 'referencia'; license_name: string; license_url: string; width: number; height: number; download_ping?: string };
 export type ImageResults = { query: string; items: ImageItem[]; links: { name: string; url: string }[] };
 /** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
-export type Source = { id: string; name: string; pages: number[]; date?: string; url?: string };
+export type Source = { id: string; name: string; pages: number[]; date?: string; url?: string; note?: string };
 export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images'; origin?: ReplyOrigin; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */

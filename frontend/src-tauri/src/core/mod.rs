@@ -24,4 +24,5 @@ pub mod notify;
 pub mod runtime;
 pub mod services;
 pub mod store;
+pub mod understand;
 pub mod version;

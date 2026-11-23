@@ -681,6 +681,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spending_is_summed_exactly_by_month_and_category() {
+        let resumo = serde_json::json!({"months":[
+            {"month":"2026-09","currency":"BRL","income":0,"spent":13000,"categories":[{"name":"Mercado","amount":10000},{"name":"Lazer","amount":3000}]},
+            {"month":"2026-10","currency":"BRL","income":0,"spent":7550,"categories":[{"name":"Alimentação","amount":2550},{"name":"Mercado","amount":5000}]},
+            {"month":"2026-11","currency":"BRL","income":0,"spent":1000,"categories":[{"name":"Alimentação","amount":1000}]}]});
+        let (months, categories) = spending_options(&resumo);
+        assert_eq!(months, ["2026-09", "2026-10", "2026-11"]);
+        assert_eq!(categories, ["Alimentação", "Lazer", "Mercado"]);
+        let text = spending_total(&resumo, &months, &["Mercado".into(), "Alimentação".into()], SpendingView::Flow).unwrap();
+        assert!(text.contains("Total: R$ 185,50."), "{text}");
+        assert!(text.contains("Mercado R$ 150,00") && text.contains("Alimentação R$ 35,50"), "{text}");
+        assert!(text.contains("09/2026 R$ 100,00; 10/2026 R$ 75,50; 11/2026 R$ 10,00"), "{text}");
+        assert!(spending_total(&resumo, &months, &[], SpendingView::Flow).unwrap().contains("Total: R$ 215,50."));
+        let twice = ["2026-11".to_string(), "2026-11".to_string()];
+        assert!(spending_total(&resumo, &twice, &[], SpendingView::Flow).unwrap().contains("Total: R$ 10,00."), "mês repetido conta uma vez");
+        assert!(spending_total(&resumo, &["2025-01".into()], &[], SpendingView::Flow).is_none());
+        // Sem `purchases` (Moneta antiga), não há gasto pela data da compra.
+        assert!(spending_total(&resumo, &months, &[], SpendingView::Purchases).is_none());
+    }
+
+    #[test]
+    fn spending_by_purchase_date_differs_from_monthly_flow() {
+        // Compra de mercado em outubro, na fatura que vence em novembro.
+        let resumo = serde_json::json!({"months":[
+            {"month":"2026-10","currency":"BRL","income":0,"spent":0,"categories":[],"purchases":{"total":50000,"categories":[{"name":"Mercado","amount":50000}]}},
+            {"month":"2026-11","currency":"BRL","income":0,"spent":50000,"categories":[{"name":"Mercado","amount":50000}],"purchases":{"total":0,"categories":[]}}]});
+        let months = ["2026-10".to_string(), "2026-11".to_string()];
+        let bought = spending_total(&resumo, &months, &["Mercado".into()], SpendingView::Purchases).unwrap();
+        assert!(bought.contains("10/2026 R$ 500,00; 11/2026 R$ 0,00") && bought.contains("data da compra"), "{bought}");
+        let paid = spending_total(&resumo, &months, &["Mercado".into()], SpendingView::Flow).unwrap();
+        assert!(paid.contains("10/2026 R$ 0,00; 11/2026 R$ 500,00") && paid.contains("fluxo mensal"), "{paid}");
+        assert!(finance_text(&resumo).contains("10/2026: receitas R$ 0,00; gasto R$ 500,00; saídas R$ 0,00."));
+    }
+
+    #[test]
     fn manifesto_fixa_versao_e_contrato() {
         let m = manifest();
         assert_eq!(m.id, "moneta");
@@ -972,6 +1007,75 @@ fn date_br(day: &str) -> String {
     }
 }
 
+fn month_br(month: &str) -> String {
+    match month.split_once('-') { Some((y, m)) => format!("{m}/{y}"), None => month.to_string() }
+}
+
+/// Meses e categorias de despesa que a Moneta informou (`months` do resumo), para o modelo escolher.
+pub fn spending_options(resumo: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let mut months = Vec::new();
+    let mut categories: Vec<String> = Vec::new();
+    for m in resumo["months"].as_array().into_iter().flatten() {
+        if let Some(month) = m["month"].as_str() { if !months.iter().any(|x| x == month) { months.push(month.to_string()); } }
+        for c in m["categories"].as_array().into_iter().chain(m["purchases"]["categories"].as_array()).flatten() {
+            if let Some(name) = c["name"].as_str() { if !categories.iter().any(|x| x == name) { categories.push(name.to_string()); } }
+        }
+    }
+    categories.sort();
+    (months, categories)
+}
+
+/// Como somar as despesas: pela data da compra (o que a pessoa gastou) ou pelo fluxo mensal (o que pagou
+/// ou vai pagar no mês, com as compras no cartão no mês em que a fatura vence).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpendingView { Purchases, Flow }
+
+/// Soma exata das despesas escolhidas (meses × categorias; sem categorias = todas), em texto para o contexto.
+pub fn spending_total(resumo: &serde_json::Value, months: &[String], categories: &[String], view: SpendingView) -> Option<String> {
+    use std::collections::BTreeMap;
+    // Cada mês e categoria contam uma vez, mesmo que a escolha os repita.
+    let mut months: Vec<String> = months.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    months.retain(|m| seen.insert(m.clone()));
+    let mut by_currency: BTreeMap<String, (i64, BTreeMap<String, i64>, Vec<(String, i64)>)> = BTreeMap::new();
+    for m in resumo["months"].as_array().into_iter().flatten() {
+        let month = m["month"].as_str().unwrap_or("");
+        if !months.iter().any(|x| x == month) { continue; }
+        // Moneta anterior à 1.5.6 só informa o fluxo: sem `purchases`, o mês fica de fora do gasto.
+        let list = match view { SpendingView::Purchases => &m["purchases"]["categories"], SpendingView::Flow => &m["categories"] };
+        if !list.is_array() { continue; }
+        let entry = by_currency.entry(m["currency"].as_str().unwrap_or("BRL").to_string()).or_default();
+        let mut in_month = 0;
+        for c in list.as_array().into_iter().flatten() {
+            let name = c["name"].as_str().unwrap_or("");
+            if !categories.is_empty() && !categories.iter().any(|x| x == name) { continue; }
+            let amount = c["amount"].as_i64().unwrap_or(0);
+            in_month += amount;
+            *entry.1.entry(name.to_string()).or_default() += amount;
+        }
+        entry.0 += in_month;
+        entry.2.push((month.to_string(), in_month));
+    }
+    if by_currency.is_empty() { return None; }
+    let what = if categories.is_empty() { "todas as despesas".to_string() } else { categories.join(" + ") };
+    let period: Vec<String> = months.iter().map(|m| month_br(m)).collect();
+    let how = match view {
+        SpendingView::Purchases => "gasto pela data da compra: cada compra no mês em que foi feita, inclusive no cartão, e parceladas com o valor total",
+        SpendingView::Flow => "fluxo mensal: o que saiu ou vai sair no mês, com as compras no cartão no mês em que a fatura vence",
+    };
+    let mut out = vec![format!("Cálculo exato feito pela Ayla com os dados da Moneta ({what}; {how}; meses: {}):", period.join(", "))];
+    for (currency, (total, per_category, per_month)) in by_currency {
+        out.push(format!("- Total: {}.", money(total, &currency)));
+        if per_category.len() > 1 || categories.is_empty() {
+            let mut list: Vec<_> = per_category.into_iter().collect();
+            list.sort_by(|a, b| b.1.cmp(&a.1));
+            out.push(format!("- Por categoria: {}.", list.iter().map(|(n, v)| format!("{n} {}", money(*v, &currency))).collect::<Vec<_>>().join("; ")));
+        }
+        out.push(format!("- Por mês: {}.", per_month.iter().map(|(m, v)| format!("{} {}", month_br(m), money(*v, &currency))).collect::<Vec<_>>().join("; ")));
+    }
+    Some(out.join("\n"))
+}
+
 /// Texto compacto do resumo da Moneta: contexto do modelo local e resposta direta sem modelo.
 pub fn finance_text(resumo: &serde_json::Value) -> String {
     use serde_json::Value;
@@ -1031,6 +1135,15 @@ pub fn finance_text(resumo: &serde_json::Value) -> String {
             }
         }
         out.push(line.trim_end_matches(';').to_string() + ".");
+    }
+    let months = resumo["months"].as_array().cloned().unwrap_or_default();
+    if !months.is_empty() {
+        out.push("Por mês (\"gasto\" = compras feitas no mês, inclusive no cartão; \"saídas\" = fluxo mensal, com as faturas que vencem no mês):".into());
+        for m in &months {
+            let currency = s(&m["currency"]);
+            let bought = cents(&m["purchases"]["total"]).map(|v| format!("gasto {}; ", money(v, &currency))).unwrap_or_default();
+            out.push(format!("- {}: receitas {}; {bought}saídas {}.", month_br(&s(&m["month"])), money(cents(&m["income"]).unwrap_or(0), &currency), money(cents(&m["spent"]).unwrap_or(0), &currency)));
+        }
     }
     let accounts = resumo["accounts"].as_array().cloned().unwrap_or_default();
     if !accounts.is_empty() {

@@ -207,14 +207,14 @@ export default function App() {
 
     <div className="spaces">
       <div className="page" hidden={space !== 'ayla' || openProject !== null}>
-        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)}
+        <Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={null} active={space === 'ayla' && openProject === null} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
           projects={snapshot.projects} onOpenProject={showProject} onNewProject={() => setCreating(true)} incoming={opened.ayla} />
       </div>
       {visited.map(id => {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 

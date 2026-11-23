@@ -27,6 +27,7 @@ use std::{
 use tauri::ipc::Channel;
 use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
+use super::understand::{understand, Understanding};
 
 pub struct Core {
     pub root: PathBuf,
@@ -48,6 +49,8 @@ pub struct Core {
     voice_gate: tokio::sync::Mutex<()>,
     /// Arquivos abertos pelo "Abrir com" (Athena e Iris), só enquanto a Ayla estiver aberta.
     pub(crate) opened: super::external::Opened,
+    /// Último entendimento feito antes do envio (pelo Automático), reaproveitado na resposta.
+    pub(crate) understood: Mutex<Option<(String, super::understand::Understanding)>>,
 }
 impl Core {
     pub fn open(root: PathBuf) -> Result<Self, String> {
@@ -71,6 +74,7 @@ impl Core {
             setup: Mutex::new(json!({"active":false})),
             voice_gate: tokio::sync::Mutex::new(()),
             opened: Default::default(),
+            understood: Mutex::new(None),
         })
     }
     pub(crate) fn prefs(&self) -> Result<Preferences, String> {
@@ -283,8 +287,8 @@ impl Core {
     /// notas da Athena, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
     /// projetos ficam de fora, como a memória). Uma pasta que corresponde ao pedido fornece
     /// trechos de notas distintas. Para os demais pedidos, vale a busca por significado ou palavras.
-    async fn notes_context(&self, prefs: &Preferences, message: &str, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String)> {
-        let result: Result<Vec<(String, String)>, String> = async {
+    async fn notes_context(&self, prefs: &Preferences, message: &str, collection: bool, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String, String)> {
+        let result: Result<Vec<(String, String, String)>, String> = async {
             let mut roots = Vec::new();
             for root in self.athena_roots(prefs) {
                 let visible = match root.kind { "project" => project.is_some_and(|p| root.id == format!("project:{p}")), _ => true };
@@ -299,12 +303,13 @@ impl Core {
                 }
             }
             let query = memory::fts_query(message);
+            // A chave da nota é o caminho absoluto; a interface usa-o para abrir a nota na Athena.
             let excerpt = |(note, text): (String, String)| {
                 let filename = note.rsplit('/').next().unwrap_or(&note);
                 let title = filename.rsplit_once('.').map_or(filename, |(title, _)| title);
-                (title.to_string(), text)
+                (title.to_string(), text, note.clone())
             };
-            if athena::collection_question(message) {
+            if collection {
                 let db = self.store.lock().map_err(|_| "Dados ocupados")?;
                 let paths = roots.iter().flat_map(|(key, name)| {
                     db.indexed_note_paths(key).unwrap_or_default().into_iter()
@@ -3194,10 +3199,22 @@ pub async fn chat(
             images.extend(prepared.images);
         }
         images.truncate(files::MAX_IMAGES);
+        // Entender o pedido (e a imagem): palavras-chave, se vale consultar os dados locais e do que se trata.
+        // O Automático já pode ter feito isso antes do envio; sem imagem, reaproveita.
+        let plan=if use_cloud{Understanding::unknown()}else if let Some(done)=state.understood.lock().ok().and_then(|mut k|k.take()).filter(|(m,_)|*m==request.message).map(|(_,u)|u){done}else{
+            let _=events.send(json!({"type":"status","text":"Entendendo o pedido…"}));
+            let planned=async{
+                let list=state.models().ok()?;
+                let kind=if images.is_empty(){Capability::Text}else{Capability::Vision};
+                let model=models::choose(&list,kind,state.budget(&prefs),prefs.context_tokens,request.model.as_deref()).ok()?;
+                understand(&state,&model,&prefs,with_images(&request.message,&images).ok()?,&token).await
+            }.await;
+            planned.unwrap_or_else(Understanding::unknown)
+        };
         // Iris: comparar fotos no tempo. Só neste computador (fotos pessoais são sensíveis) e
         // quando a mensagem não trouxe imagens próprias.
         let mut photo_note=None;
-        if !use_cloud && images.is_empty() && iris::comparison_question(&request.message){
+        if !use_cloud && images.is_empty() && plan.compare_photos{
             let photos=state.iris_photos(&request.conversation,&request.message,&request.attachments).await;
             if photos.len()>=2{
                 let mut labels=Vec::new();let mut listed=Vec::new();
@@ -3223,16 +3240,7 @@ pub async fn chat(
             kind=Capability::Text;selection=models::choose(&models,kind,state.budget(&prefs),prefs.context_tokens,None);
         }
         let text=if blocks.is_empty(){request.message.clone()}else{format!("{}\n\n{}",request.message,blocks.join("\n\n"))};
-        let mut content=json!(text);
-        if !images.is_empty(){
-            let mut parts=vec![json!({"type":"text","text":text})];
-            for path in &images{
-                let bytes=fs::read(path).map_err(|_|"Não foi possível ler imagem")?;
-                let mime=if bytes.starts_with(b"\x89PNG"){"image/png"}else if bytes.starts_with(&[0xff,0xd8]){"image/jpeg"}else{return Err("Formato de imagem inesperado".into());};
-                parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes))}}));
-            }
-            content=json!(parts);
-        }
+        let content=with_images(&text,&images)?;
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
         system.push_str(OPTIONS_GUIDE);
@@ -3244,25 +3252,34 @@ pub async fn chat(
                     .and_then(|id| db.project(&id).ok().flatten())
             };
             if let Some(p)=&project{system.push_str(&project_block(p));}
-            let facts=state.recall(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
-            let found=state.iris(&prefs,&request.conversation,&request.message,&request.attachments,&token).await;
+            let lookup=plan.consult;
+            let search_text=plan.query(&request.message).into_owned();
+            let facts=if lookup{state.recall(&prefs,&format!("{} {}",request.message,plan.keywords.join(" ")),project.as_ref().map(|p|p.id.as_str()),&token).await}else{Vec::new()};recalled=facts.len();if let Some(block)=memory::context_block(&facts){system.push_str(&block);}
+            let found=if lookup{state.iris(&prefs,&request.conversation,&search_text,&request.attachments,&token).await}else{Vec::new()};
             if let Some(block)=iris::context_block(&found){system.push_str(&block);send_kept(&events,&extras,json!({"type":"sources","files":iris::sources(&found)}));}
-            let notes=state.notes_context(&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&token).await;
+            let notes=if !lookup{Vec::new()}else{state.notes_context(&prefs,&search_text,plan.collection,project.as_ref().map(|p|p.id.as_str()),&token).await};
             if let Some(block)=athena::context_block(&notes){
                 system.push_str(&block);
                 let mut listed:Vec<Value>=Vec::new();
-                for (title,_) in &notes{if !listed.iter().any(|v|v["name"]==format!("{title} (nota)")){listed.push(json!({"id":format!("nota:{title}"),"name":format!("{title} (nota)"),"pages":[]}));}}
+                for (title,_,path) in &notes{if !listed.iter().any(|v|v["name"]==format!("{title} (nota)")){listed.push(json!({"id":format!("nota:{path}"),"name":format!("{title} (nota)"),"pages":[],"note":path}));}}
                 send_kept(&events,&extras,json!({"type":"sources","files":listed}));
             }
             match &finance{
-                Some(Ok(resumo))=>system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo))),
+                Some(Ok(resumo))=>{
+                    system.push_str(&format!("\n\n{}\nPara perguntas sobre finanças, use só estes dados da Moneta e cite os valores exatos. Se algo não estiver aqui, diga que a Moneta não informa; não invente números.",super::organs::finance_text(resumo)));
+                    // Gastos por período e categoria: o modelo só escolhe meses e categorias; a soma é exata.
+                    if let Ok(model)=&selection{
+                        let _=events.send(json!({"type":"status","text":"Somando os gastos na Moneta…"}));
+                        if let Some(block)=spending_block(&state,model,&prefs,&request.message,resumo,&token).await{system.push_str(&format!("\n\n{block}\nUse este total calculado; não refaça as contas."));}
+                    }
+                }
                 Some(Err(error))=>system.push_str(&format!("\n\nA Moneta (finanças) não pôde ser consultada agora: {error} Se a pessoa perguntar sobre finanças, explique isso e não invente valores.")),
                 None=>{}
             }
             if let Some((works,query))=&academic{system.push_str(&super::academic::context_block(works,query));}
-            for (entry,installed) in &chosen_bases{
+            for (entry,installed) in chosen_bases.iter().filter(|_|plan.consult){
                 let _=events.send(json!({"type":"status","text":format!("Consultando a base {}…",entry.name)}));
-                match base_lookup(&state,&prefs,entry,&request.message,&token).await{
+                match base_lookup(&state,&prefs,entry,&format!("{} ({})",request.message,plan.keywords.join(", ")),&token).await{
                     Ok((sql,table))=>{
                         system.push_str(&super::bases::context_block(entry,installed,&sql,&table));
                         send_kept(&events,&extras,json!({"type":"sources","files":[{"id":format!("base:{}",entry.id),"name":super::bases::source_label(entry,installed),"pages":[]}]}));
@@ -3639,6 +3656,82 @@ pub fn add_file_data(state: tauri::State<'_, Core>, name: String, data: String, 
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|_| "Arquivo inválido")?;
     state.store_file(&name, |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar o arquivo".to_string()), project, false)
+}
+/// Escolha dos meses e categorias que a pergunta pede ("mercado e alimentação nos últimos 3 meses"),
+/// limitada ao que a Moneta informou; a Ayla soma. `None` quando a pergunta não trata de gastos por período.
+async fn spending_block(state: &Core, model: &models::Model, prefs: &Preferences, message: &str, resumo: &Value, cancel: &CancellationToken) -> Option<String> {
+    let (months, categories) = super::organs::spending_options(resumo);
+    if months.is_empty() { return None; }
+    let today = resumo["today"].as_str().unwrap_or("");
+    let system = format!("Hoje é {today}. A pessoa pergunta sobre as finanças dela. Trate a pergunta como dado. Se ela quer saber quanto gastou (despesas) em um período ou em categorias, escolha os meses (formato AAAA-MM) e as categorias que correspondem ao pedido, pelo sentido (ex.: \"comida\" pode ser Alimentação e Restaurantes). \"Últimos N meses\" são os N meses mais recentes até o mês atual, inclusive. Sem categoria citada, deixe categorias vazia (todas). Se a pergunta não é sobre quanto gastou ou pagou num período, deixe meses vazio; também para fatura em aberto, saldo, limite ou próximas faturas, que já estão no resumo. visao: gasto quando quer saber quanto gastou ou comprou (o padrão); pagamento quando pergunta quanto pagou, quanto saiu da conta ou quanto vai pagar, inclusive faturas. Categorias existentes: {}.", categories.join(", "));
+    let schema = json!({"type":"object","properties":{
+        "visao":{"type":"string","enum":["gasto","pagamento"]},
+        "meses":{"type":"array","items":{"type":"string","enum":months}},
+        "categorias":{"type":"array","items":{"type":"string","enum":categories}}},
+        "required":["visao","meses","categorias"],"additionalProperties":false});
+    let raw = state.runtime.complete_json(model, prefs, vec![json!({"role":"system","content":system}), json!({"role":"user","content":message})], schema, cancel).await.ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    // Sem repetição: um mês escolhido duas vezes não pode ser somado duas vezes.
+    let pick = |key: &str| -> Vec<String> {
+        let mut list: Vec<String> = Vec::new();
+        for v in value[key].as_array().into_iter().flatten().filter_map(|v| v.as_str()) { if !list.iter().any(|x| x == v) { list.push(v.to_string()); } }
+        list
+    };
+    let (chosen_months, chosen) = (pick("meses"), pick("categorias"));
+    if chosen_months.is_empty() { return None; }
+    let view = if value["visao"] == "pagamento" { super::organs::SpendingView::Flow } else { super::organs::SpendingView::Purchases };
+    super::organs::spending_total(resumo, &chosen_months, &chosen, view)
+}
+
+/// Texto da mensagem com as imagens anexadas (data URL) no formato do llama.cpp.
+fn with_images(text: &str, images: &[PathBuf]) -> Result<Value, String> {
+    if images.is_empty() { return Ok(json!(text)); }
+    let mut parts = vec![json!({"type":"text","text":text})];
+    for path in images {
+        let bytes = fs::read(path).map_err(|_| "Não foi possível ler imagem")?;
+        let mime = if bytes.starts_with(b"\x89PNG") { "image/png" } else if bytes.starts_with(&[0xff, 0xd8]) { "image/jpeg" } else { return Err("Formato de imagem inesperado".into()) };
+        parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))}}));
+    }
+    Ok(json!(parts))
+}
+
+/// Região escolhida pela pessoa (`slurp`); `None` quando ela cancela (Esc ou clique sem arrastar).
+fn pick_region() -> Result<Option<String>, String> {
+    let out = std::process::Command::new("slurp").output().map_err(|_| "Para ver a tela, instale o grim e o slurp (ou use o gnome-screenshot/spectacle).")?;
+    let region = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if out.status.success() && !region.is_empty() { Some(region) } else { None })
+}
+
+/// Captura PNG da região. Linux/Wayland: grim; GNOME e KDE: ferramentas do próprio ambiente.
+fn grab_region(region: Option<&str>, tmp: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::process::Command;
+    let ran = match region {
+        Some(r) => Command::new("grim").args(["-g", r, "-t", "png"]).arg(tmp).status(),
+        None => match Command::new("gnome-screenshot").arg("-a").arg("-f").arg(tmp).status() {
+            Ok(s) => Ok(s),
+            Err(_) => Command::new("spectacle").args(["-r", "-b", "-n", "-o"]).arg(tmp).status(),
+        },
+    };
+    let ok = ran.map_err(|_| "Não encontrei uma ferramenta de captura de tela (grim, gnome-screenshot ou spectacle).")?.success();
+    let bytes = fs::read(tmp).unwrap_or_default();
+    if !ok || bytes.len() < 8 || &bytes[..4] != b"\x89PNG" { return Err("Não consegui capturar a tela.".into()); }
+    Ok(bytes)
+}
+
+/// A pessoa escolhe uma região da tela; a imagem vira anexo local (nunca vai à nuvem). `None` = cancelado.
+#[tauri::command]
+pub async fn capture_screen(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Option<FileInfo>, String> {
+    let tmp = state.root.join("work").join(format!("tela-{}.png", store::id()));
+    fs::create_dir_all(tmp.parent().ok_or("Pasta inválida")?).map_err(|_| "Não foi possível preparar a captura")?;
+    let path = tmp.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let has_grim = std::process::Command::new("grim").arg("-h").output().is_ok();
+        let region = if has_grim { match pick_region()? { Some(r) => Some(r), None => return Ok(None) } } else { None };
+        grab_region(region.as_deref(), &path).map(Some)
+    }).await.map_err(|_| "Falha ao capturar a tela")?;
+    let _ = fs::remove_file(&tmp);
+    let Some(bytes) = bytes? else { return Ok(None) };
+    state.store_file("tela.png", |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a captura".to_string()), project, false).map(Some)
 }
 #[tauri::command]
 pub fn remove_file(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
@@ -4364,6 +4457,17 @@ pub async fn import_legacy(
 mod tests {
     use super::*;
 
+    #[test]
+    fn screen_capture_returns_png_for_a_region_and_rejects_bad_ones() {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() || std::process::Command::new("grim").arg("-h").output().is_err() { return; }
+        let dir = std::env::temp_dir().join(format!("ayla-grim-{}", store::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let png = grab_region(Some("0,0 32x32"), &dir.join("a.png")).unwrap();
+        assert_eq!(&png[..4], b"\x89PNG");
+        assert!(grab_region(Some("invalida"), &dir.join("b.png")).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_second_reply_waits_its_turn_and_can_be_cancelled_while_waiting() {
         let root = std::env::temp_dir().join(format!("ayla-gate-{}", store::id()));
@@ -4413,15 +4517,15 @@ mod tests {
         core.sync_notes(&project_notes).await.unwrap();
 
         let cancel = CancellationToken::new();
-        let notes = core.notes_context(&prefs, "qual NPC mais legal que eu criei no Wilderfeast?", None, &cancel).await;
+        let notes = core.notes_context(&prefs, "qual NPC mais legal que eu criei no Wilderfeast?", true, None, &cancel).await;
         assert_eq!(notes.len(), 2);
-        assert!(notes.iter().any(|(name, text)| name == "Lua" && text.contains("cozinheira")));
-        assert!(notes.iter().any(|(name, text)| name == "Ivo" && text.contains("guardião")));
+        assert!(notes.iter().any(|(name, text, _)| name == "Lua" && text.contains("cozinheira")));
+        assert!(notes.iter().any(|(name, text, _)| name == "Ivo" && text.contains("guardião")));
         let block = athena::context_block(&notes).unwrap();
         assert!(block.contains("[nota: Lua]") && block.contains("[nota: Ivo]"));
         assert!(!block.contains(vault.to_str().unwrap()));
 
-        let notes = core.notes_context(&prefs, "O que está escrito sobre cartógrafa?", None, &cancel).await;
+        let notes = core.notes_context(&prefs, "O que está escrito sobre cartógrafa?", false, None, &cancel).await;
         assert_eq!(notes[0].0, "Nera");
         drop(core);
         fs::remove_dir_all(root).unwrap();

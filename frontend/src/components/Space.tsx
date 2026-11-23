@@ -28,6 +28,7 @@ type Props = {
   /** Na barra da Ayla: lista de projetos, abrir e criar. */
   projects?: Project[];
   onOpenProject?: (id: string) => void;
+  onOpenNote?: (path: string) => void;
   onNewProject?: () => void;
   /** No projeto: voltar para a conversa geral da Ayla. */
   onBack?: () => void;
@@ -43,7 +44,7 @@ export function ProjectAvatar({ project, size = 36 }: { project: Project; size?:
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, projects = [], onOpenProject, onNewProject, onBack, incoming }: Props) {
+export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, onOpenNote, projects = [], onOpenProject, onNewProject, onBack, incoming }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // Cada conversa respondendo fica montada (oculta) para a resposta seguir enquanto outra é aberta.
   const [slots, setSlots] = useState<Slot[]>([{ key: 'c0', conversation: null, busy: false }]);
@@ -234,7 +235,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
               <div className="row-actions"><button className="danger-action" onClick={() => void remove(item)}>Apagar</button><button className="ghost-button" onClick={() => setConfirming(null)}>Cancelar</button></div>
             </div>
           : <div key={item.id} className="conversation-row">
-              <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={item.title}>{item.title}</button>
+              <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={busyIds.has(item.id) ? `${item.title} · respondendo…` : item.title}>{busyIds.has(item.id) && <span className="conversation-spinner" role="status" aria-label="Respondendo"><i /><i /><i /></span>}{item.title}</button>
               <span className="row-tools">
                 <button className="icon-button tiny" aria-label={`Renomear “${item.title}”`} title="Renomear" onClick={() => { setConfirming(null); setEditing(item.id); setDraftTitle(item.title); }}><PencilIcon size={15} /></button>
                 <button className="icon-button tiny" aria-label={`Apagar “${item.title}”`} title="Apagar" disabled={busyIds.has(item.id)} onClick={() => { setEditing(null); setConfirming(item.id); }}><TrashIcon size={15} /></button>
@@ -247,7 +248,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
 
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
     {slots.map(slot => <div key={slot.key} className="chat-slot" hidden={view !== 'chat' || slot.key !== activeKey}>
-      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} attach={slot.attach}
+      <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} onOpenNote={onOpenNote} attach={slot.attach}
         bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))} />
     </div>)}
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}

@@ -307,6 +307,7 @@ pub fn run() {
             core::services::export_file,
             core::services::add_file,
             core::services::add_file_data,
+            core::services::capture_screen,
             core::services::remove_file,
             core::services::project_files,
             core::services::create_project,
