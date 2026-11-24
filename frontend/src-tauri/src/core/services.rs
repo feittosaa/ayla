@@ -60,6 +60,8 @@ impl Core {
         let store = Store::open(&root.join("ayla.db"))
             .map_err(|_| "Não foi possível abrir o banco da Ayla")?;
         clean_files(&root, &store);
+        // Conversas vazias (ex.: envio que falhou antes de salvar) não ficam na lista.
+        let _ = store.delete_empty_conversations(None);
         Ok(Self {
             preferences: Mutex::new(PreferenceStore::new(&root)),
             store: Mutex::new(store),
@@ -968,6 +970,11 @@ pub fn unload_models(state: tauri::State<'_, Core>) -> Result<(), String> {
         .map_err(|_| "Interrompa a tarefa atual antes de liberar o modelo")?;
     state.runtime.stop_all();
     Ok(())
+}
+/// Ao sair de uma conversa: apaga se ficou sem mensagens nem arquivos.
+#[tauri::command]
+pub fn conversation_discard_empty(state: tauri::State<'_, Core>, id: String) -> Result<bool, String> {
+    Ok(state.store.lock().map_err(|_| "Dados ocupados")?.delete_empty_conversations(Some(&id)).map_err(|_| "Falha ao limpar a conversa")? > 0)
 }
 #[tauri::command]
 pub fn conversations(state: tauri::State<'_, Core>, project: Option<String>) -> Result<Value, String> {
@@ -1881,6 +1888,8 @@ fn athena_overview_for(roots: Vec<AthenaRoot>) -> Value {
         }
         for (index, note) in notes.iter().enumerate() {
             let Ok((text, _)) = athena::read(&root.path, &note.path) else { continue };
+            let aliases = athena::aliases(&text);
+            if !aliases.is_empty() { nodes[base + index]["aliases"] = json!(aliases); }
             for target in athena::graph_targets(&text) {
                 let target = target.to_lowercase();
                 if let Some(&other) = paths.get(target.trim_end_matches(".md")).filter(|&&other| other != index) {
@@ -3002,6 +3011,236 @@ pub async fn iris_trash_image(app: tauri::AppHandle, file: Option<String>, root:
             _ => Err("Selecione uma imagem".into()),
         }
     }).await.map_err(|_| "Falha ao enviar a imagem para a lixeira")?
+}
+
+/// Origem de uma ampliação ou edição na Iris: arquivo guardado na Ayla ou raiz + caminho. Arquivos
+/// protegidos com senha ficam de fora (`protected_message`).
+fn iris_source(state: &Core, file: &Option<String>, root: &Option<String>, path: &Option<String>, protected_message: &str) -> Result<(PathBuf, String, Option<FileInfo>), String> {
+    match (file, root, path) {
+        (Some(id), _, _) => {
+            let info = state.store.lock().map_err(|_| "Dados ocupados")?.file(id).ok().flatten().ok_or("Arquivo não encontrado")?;
+            Ok((state.root.join(&info.path), info.name.clone(), Some(info)))
+        }
+        (None, Some(root), Some(path)) => {
+            if !linked_root(root) && protected(&state.athena_path(&state.prefs()?, root)?, path).is_some() {
+                return Err(protected_message.into());
+            }
+            let source = readable_media_path(state, root, path)?;
+            let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "arquivo".into());
+            Ok((source, name, None))
+        }
+        _ => Err("Arquivo não informado".into()),
+    }
+}
+
+/// Iris: o editor de vídeo precisa do FFmpeg (download opcional, o mesmo da leitura de vídeos).
+#[tauri::command]
+pub fn iris_editor(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<Value, String> {
+    use super::editor;
+    let bytes = runtime::artifacts().into_iter().find(|a| a.id == "ffmpeg").map_or(0, |a| a.bytes);
+    let (source, _, _) = iris_source(&state, &file, &root, &path, "Arquivos protegidos com senha não são editados")?;
+    let video = athena::attachment_mime(&source).unwrap_or("").starts_with("video/");
+    let replaceable = if video { editor::video_replaceable(&source) } else { editor::image_replaceable(&source) };
+    Ok(json!({"ffmpeg": state.runtime.tool("ffmpeg", "ffmpeg").is_some(), "ffmpeg_bytes": bytes, "replaceable": replaceable}))
+}
+
+/// Guarda o resultado pronto (`output`, oculto na pasta do original): como cópia ao lado
+/// ("foto-editada.jpg") ou, com `replace`, no lugar do original. Arquivo guardado na Ayla vira outro
+/// arquivo guardado do mesmo projeto (ou tem o conteúdo trocado).
+#[allow(clippy::too_many_arguments)]
+fn iris_keep_edit(state: &Core, output: &std::path::Path, source: &std::path::Path, name: &str, stored: Option<FileInfo>, root: Option<String>, path: Option<String>, extension: &str, replace: bool) -> Result<Value, String> {
+    use super::editor;
+    if replace {
+        fs::rename(output, source).map_err(|_| "Não foi possível substituir o original")?;
+        if let Some(info) = &stored {
+            let bytes = fs::metadata(source).map(|m| m.len() as i64).map_err(|_| "Arquivo editado indisponível")?;
+            let sha = models::hash(source).map_err(|_| "Não foi possível ler o arquivo editado")?;
+            state.store.lock().map_err(|_| "Dados ocupados")?.replace_file_content(&info.id, bytes, &sha).map_err(|_| "O arquivo foi substituído, mas a Ayla não conseguiu atualizar o registro")?;
+            return Ok(json!({"file": info.id, "name": info.name, "replaced": true}));
+        }
+        return Ok(json!({"root": root, "path": path, "name": name, "replaced": true}));
+    }
+    match stored {
+        Some(info) => {
+            let new_name = editor::copy_name(&info.name, extension, |_| false);
+            let saved = state.store_file(&new_name, |dest| fs::rename(output, dest).or_else(|_| fs::copy(output, dest).map(|_| ()))
+                .map_err(|_| "Não foi possível guardar o arquivo editado".to_string()).and_then(|_| fs::metadata(dest).map(|m| m.len()).map_err(|_| "Arquivo editado indisponível".to_string())), info.project_id.clone(), true)?;
+            Ok(json!({"file": saved.id, "name": saved.name}))
+        }
+        None => {
+            let dir = source.parent().ok_or("Pasta inválida")?;
+            let new_name = editor::copy_name(name, extension, |n| dir.join(n).exists());
+            fs::rename(output, dir.join(&new_name)).map_err(|_| "Não foi possível salvar o arquivo editado")?;
+            let relative = path.as_deref().map(|p| p.rsplit_once('/').map_or(new_name.clone(), |(dir, _)| format!("{dir}/{new_name}")));
+            Ok(json!({"root": root, "path": relative, "name": new_name}))
+        }
+    }
+}
+
+/// Iris: edita uma imagem (girar, espelhar, recortar, redimensionar, brilho, contraste e saturação).
+/// Por padrão salva uma cópia ao lado; `replace` troca o original (a interface confirma antes).
+#[tauri::command]
+pub async fn iris_edit_image(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>,
+    edit: super::editor::ImageEdit, replace: bool) -> Result<Value, String> {
+    use super::editor;
+    edit.check()?;
+    let (source, name, stored) = iris_source(&state, &file, &root, &path, "Imagens protegidas com senha não são editadas")?;
+    let mime = athena::attachment_mime(&source).unwrap_or("");
+    if !mime.starts_with("image/") || mime == "image/gif" {
+        return Err("Só imagens paradas podem ser editadas aqui (GIF fica de fora)".into());
+    }
+    if replace && !editor::image_replaceable(&source) {
+        return Err("Este formato não pode ser substituído; salve uma cópia".into());
+    }
+    let extension = editor::image_extension(&source);
+    let output = editor::working_file(source.parent().ok_or("Pasta inválida")?, extension);
+    let job = { let (source, output) = (source.clone(), output.clone()); tauri::async_runtime::spawn_blocking(move || editor::edit_image(&source, &output, &edit)) };
+    let result = job.await.map_err(|_| "O editor parou".to_string()).and_then(|r| r);
+    if let Err(error) = result { let _ = fs::remove_file(&output); return Err(error); }
+    let kept = iris_keep_edit(&state, &output, &source, &name, stored, root, path, extension, replace);
+    let _ = fs::remove_file(&output);
+    kept
+}
+
+/// Iris: edita um vídeo com o FFmpeg (cortar início e fim, girar, recortar o quadro, tirar o som) e
+/// exporta em MP4. Progresso: {type: "progress", percent}; interromper: `cancel_job`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn iris_edit_video(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>,
+    edit: super::editor::VideoEdit, replace: bool, request_id: String, events: Channel<Value>) -> Result<Value, String> {
+    use super::editor;
+    edit.check()?;
+    let ffmpeg = state.runtime.tool("ffmpeg", "ffmpeg").ok_or("Baixe o FFmpeg primeiro")?;
+    let (source, name, stored) = iris_source(&state, &file, &root, &path, "Vídeos protegidos com senha não são editados")?;
+    if !athena::attachment_mime(&source).unwrap_or("").starts_with("video/") {
+        return Err("Selecione um vídeo".into());
+    }
+    if replace && !editor::video_replaceable(&source) {
+        return Err("Só vídeos MP4 podem ser substituídos; salve uma cópia".into());
+    }
+    let output = editor::working_file(source.parent().ok_or("Pasta inválida")?, "mp4");
+    let token = state.job(&request_id)?;
+    let job = {
+        let (source, output) = (source.clone(), output.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut last = -1.0;
+            editor::run_video(&ffmpeg, &edit, &source, &output, &token, |percent| {
+                if percent - last >= 1.0 || percent >= 100.0 { last = percent; let _ = events.send(json!({"type": "progress", "percent": percent})); }
+            })
+        })
+    };
+    let result = job.await.map_err(|_| "O editor parou".to_string()).and_then(|r| r);
+    state.finish(&request_id);
+    if let Err(error) = result { let _ = fs::remove_file(&output); return Err(error); }
+    let kept = iris_keep_edit(&state, &output, &source, &name, stored, root, path, "mp4", replace);
+    let _ = fs::remove_file(&output);
+    kept
+}
+
+/// Iris: o ampliador (download opcional) está instalado? E o tamanho do download.
+#[tauri::command]
+pub fn iris_upscaler(state: tauri::State<'_, Core>) -> Value {
+    let bytes = runtime::artifacts().into_iter().find(|a| a.id == "upscale").map_or(0, |a| a.bytes);
+    let upscayl: Vec<Value> = super::upscale::find_upscayl().map(|u| super::upscale::upscayl_models(&u.models)).unwrap_or_default()
+        .into_iter().map(|model| json!({"id": format!("upscayl:{model}"), "label": super::upscale::upscayl_label(&model)})).collect();
+    json!({"installed": runtime::find_binary(&state.root.join("runtimes").join("upscale"), "realesrgan-ncnn-vulkan").is_some(), "bytes": bytes, "upscayl": upscayl})
+}
+
+/// Uma ampliação por vez (a placa de vídeo é uma só); solta ao sair, mesmo com erro.
+static UPSCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct UpscaleTurn;
+impl UpscaleTurn {
+    fn take() -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+        UPSCALING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).map(|_| Self).map_err(|_| "Já há um upscale em andamento".into())
+    }
+}
+impl Drop for UpscaleTurn {
+    fn drop(&mut self) { UPSCALING.store(false, std::sync::atomic::Ordering::Release); }
+}
+
+/// Iris: amplia uma imagem (2x, 3x ou 4x) com o Real-ESRGAN e salva uma cópia ao lado; o original
+/// não muda. `modelo`: "foto" ou "anime". Progresso: {type: "progress", percent}. Interromper:
+/// `cancel_job` com o mesmo `request_id`.
+#[tauri::command]
+pub async fn iris_upscale(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>,
+    modelo: String, scale: u32, request_id: String, events: Channel<Value>) -> Result<Value, String> {
+    use super::upscale;
+    let _turn = UpscaleTurn::take()?;
+    // Modelo do Upscayl já instalado ("upscayl:<nome>") ou do Real-ESRGAN baixado pela Ayla.
+    let (binary, models, model) = match modelo.strip_prefix("upscayl:") {
+        Some(name) => {
+            let found = upscale::find_upscayl().ok_or("O Upscayl não foi encontrado neste computador")?;
+            let model = upscale::upscayl_models(&found.models).into_iter().find(|m| m == name).ok_or("Modelo do Upscayl não encontrado")?;
+            (found.binary, found.models, model)
+        }
+        None => {
+            let binary = runtime::find_binary(&state.root.join("runtimes").join("upscale"), "realesrgan-ncnn-vulkan").ok_or("Baixe o upscale primeiro")?;
+            let models = binary.parent().map(|dir| dir.join("models")).ok_or("Upscale incompleto")?;
+            (binary, models, upscale::model_name(&modelo).ok_or("Modelo inválido")?.to_string())
+        }
+    };
+    // Origem e pasta da cópia: ao lado do original; arquivo guardado na Ayla vira outro arquivo guardado.
+    let (source, name, stored) = iris_source(&state, &file, &root, &path, "Imagens protegidas com senha não passam por upscale")?;
+    let mime = athena::attachment_mime(&source).unwrap_or("");
+    if !mime.starts_with("image/") || mime == "image/gif" {
+        return Err("Só imagens paradas passam por upscale (GIF fica de fora)".into());
+    }
+    let (width, height) = upscale::dimensions(&source).ok_or("Não foi possível ler a imagem")?;
+    upscale::check_size(width, height, scale)?;
+    let extension = match upscale::output_extension(&source) { "webp" if scale != upscale::NATIVE_SCALE && !upscale::writes_webp() => "png", other => other };
+    let work_dir = if stored.is_some() { state.root.join("work") } else { source.parent().ok_or("Pasta inválida")?.to_path_buf() };
+    fs::create_dir_all(&work_dir).map_err(|_| "Não foi possível preparar a pasta")?;
+    let output = upscale::working_file(&work_dir, extension);
+    let token = state.job(&request_id)?;
+    let (input, converted) = if upscale::reads_directly(&source) { (source.clone(), None) } else {
+        let temporary = upscale::working_file(&work_dir, "png");
+        (temporary.clone(), Some(temporary))
+    };
+    // 2x e 3x: amplia em 4x num PNG oculto e reduz depois (ver upscale::NATIVE_SCALE).
+    let native = (scale != upscale::NATIVE_SCALE).then(|| upscale::working_file(&work_dir, "png"));
+    let job = {
+        let (input, output, converted, source, native) = (input.clone(), output.clone(), converted.clone(), source.clone(), native.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(temporary) = &converted { upscale::to_png(&source, temporary)?; }
+            let mut last = -1.0;
+            let mut report = |percent: f64| {
+                if percent - last >= 1.0 || percent >= 100.0 { last = percent; let _ = events.send(json!({"type": "progress", "percent": percent})); }
+            };
+            match &native {
+                None => upscale::run(&binary, &models, &input, &output, &model, &token, report),
+                Some(native) => {
+                    upscale::run(&binary, &models, &input, native, &model, &token, |p| report(p * 0.95))?;
+                    upscale::shrink(native, &output, width * scale, height * scale)?;
+                    report(100.0);
+                    Ok(())
+                }
+            }
+        })
+    };
+    let result = job.await.map_err(|_| "O upscale parou".to_string()).and_then(|r| r);
+    state.finish(&request_id);
+    if let Some(temporary) = &converted { let _ = fs::remove_file(temporary); }
+    if let Some(native) = &native { let _ = fs::remove_file(native); }
+    if let Err(error) = result { let _ = fs::remove_file(&output); return Err(error); }
+    let finished = (|| -> Result<Value, String> {
+        match stored {
+            Some(info) => {
+                let new_name = upscale::output_name(&info.name, scale, extension, |_| false);
+                let saved = state.store_file(&new_name, |dest| fs::rename(&output, dest).or_else(|_| fs::copy(&output, dest).map(|_| ()))
+                    .map_err(|_| "Não foi possível guardar a imagem".to_string()).and_then(|_| fs::metadata(dest).map(|m| m.len()).map_err(|_| "Imagem do upscale indisponível".to_string())), info.project_id.clone(), true)?;
+                Ok(json!({"file": saved.id, "name": saved.name}))
+            }
+            None => {
+                let new_name = upscale::output_name(&name, scale, extension, |n| work_dir.join(n).exists());
+                fs::rename(&output, work_dir.join(&new_name)).map_err(|_| "Não foi possível salvar a imagem do upscale")?;
+                let relative = path.as_deref().map(|p| p.rsplit_once('/').map_or(new_name.clone(), |(dir, _)| format!("{dir}/{new_name}")));
+                Ok(json!({"root": root, "path": relative, "name": new_name}))
+            }
+        }
+    })();
+    let _ = fs::remove_file(&output);
+    finished
 }
 
 /// Abre a nota no Obsidian (onde os plugins do cofre rodam).

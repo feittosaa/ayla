@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef } from 'react';
+import { closeBrackets, closeBracketsKeymap, insertBracket } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxTree } from '@codemirror/language';
-import { Annotation, Compartment, EditorState, Transaction, type Range } from '@codemirror/state';
+import { Annotation, Compartment, EditorState, Prec, Transaction, type Range } from '@codemirror/state';
 import { Decoration, EditorView, keymap, placeholder, ViewPlugin, WidgetType, type ViewUpdate } from '@codemirror/view';
 import { IMAGE, imageWidth, isAttachment, resizedImage } from '../services/Wiki';
 import { mediaUrl } from '../services/Media';
@@ -18,12 +19,31 @@ type Props = {
   onPaste: (event: ClipboardEvent, view: EditorView) => boolean;
   onBlur: () => void;
   onEscape: () => void;
+  /** Teclas da lista de sugestões de link; devolve true quando a lista usou a tecla. */
+  onSuggestKey: (key: 'Enter' | 'Tab' | 'ArrowUp' | 'ArrowDown') => boolean;
   onLink: (target: string) => void;
 };
 
 const external = Annotation.define<boolean>();
 const wikiPattern = /^(!?)\[\[([^\]\n|]+)(?:\|([^\]\n]+))?\]\]/;
-const pairedDelimiters = new Map([['*', '*'], ['{', '}'], ['[', ']']]);
+// Pares fechados sozinhos, como no Obsidian: digitar o fechamento ou dar Enter logo antes dele
+// sai do par; Backspace no par vazio apaga os dois.
+const pairs = { brackets: ['[', '{', '*'] };
+/** Enter logo antes de fechamentos que a própria Athena colocou (ex.: `]]`): pula todos eles. */
+function leavePair(view: EditorView) {
+  if (!view.state.selection.main.empty || view.state.selection.ranges.length > 1) return false;
+  const skips: Transaction[] = [];
+  for (let state = view.state; ;) {
+    const head = state.selection.main.head;
+    const next = state.sliceDoc(head, head + 1);
+    const skip = next ? insertBracket(state, next) : null;
+    if (!skip || !skip.newDoc.eq(state.doc)) break;
+    skips.push(skip); state = skip.state;
+  }
+  if (!skips.length) return false;
+  view.dispatch(...skips);
+  return true;
+}
 const localTarget = (value: string) => {
   try { return decodeURIComponent(value); }
   catch { return value; }
@@ -152,6 +172,9 @@ function decorations(view: EditorView, options: { current: Props }) {
     hidden.push(Decoration.replace({ widget: new InlineAtom(data, from, to, options) }).range(from, to));
   };
   const hide = (from: number, to: number) => hidden.push(Decoration.replace({}).range(from, to));
+  // Link com o cursor dentro aparece como texto cru (como no Obsidian): virar bloco enquanto se
+  // digita empurraria o cursor para depois do fechamento.
+  const editing = (from: number, to: number) => view.state.selection.ranges.some(r => r.head > from && r.head < to);
   const styles: Record<string, string> = {
     StrongEmphasis: 'athena-strong', Emphasis: 'athena-emphasis', Strikethrough: 'athena-strike',
     InlineCode: 'athena-code', CodeText: 'athena-code', Blockquote: 'athena-quote',
@@ -162,6 +185,7 @@ function decorations(view: EditorView, options: { current: Props }) {
     enter({ name, node, from, to }) {
       const line = view.state.doc.lineAt(from);
       if (name === 'AthenaLink') {
+        if (editing(from, to)) return false;
         const [, bang, target, alias] = wikiPattern.exec(slice(from, to))!;
         const clean = target.trim();
         const width = imageWidth(alias);
@@ -172,7 +196,7 @@ function decorations(view: EditorView, options: { current: Props }) {
       }
       if ((name === 'Link' || name === 'Image' || name === 'Autolink') && to <= line.to) {
         const url = node.getChild('URL');
-        if (!url) return;
+        if (!url || editing(from, to)) return;
         const marks = node.getChildren('LinkMark');
         const destination = slice(url.from, url.to).replace(/^<|>$/g, '');
         const label = name === 'Autolink' ? destination : slice(marks[0].to, marks[1].from);
@@ -182,7 +206,7 @@ function decorations(view: EditorView, options: { current: Props }) {
         atom(from, to, { target, label: label || target, title: titleText, image: name === 'Image', width: Number(imageWidth(titleText)?.split('x')[0]) || undefined });
         return false;
       }
-      if (name === 'URL' && /^(https?:\/\/|www\.)/i.test(slice(from, to))) {
+      if (name === 'URL' && /^(https?:\/\/|www\.)/i.test(slice(from, to)) && !editing(from, to)) {
         const url = slice(from, to);
         atom(from, to, { label: url, target: /^www\./i.test(url) ? `https://${url}` : url });
         return false;
@@ -214,7 +238,7 @@ export default function AthenaEditor(props: Props) {
       decorations: ReturnType<typeof decorations>;
       constructor(view: EditorView) { this.decorations = decorations(view, options); }
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged || syntaxTree(update.state) !== syntaxTree(update.startState)) {
+        if (update.docChanged || update.viewportChanged || update.selectionSet || syntaxTree(update.state) !== syntaxTree(update.startState)) {
           this.decorations = decorations(update.view, options);
         }
       }
@@ -226,21 +250,14 @@ export default function AthenaEditor(props: Props) {
       parent: mount.current!,
       doc: initial.value,
       extensions: [
-        language, plugin, history(), keymap.of([...defaultKeymap, ...historyKeymap]),
+        language, language.language.data.of({ closeBrackets: pairs }), closeBrackets(), plugin, history(),
+        Prec.highest(keymap.of((['Enter', 'Tab', 'ArrowUp', 'ArrowDown'] as const).map(key => ({ key, run: () => options.current.onSuggestKey(key) })))),
+        Prec.high(keymap.of([{ key: 'Enter', run: leavePair }])),
+        keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
         EditorView.lineWrapping, placeholder('Comece a escrever…'),
         EditorView.contentAttributes.of({ 'aria-label': 'Conteúdo da nota', spellcheck: 'true' }),
         EditorView.inputHandler.of((view, from, to, text) => {
           if (view.state.readOnly || view.composing) return false;
-          const closing = pairedDelimiters.get(text);
-          if (closing) {
-            const selected = view.state.doc.sliceString(from, to);
-            view.dispatch({
-              changes: { from, to, insert: text + selected + closing },
-              selection: { anchor: from + 1, head: to + 1 },
-              userEvent: 'input.type',
-            });
-            return true;
-          }
           if (text !== '-' || from !== to) return false;
           const line = view.state.doc.lineAt(from);
           if (line.number === 1 || line.length || !view.state.doc.line(line.number - 1).text.trim()) return false;

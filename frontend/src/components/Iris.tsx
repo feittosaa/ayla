@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } 
 import { listen } from '@tauri-apps/api/event';
 import MediaView from './MediaView';
 import { preloadPdf } from '../services/PdfJs';
-import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, ExpandIcon, FileIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, ExpandIcon, FileIcon, PencilIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { mediaUrl, openInSystem, type MediaRef } from '../services/Media';
 import BrandMark from './BrandMark';
+import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
+import IrisEditor, { type EditResult } from './IrisEditor';
 
 type Kind = 'image' | 'video' | 'pdf';
 type Source = 'athena' | 'chat' | 'gerada' | 'arquivos' | 'computer';
@@ -63,6 +65,9 @@ const url = (item: Item, thumb = false) => mediaUrl(mediaOf(item), thumb);
 const month = (seconds: number) => { const text = new Date(seconds * 1000).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }); return text.charAt(0).toUpperCase() + text.slice(1); };
 const size = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+
+/** Ampliar: quadrado com setas para fora. */
+const UpscaleIcon = () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" /></svg>;
 
 /** Aguarda o cartão ficar visível antes de pedir uma miniatura. */
 function Thumb({ item }: { item: Item }) {
@@ -274,7 +279,26 @@ export default function Iris({ active, external }: { active: boolean; external?:
   const list = outside ?? visible;
   const index = open ? list.findIndex(item => item.key === open) : -1;
   const current = index >= 0 ? list[index] : null;
+  // Ampliar a imagem aberta; ao terminar, a cópia aparece na lista e abre no visualizador.
+  const [upscaling, setUpscaling] = useState(false);
+  const [upscaled, setUpscaled] = useState('');
+  async function afterUpscale(result: UpscaleResult) {
+    setUpscaling(false);
+    setUpscaled(`Salva como ${result.name}.`);
+    await load();
+    if (!outside) setOpen(result.file ? `arquivo:${result.file}` : `${result.root}|${result.path}`);
+  }
+  // Editor: a cópia abre no visualizador; ao substituir, fica no mesmo item (já atualizado).
+  const [editing, setEditing] = useState(false);
+  async function afterEdit(result: EditResult) {
+    setEditing(false);
+    setUpscaled(result.replaced ? `Original substituído: ${result.name}.` : `Salva como ${result.name}.`);
+    await load();
+    if (!outside && !result.replaced) setOpen(result.file ? `arquivo:${result.file}` : `${result.root}|${result.path}`);
+  }
   function closeViewer() {
+    setEditing(false);
+    setUpscaling(false); setUpscaled('');
     setConfirmTrash(false);
     setTrashError('');
     setOpen(null);
@@ -301,7 +325,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
   useEffect(() => {
     if (!current) return;
     const key = (event: KeyboardEvent) => {
-      if (trashing) return;
+      if (trashing || editing) return;
       if (confirmTrash) {
         if (event.key === 'Escape') { setConfirmTrash(false); setTrashError(''); }
         return;
@@ -312,7 +336,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [current, step, confirmTrash, trashing]);
+  }, [current, step, confirmTrash, trashing, editing]);
 
   function system(item: Item) {
     void openInSystem(mediaOf(item)).catch(e => setError(errorText(e)));
@@ -433,10 +457,18 @@ export default function Iris({ active, external }: { active: boolean; external?:
         <span className="iris-viewer-title"><b>{current.name}</b><small>{itemLocation(current)} · {day(current.date)} · {size(current.bytes)}</small></span>
         <span className="iris-viewer-count">{index + 1} de {list.length}</span>
         <button className="icon-button" data-tip="Abrir no visualizador do sistema" aria-label="Abrir no visualizador do sistema" onClick={() => system(current)}><ExpandIcon size={17} /></button>
+        {current.kind === 'image' && !/\.gif$/i.test(current.name) && <button className={upscaling ? 'icon-button active' : 'icon-button'} data-tip="Upscale de imagem" aria-label="Upscale de imagem" aria-pressed={upscaling}
+          onClick={() => { setUpscaled(''); setUpscaling(v => !v); }}><UpscaleIcon /></button>}
+        {(current.kind === 'video' || (current.kind === 'image' && !/\.gif$/i.test(current.name))) && <button className="icon-button" data-tip="Editar" aria-label="Editar"
+          onClick={() => { setUpscaled(''); setUpscaling(false); setEditing(true); }}><PencilIcon size={17} /></button>}
         {current.kind === 'image' && !outside && <button className="icon-button tip-end" data-tip="Excluir imagem" aria-label="Excluir imagem"
           disabled={confirmTrash} onClick={() => setConfirmTrash(true)}><TrashIcon size={17} /></button>}
         <button className="icon-button tip-end" data-tip="Fechar (Esc)" aria-label="Fechar" disabled={trashing} onClick={closeViewer}><CloseIcon size={18} /></button>
       </header>
+      {editing && <IrisEditor key={current.key} target={{ file: current.file, root: current.root, path: current.path, name: current.name, kind: current.kind === 'video' ? 'video' : 'image', src: `${url(current)}?v=${current.date}-${current.bytes}` }}
+        onDone={result => void afterEdit(result)} onClose={() => setEditing(false)} />}
+      {upscaling && <IrisUpscale key={current.key} target={{ file: current.file, root: current.root, path: current.path, name: current.name, src: `${url(current)}?v=${current.date}-${current.bytes}` }} onDone={result => void afterUpscale(result)} onClose={() => setUpscaling(false)} />}
+      {upscaled && !upscaling && <div className="iris-upscale" role="status" onClick={e => e.stopPropagation()}><span>{upscaled}</span><button className="ghost-button" onClick={() => setUpscaled('')}>OK</button></div>}
       {confirmTrash && <div className="iris-trash-confirm" role="group" aria-label="Confirmar exclusão" onClick={e => e.stopPropagation()}>
         <span>Mover “{current.name}” para a lixeira do sistema?</span>
         <button className="ghost-button" autoFocus disabled={trashing} onClick={() => { setConfirmTrash(false); setTrashError(''); }}>Cancelar</button>
@@ -444,9 +476,9 @@ export default function Iris({ active, external }: { active: boolean; external?:
         {trashError && <span role="alert">{trashError}</span>}
       </div>}
       <div className="iris-stage" onClick={e => e.stopPropagation()}>
-        <MediaView key={current.key} media={mediaOf(current)} name={current.name} kind={current.kind} autoPlay onError={setError} />
+        <MediaView key={current.key + current.date + current.bytes} media={mediaOf(current)} name={current.name} kind={current.kind} version={`${current.date}-${current.bytes}`} autoPlay onError={setError} />
       </div>
-      {list.length > 1 && !confirmTrash && <>
+      {list.length > 1 && !confirmTrash && !editing && <>
         <button className="iris-nav prev" aria-label="Anterior" onClick={e => { e.stopPropagation(); step(-1); }}><ChevronLeftIcon size={26} /></button>
         <button className="iris-nav next" aria-label="Próximo" onClick={e => { e.stopPropagation(); step(1); }}><ChevronRightIcon size={26} /></button>
       </>}

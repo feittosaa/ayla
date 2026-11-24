@@ -354,6 +354,16 @@ impl Store {
     }
     /// Apaga a conversa, as mensagens e os arquivos dela; devolve os caminhos das cópias
     /// para apagar do disco. Memórias aprendidas nela ficam (sem o vínculo com a conversa).
+    /// Apaga conversas sem mensagens nem arquivos (`only`: só essa). Devolve quantas apagou.
+    pub fn delete_empty_conversations(&self, only: Option<&str>) -> rusqlite::Result<usize> {
+        const EMPTY: &str = "(?1 IS NULL OR id=?1) AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id=conversations.id)
+            AND NOT EXISTS(SELECT 1 FROM files f WHERE f.conversation_id=conversations.id)";
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(&format!("UPDATE facts SET conversation_id=NULL WHERE conversation_id IN (SELECT id FROM conversations WHERE {EMPTY})"), [only])?;
+        let deleted = tx.execute(&format!("DELETE FROM conversations WHERE {EMPTY}"), [only])?;
+        tx.commit()?;
+        Ok(deleted)
+    }
     pub fn delete_conversation(&self, id: &str) -> rusqlite::Result<Option<Vec<String>>> {
         let tx = self.conn.unchecked_transaction()?;
         let paths: Vec<String> = tx.prepare("SELECT path FROM files WHERE conversation_id=?1")?.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -742,6 +752,11 @@ impl Store {
         Ok(())
     }
     /// Remove o registro e devolve o caminho relativo para apagar a cópia.
+    /// Conteúdo trocado no lugar (editor da Iris): novo tamanho e hash; a extração antiga deixa de valer.
+    pub fn replace_file_content(&self, id: &str, bytes: i64, sha256: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE files SET bytes=?2, sha256=?3, extracted=NULL WHERE id=?1", params![id, bytes, sha256])?;
+        Ok(())
+    }
     pub fn delete_file(&self, id: &str) -> rusqlite::Result<Option<String>> {
         let path: Option<String> = self.conn.query_row("SELECT path FROM files WHERE id=?1", [id], |r| r.get(0)).ok();
         self.conn.execute("DELETE FROM files WHERE id=?1", [id])?;
@@ -1322,6 +1337,39 @@ mod tests {
         assert!(!db.delete_project(&tcc.id).unwrap());
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn conteudo_substituido_atualiza_tamanho_e_esquece_a_extracao() {
+        let path = std::env::temp_dir().join(format!("ayla-replace-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let file = FileInfo { id: "f1".into(), name: "foto.jpg".into(), kind: Kind::Image, bytes: 10, created_at: 0, conversation_id: None, project_id: None, message_id: None, path: "files/f1/foto.jpg".into(), extracted: Some("descrição antiga".into()) };
+        db.insert_file(&file, "sha-velho", true).unwrap();
+        db.replace_file_content("f1", 42, "sha-novo").unwrap();
+        let after = db.file("f1").unwrap().unwrap();
+        assert_eq!((after.bytes, after.extracted, after.name), (42, None, "foto.jpg".to_string()));
+        let sha: String = db.conn.query_row("SELECT sha256 FROM files WHERE id='f1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(sha, "sha-novo");
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn conversas_vazias_sao_apagadas_e_as_com_conteudo_ficam() {
+        let path = std::env::temp_dir().join(format!("ayla-empty-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let (empty, other, talk, attached) = (db.create_conversation("", None).unwrap(), db.create_conversation("", None).unwrap(), db.create_conversation("A", None).unwrap(), db.create_conversation("B", None).unwrap());
+        db.add_message(&talk.id, "user", "oi", true).unwrap();
+        let file = FileInfo { id: "f1".into(), name: "a.pdf".into(), kind: Kind::Pdf, bytes: 1, created_at: 0, conversation_id: Some(attached.id.clone()), project_id: None, message_id: None, path: "files/f1/a.pdf".into(), extracted: None };
+        db.insert_file(&file, "sha", false).unwrap();
+        // Só a pedida; com conteúdo, nada acontece.
+        assert_eq!(db.delete_empty_conversations(Some(&talk.id)).unwrap(), 0);
+        assert_eq!(db.delete_empty_conversations(Some(&empty.id)).unwrap(), 1);
+        assert!(db.conversations(None).unwrap().iter().any(|c| c.id == other.id));
+        // Todas as vazias (na abertura).
+        assert_eq!(db.delete_empty_conversations(None).unwrap(), 1);
+        let left: Vec<String> = db.conversations(None).unwrap().into_iter().map(|c| c.id).collect();
+        assert!(left.contains(&talk.id) && left.contains(&attached.id) && left.len() == 2);
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
     #[test]
     fn conversations_can_be_renamed_and_deleted_keeping_memories() {

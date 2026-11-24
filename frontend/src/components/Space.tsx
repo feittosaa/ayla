@@ -256,7 +256,8 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
     {slots.map(slot => <div key={slot.key} className="chat-slot" hidden={view !== 'chat' || slot.key !== activeKey}>
       <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} onOpenNote={onOpenNote} attach={slot.attach}
-        bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))} />
+        bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))}
+        onDiscarded={id => setConversations(prev => prev.filter(c => c.id !== id))} />
     </div>)}
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
     {project && view === 'memory' && <main className="settings-main"><div className="settings-content">

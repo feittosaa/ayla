@@ -290,7 +290,7 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 /* Athena: tags, renomear, mover, editor */
 .app-shell .athena-toolbar button { min-height: 30px; min-width: 32px; padding: 2px 8px; font-size: 13px; }
 .app-shell .link-suggest button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding: 6px 8px; border: 0; background: none; text-align: left; font-size: 13px; }
-.app-shell .link-suggest button:hover { background: var(--ayla-hover); }
+.app-shell .link-suggest button:hover, .app-shell .link-suggest [aria-selected="true"] button { background: var(--ayla-hover); }
 .link-suggest small { color: var(--ayla-text-faint); font-size: 11px; }
 .markdown a.note-tag { color: var(--ayla-accent-soft); text-decoration: none; padding: 0 4px; border-radius: calc(6px * var(--ayla-round, 1)); background: var(--ayla-accent-ring); cursor: pointer; }
 .markdown img.note-image { max-width: 100%; border-radius: calc(8px * var(--ayla-round, 1)); }
@@ -565,6 +565,16 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-controls { display: flex; justify-content: flex-end; }
 .iris-order { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; font-size: 13px; color: var(--ayla-text-soft); }
 .iris-empty { margin: 60px auto; max-width: 460px; text-align: center; color: var(--ayla-text-faint); }
+/* Ampliar (Real-ESRGAN): painel no topo do visualizador. */
+.iris-upscale { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 3; width: min(460px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text); box-shadow: 0 12px 32px rgb(0 0 0 / .35); font-size: 14px; }
+.iris-upscale-options { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.iris-upscale-options label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.iris-upscale-options select { font: inherit; color: var(--ayla-text); background: var(--ayla-bg); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 6px 8px; }
+.iris-upscale-scale { display: inline-flex; border: 1px solid var(--ayla-border); border-radius: 8px; overflow: hidden; }
+.app-shell .iris-upscale-scale button { border: 0; border-radius: 0; padding: 6px 14px; background: transparent; }
+.app-shell .iris-upscale-scale button[aria-pressed=true] { background: var(--ayla-accent); color: var(--ayla-on-accent); }
+.iris-upscale-note { font-size: 12px; color: var(--ayla-text-faint); }
+.iris-upscale-error { color: var(--ayla-error); }
 .iris-month h2 { position: sticky; top: -6px; z-index: 2; margin: 0; padding: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--ayla-text-soft); background: var(--ayla-bg); }
 .iris-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
 .app-shell .iris-card { display: flex; flex-direction: column; min-width: 0; padding: 0; border: 1px solid var(--ayla-border-soft); border-radius: calc(10px * var(--ayla-round, 1)); overflow: hidden; background: var(--ayla-panel); text-align: left; cursor: zoom-in; transition: border-color 120ms, transform 120ms; }
@@ -752,3 +762,77 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 /* Seção aberta por um atalho (ex.: o ⚠ de uma fonte sem chave): destaque breve. */
 .settings-group.section-reveal { animation: section-reveal 1.6s ease-out; border-radius: calc(14px * var(--ayla-round, 1)); }
 @keyframes section-reveal { 0%, 30% { box-shadow: 0 0 0 2px var(--ayla-accent-ring); } 100% { box-shadow: 0 0 0 2px transparent; } }
+/* Editor da Iris (imagem e vídeo) */
+.iris-editor { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: #0b0b0d; color: #eee; }
+.iris-editor .iris-viewer-bar .primary-action, .iris-editor .iris-viewer-bar .ghost-button { white-space: nowrap; }
+.iris-editor-body { flex: 1; min-height: 0; display: flex; }
+.iris-editor-stage { flex: 1; min-width: 0; min-height: 0; margin: 8px 24px 24px; display: flex; align-items: center; justify-content: center; }
+.iris-editor-frame { position: relative; overflow: hidden; flex: none; }
+.iris-editor-frame img, .iris-editor-frame video { position: absolute; left: 50%; top: 50%; max-width: none; user-select: none; pointer-events: none; }
+.iris-crop { position: absolute; box-shadow: 0 0 0 9999px rgb(0 0 0 / .55); outline: 1px solid #fff; cursor: move; touch-action: none;
+  background-image: linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40);
+  background-size: 1px 100%, 1px 100%, 100% 1px, 100% 1px; background-position: 33.33% 0, 66.66% 0, 0 33.33%, 0 66.66%; background-repeat: no-repeat; }
+.iris-crop-handle { position: absolute; width: 16px; height: 16px; border: 3px solid #fff; touch-action: none; }
+.iris-crop-handle.nw { left: -3px; top: -3px; border-right: 0; border-bottom: 0; cursor: nwse-resize; }
+.iris-crop-handle.ne { right: -3px; top: -3px; border-left: 0; border-bottom: 0; cursor: nesw-resize; }
+.iris-crop-handle.sw { left: -3px; bottom: -3px; border-right: 0; border-top: 0; cursor: nesw-resize; }
+.iris-crop-handle.se { right: -3px; bottom: -3px; border-left: 0; border-top: 0; cursor: nwse-resize; }
+.iris-editor-panel { width: 288px; flex: none; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; padding: 8px 18px 24px; border-left: 1px solid #ffffff14; font-size: 13px; }
+.iris-editor-panel section { display: flex; flex-direction: column; gap: 8px; }
+.iris-editor-panel h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: #aaa; text-transform: uppercase; }
+.iris-editor-row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.app-shell .iris-editor-panel .icon-button { width: 36px; height: 36px; min-height: 36px; padding: 0; color: #ddd; }
+.iris-editor-row label { flex: 1; display: flex; flex-direction: column; gap: 4px; color: #aaa; }
+.iris-editor-panel input[type=number] { width: 100%; font: inherit; color: #eee; background: #ffffff10; border: 1px solid #ffffff22; border-radius: 6px; padding: 6px 8px; }
+.iris-editor-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+.app-shell .iris-editor-choices button { padding: 5px 10px; border: 1px solid #ffffff22; border-radius: 999px; background: transparent; color: #ddd; font-size: 12px; }
+.app-shell .iris-editor-choices button[aria-pressed=true] { background: var(--ayla-accent); border-color: var(--ayla-accent); color: var(--ayla-on-accent); }
+.iris-editor-slider { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; color: #aaa; }
+.iris-editor-slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--ayla-accent); }
+.iris-editor-slider span, .iris-editor-time { color: #ddd; font-variant-numeric: tabular-nums; }
+.iris-editor-check { display: flex; align-items: center; gap: 8px; color: #ddd; }
+.iris-editor-panel [role=status] { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.iris-editor .iris-upscale-note { color: #999; }
+@media (max-width: 720px) {
+  .iris-editor-body { flex-direction: column; }
+  .iris-editor-stage { margin: 8px 16px; }
+  .iris-editor-panel { width: auto; max-height: 45%; border-left: 0; border-top: 1px solid #ffffff14; padding: 12px 16px; }
+}
+.app-shell .iris-editor .ghost-button { color: #ddd; } .app-shell .iris-editor .ghost-button:hover:not(:disabled) { background: #ffffff1a; color: #fff; }
+/* Nomes longos (sem espaços) quebram dentro dos painéis da Iris. */
+.iris-upscale, .iris-upscale *, .iris-editor-panel, .iris-editor .iris-viewer-title b { overflow-wrap: anywhere; }
+.iris-upscale-size { font-size: 13px; color: var(--ayla-text-soft); font-variant-numeric: tabular-nums; }
+.iris-upscale-size b { color: var(--ayla-text); font-weight: 600; }
+/* Bordas do recorte: faixa larga para pegar, traço curto no meio. */
+.iris-crop.full { cursor: default; background-image: none; }
+.iris-crop-handle.n, .iris-crop-handle.s { left: 14px; right: 14px; width: auto; height: 14px; border: 0; cursor: ns-resize; }
+.iris-crop-handle.e, .iris-crop-handle.w { top: 14px; bottom: 14px; height: auto; width: 14px; border: 0; cursor: ew-resize; }
+.iris-crop-handle.n { top: -7px; } .iris-crop-handle.s { bottom: -7px; }
+.iris-crop-handle.e { right: -7px; } .iris-crop-handle.w { left: -7px; }
+.iris-crop-handle.n::after, .iris-crop-handle.s::after, .iris-crop-handle.e::after, .iris-crop-handle.w::after { content: ''; position: absolute; background: #fff; border-radius: 2px; }
+.iris-crop-handle.n::after, .iris-crop-handle.s::after { left: 50%; top: 5px; width: 28px; height: 4px; transform: translateX(-50%); }
+.iris-crop-handle.e::after, .iris-crop-handle.w::after { top: 50%; left: 5px; width: 4px; height: 28px; transform: translateY(-50%); }
+.iris-crop-handle.nw, .iris-crop-handle.ne, .iris-crop-handle.sw, .iris-crop-handle.se { z-index: 1; }
+/* Ação secundária com contorno (ex.: "Substituir original"): parece botão, sem competir com o principal. */
+.app-shell .iris-editor .iris-outline-button { border: 1px solid #ffffff38; background: #ffffff0d; color: #eee; padding: 7px 14px; }
+.app-shell .iris-editor .iris-outline-button:hover:not(:disabled) { border-color: #ffffff60; background: #ffffff1f; }
+.app-shell .iris-editor .iris-outline-button:disabled { border-color: #ffffff1a; background: transparent; color: #888; }
+/* Faixa de quadros do vídeo (corte do trecho). */
+.iris-editor-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.iris-editor-timeline { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 0 24px 20px; }
+.iris-editor-timeline .iris-editor-row { align-items: center; }
+.iris-strip-wrap { display: flex; flex-direction: column; gap: 6px; }
+.iris-strip-labels { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: #aaa; font-variant-numeric: tabular-nums; }
+.iris-strip-labels b { color: #eee; font-weight: 600; }
+.iris-strip { position: relative; overflow: hidden; border-radius: calc(8px * var(--ayla-round, 1)); background: #ffffff0d; cursor: pointer; touch-action: none; user-select: none; }
+.iris-strip.disabled { cursor: default; opacity: .6; }
+.iris-strip-frames { display: flex; height: 100%; pointer-events: none; }
+.iris-strip-frames canvas { flex: none; display: block; background: #ffffff08; }
+.iris-strip-shade { position: absolute; top: 0; bottom: 0; background: rgb(0 0 0 / .62); pointer-events: none; }
+.iris-strip-range { position: absolute; top: 0; bottom: 0; box-sizing: border-box; border-top: 3px solid var(--ayla-accent); border-bottom: 3px solid var(--ayla-accent); pointer-events: none; }
+.iris-strip-handle { position: absolute; top: -3px; bottom: -3px; width: 14px; background: var(--ayla-accent); cursor: ew-resize; pointer-events: auto; touch-action: none; }
+.iris-strip-handle.start { left: -7px; border-radius: 6px 0 0 6px; }
+.iris-strip-handle.end { right: -7px; border-radius: 0 6px 6px 0; }
+.iris-strip-handle::after { content: ''; position: absolute; left: 5px; top: 50%; width: 4px; height: 18px; transform: translateY(-50%); border-radius: 2px; background: var(--ayla-on-accent); opacity: .8; }
+.iris-strip-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 4px rgb(0 0 0 / .6); pointer-events: none; }
+@media (max-width: 720px) { .iris-editor-timeline { padding: 0 16px 12px; } }

@@ -34,6 +34,8 @@ pub fn artifacts() -> Vec<Artifact> {
  Artifact{id:"llama-cpu",label:"Texto, raciocínio, visão e memória · CPU",bytes:23901164,url:"https://github.com/ggml-org/llama.cpp/releases/download/b12531/llama-b12531-bin-ubuntu-x64.tar.gz",sha256:"5c1bf73c8c338d7934bbe7b43827496685f69b2e2afce2de9c536f755dd94a20",binary:"llama-server"},
  // Build estático do ffmpeg 7.0.2 (johnvansickle) publicado pelo projeto ffmpeg-static; binário único em .gz.
  Artifact{id:"ffmpeg",label:"Leitura de áudio, vídeo e GIF",bytes:29354986,url:"https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64.gz",sha256:"bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa",binary:"ffmpeg"},
+ // Ampliador de imagens da Iris: Real-ESRGAN-ncnn-vulkan (MIT) com os modelos oficiais (BSD-3-Clause), pacote 20220424.
+ Artifact{id:"upscale",label:"Upscale de imagens (Real-ESRGAN) · placa de vídeo",bytes:46931474,url:"https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip",sha256:"e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96",binary:"realesrgan-ncnn-vulkan"},
  Artifact{id:"whisper",label:"Transcrição de voz",bytes:10364195,url:"https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-x64.tar.gz",sha256:"a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",binary:"whisper-cli"},
 ]
 }
@@ -99,6 +101,52 @@ fn extract(
         }
     }
     Ok(())
+}
+
+/// Pacote .zip: extrai só os arquivos pedidos (`wanted`), sem subir de pasta, até 512 MB cada.
+/// O pacote já teve o SHA-256 conferido no download.
+fn extract_zip(archive: &Path, destination: &Path, wanted: impl Fn(&str) -> bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let data = fs::read(archive)?;
+    let invalid = || io::Error::other("Pacote .zip inválido");
+    let u16_at = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).ok_or_else(invalid);
+    let u32_at = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).ok_or_else(invalid);
+    // Fim do diretório central: assinatura 0x06054b50 nos últimos 64 KiB.
+    let floor = data.len().saturating_sub(22 + 65535);
+    let end = (floor..data.len().saturating_sub(21)).rev().find(|&i| data[i..i + 4] == [0x50, 0x4b, 0x05, 0x06]).ok_or_else(invalid)?;
+    let (count, mut at) = (u16_at(end + 10)?, u32_at(end + 16)?);
+    for _ in 0..count {
+        if u32_at(at)? != 0x0201_4b50 { return Err(invalid()); }
+        let (method, packed, size) = (u16_at(at + 10)?, u32_at(at + 20)?, u32_at(at + 24)?);
+        let (name_len, extra_len, comment_len, local) = (u16_at(at + 28)?, u16_at(at + 30)?, u16_at(at + 32)?, u32_at(at + 42)?);
+        let name = std::str::from_utf8(data.get(at + 46..at + 46 + name_len).ok_or_else(invalid)?).map_err(|_| invalid())?.to_string();
+        at += 46 + name_len + extra_len + comment_len;
+        if name.ends_with('/') || !wanted(&name) { continue; }
+        let relative = Path::new(&name);
+        if relative.components().any(|c| !matches!(c, Component::Normal(_))) || size > 512 * 1024 * 1024 {
+            return Err(io::Error::other("Caminho de pacote inválido"));
+        }
+        if u32_at(local)? != 0x0403_4b50 { return Err(invalid()); }
+        let start = local + 30 + u16_at(local + 26)? + u16_at(local + 28)?;
+        let raw = data.get(start..start + packed).ok_or_else(invalid)?;
+        let mut bytes = Vec::with_capacity(size);
+        match method {
+            0 => bytes.extend_from_slice(raw),
+            8 => { flate2::read::DeflateDecoder::new(raw).take(size as u64 + 1).read_to_end(&mut bytes)?; }
+            _ => return Err(io::Error::other("Compressão do pacote não suportada")),
+        }
+        if bytes.len() != size { return Err(invalid()); }
+        let target = destination.join(relative);
+        if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+        fs::write(&target, &bytes)?;
+        if !name.contains('/') { fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?; }
+    }
+    Ok(())
+}
+
+/// Do pacote do Real-ESRGAN, só o executável e os modelos de foto e de anime (sem o vídeo e as imagens de exemplo).
+fn upscale_file(name: &str) -> bool {
+    name == "realesrgan-ncnn-vulkan" || name.starts_with("models/realesrgan-x4plus")
 }
 
 /// Binário único compactado com gzip (ex.: ffmpeg estático): descompacta e torna executável.
@@ -287,8 +335,9 @@ pub async fn install(
         let dest = staging.clone();
         let cancellation = cancel.clone();
         let single = artifact.url.ends_with(".gz") && !artifact.url.ends_with(".tar.gz");
+        let zip = artifact.url.ends_with(".zip");
         let binary = artifact.binary;
-        tokio::task::spawn_blocking(move || if single { unpack_binary(&source, &dest.join(binary)) } else { extract(&source, &dest, &cancellation) })
+        tokio::task::spawn_blocking(move || if zip { extract_zip(&source, &dest, upscale_file) } else if single { unpack_binary(&source, &dest.join(binary)) } else { extract(&source, &dest, &cancellation) })
             .await
             .map_err(|_| "Falha ao extrair componente")?
             .map_err(|_| "Pacote inválido ou instalação interrompida")?;
@@ -931,6 +980,95 @@ pub async fn stream_chat(
 
 #[cfg(test)]
 mod tests {
+    /// Monta um .zip (deflate ou guardado) para testar a extração.
+    fn zip_of(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        use std::io::Write;
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data, deflate) in entries {
+            let packed = if *deflate {
+                let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(data).unwrap();
+                encoder.finish().unwrap()
+            } else { data.to_vec() };
+            let method: u16 = if *deflate { 8 } else { 0 };
+            let offset = out.len() as u32;
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&[20, 0, 0, 0]);
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&[0; 8]);
+            out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&packed);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0]);
+            central.extend_from_slice(&method.to_le_bytes());
+            central.extend_from_slice(&[0; 8]);
+            central.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let start = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    /// Instala o ampliador a partir do pacote real (cache de desenvolvimento) e amplia uma imagem.
+    #[test]
+    #[ignore = "precisa do pacote em AYLA_MODEL_CACHE e de Vulkan"]
+    fn instala_o_ampliador_e_amplia() {
+        let root = std::env::temp_dir().join(format!("ayla-upscale-install-{}", super::super::store::id()));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(install(&root, "upscale", &CancellationToken::new(), |_| {})).unwrap();
+        let binary = find_binary(&root.join("upscale"), "realesrgan-ncnn-vulkan").expect("executável");
+        let mut models: Vec<String> = fs::read_dir(root.join("upscale/models")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        models.sort();
+        assert_eq!(models, ["realesrgan-x4plus-anime.bin", "realesrgan-x4plus-anime.param", "realesrgan-x4plus.bin", "realesrgan-x4plus.param"]);
+        assert!(!root.join("upscale/onepiece_demo.mp4").exists());
+        let input = root.join("in.png");
+        let image = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 80, 60).unwrap();
+        image.fill(0xcc6633ff);
+        image.savev(&input, "png", &[]).unwrap();
+        let output = root.join("out.png");
+        super::super::upscale::run(&binary, &binary.parent().unwrap().join("models"), &input, &output, "realesrgan-x4plus-anime", &CancellationToken::new(), |_| {}).unwrap();
+        assert_eq!(super::super::upscale::dimensions(&output), Some((320, 240)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zip_extrai_so_o_pedido_e_recusa_caminho_para_fora() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ayla-zip-{}", super::super::store::id()));
+        fs::create_dir_all(dir.join("saida")).unwrap();
+        let model = vec![7u8; 5000];
+        let archive = dir.join("pacote.zip");
+        fs::write(&archive, zip_of(&[("realesrgan-ncnn-vulkan", b"#!binario", false), ("models/realesrgan-x4plus.bin", &model, true),
+            ("models/realesr-animevideov3-x2.bin", b"fora", true), ("onepiece_demo.mp4", b"video", false)])).unwrap();
+        extract_zip(&archive, &dir.join("saida"), upscale_file).unwrap();
+        assert_eq!(fs::read(dir.join("saida/models/realesrgan-x4plus.bin")).unwrap(), model, "deflate");
+        let binary = dir.join("saida/realesrgan-ncnn-vulkan");
+        assert_eq!(fs::read(&binary).unwrap(), b"#!binario");
+        assert_eq!(fs::metadata(&binary).unwrap().permissions().mode() & 0o111, 0o111, "executável");
+        assert!(!dir.join("saida/onepiece_demo.mp4").exists() && !dir.join("saida/models/realesr-animevideov3-x2.bin").exists());
+        let evil = dir.join("mau.zip");
+        fs::write(&evil, zip_of(&[("models/realesrgan-x4plus/../../fora", b"x", false)])).unwrap();
+        assert!(extract_zip(&evil, &dir.join("saida"), upscale_file).is_err());
+        assert!(!dir.join("fora").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     use super::*;
 
     #[test]

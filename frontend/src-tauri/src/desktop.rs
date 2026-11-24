@@ -692,6 +692,8 @@ fn close(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
 // O executável instalado pode ter sido substituído enquanto esta sessão rodava.
 static RESTART_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+static RESTART_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
 pub fn restart_requested() -> bool { RESTART_PATH.get().is_some() }
 
 fn restart_path() -> Result<PathBuf, String> {
@@ -710,7 +712,7 @@ fn restart_path() -> Result<PathBuf, String> {
 pub fn relaunch_if_requested() {
     use std::os::unix::process::CommandExt;
     if let Some(path) = RESTART_PATH.get() {
-        let error = Command::new(path).exec();
+        let error = Command::new(path).args(RESTART_ARGS.get().cloned().unwrap_or_default()).exec();
         eprintln!("Não foi possível reabrir a Ayla: {error}");
         std::process::exit(1);
     }
@@ -725,7 +727,16 @@ pub fn desktop_action(app: AppHandle, action: String) -> Result<(), String> {
         "hide" => close(&app, &window),
         "restore" => window.set_fullscreen(false).map_err(|e| e.to_string()),
         "quit" => { app.exit(0); Ok(()) }
-        "restart" => { let _ = RESTART_PATH.set(restart_path()?); app.exit(0); Ok(()) }
+        "restart" => {
+            let path = restart_path()?;
+            // Só a Athena aberta: volta só a Athena (sem abrir a conversa junto).
+            let visible = |label: &str| app.get_webview_window(label).is_some_and(|w| w.is_visible().unwrap_or(false));
+            if !visible("main") && visible(ATHENA_WINDOW) { let _ = RESTART_ARGS.set(vec!["--abrir".into(), "athena".into()]); }
+            crate::remember_windows(&app);
+            let _ = RESTART_PATH.set(path);
+            app.exit(0);
+            Ok(())
+        }
         _ => Err("Ação de janela desconhecida".into()),
     }
 }

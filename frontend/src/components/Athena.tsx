@@ -322,6 +322,12 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
   // Cofre fechado ou indisponível fora da Ayla: volta para a Athena.
   useEffect(() => { if (tree && !tree.roots.some(r => r.id === focus && r.available)) setFocus('ayla'); }, [tree, focus]);
   const graph = overview?.graph;
+  /** Apelidos (`aliases`) das notas de cada raiz, para as sugestões do [[. */
+  const aliases = useMemo(() => {
+    const out: Record<string, Record<string, string[]>> = {};
+    for (const node of graph?.nodes ?? []) if (node.aliases?.length) (out[node.root] ??= {})[node.path] = node.aliases;
+    return out;
+  }, [graph]);
   // Pastas protegidas: livres por 10 min depois da senha; depois disso, bloqueiam assim que nenhuma
   // nota ou arquivo delas estiver à vista (outra nota, aba fechada, outro espaço da Ayla).
   useEffect(() => { const id = setInterval(() => setClock(Date.now()), 15_000); return () => clearInterval(id); }, []);
@@ -932,7 +938,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
     const key = `${root.id}|`;
     const shown = expanded.includes(key);
     return <div key={root.id} className={dropping(root.id, '') ? 'tree-root tree-drop drop-target' : 'tree-root tree-drop'} data-drop={root.available ? 'folder' : undefined} data-root={root.id} data-path="">
-      <div className={focus === root.id ? 'tree-row root focused' : 'tree-row root'} onClick={() => { if (!root.available) return; if (focus === root.id) toggle(key); else { setFocus(root.id); setExpanded(prev => prev.includes(key) ? prev : [...prev, key]); } }} role="treeitem" aria-expanded={shown} title={focus === root.id ? `${root.path}\nEm foco: novas notas e a nota de hoje vão para cá` : root.path}>
+      <div className={focus === root.id ? 'tree-row root focused' : 'tree-row root'} onClick={() => { if (!root.available) return; if (!shown) setFocus(root.id); toggle(key); }} role="treeitem" aria-expanded={shown} title={focus === root.id ? `${root.path}\nEm foco: novas notas e a nota de hoje vão para cá` : root.path}>
         <span className={shown ? 'tree-caret open' : 'tree-caret'}><ChevronRightIcon size={13} /></span>
         <span className="tree-name">{root.name}</span>
         {!root.available && <small>indisponível</small>}
@@ -1010,7 +1016,7 @@ export default function Athena({ active, onOpenSettings, external }: { active: b
         : tab && isAttachment(tab.path)
         ? <AttachmentView key={`${tab.root}|${tab.path}`} root={tab.root} target={tab.path} onError={setError} />
         : tab
-        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} images={tabLock?.file ? [] : (root?.files ?? []).filter(file => IMAGE.test(file.path) && lockOf(tab.root, file.path)?.path === tabLock?.path)} rootName={root?.name ?? 'Athena'} bannerHeight={root?.bannerHeight ?? undefined} revision={revision}
+        ? <AthenaNote key={`${tab.root}|${tab.path}`} tab={tab} notes={root?.notes ?? []} aliases={aliases[tab.root]} images={tabLock?.file ? [] : (root?.files ?? []).filter(file => IMAGE.test(file.path) && lockOf(tab.root, file.path)?.path === tabLock?.path)} rootName={root?.name ?? 'Athena'} bannerHeight={root?.bannerHeight ?? undefined} revision={revision}
             onEditing={editing => setTab(index, pane.active, { editing })}
             onFollow={target => void follow(tab, target)}
             onOpen={path => open(tab.root, path)}

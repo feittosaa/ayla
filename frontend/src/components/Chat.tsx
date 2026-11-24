@@ -35,12 +35,18 @@ type Props = {
   bases?: { id: string; name: string }[];
   onBasesUsed?: () => void;
   onRemoveBase?: (id: string) => void;
+  /** A conversa ficou vazia e foi apagada ao sair dela. */
+  onDiscarded?: (id: string) => void;
 };
 type ResponseSource = 'local' | 'auto' | 'cloud';
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, focusComposer, onOpenSettings, onOpenNote, attach, bases = [], onBasesUsed, onRemoveBase }: Props) {
+export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, focusComposer, onOpenSettings, onOpenNote, attach, bases = [], onBasesUsed, onRemoveBase, onDiscarded }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const shownMessages = useRef(0);
+  shownMessages.current = messages.length;
+  const discarded = useRef(onDiscarded);
+  discarded.current = onDiscarded;
   const [input, setInput] = useState(''); const [effort, setEffort] = useState<Effort>('');
   // Neste computador, o esforço escolhe entre resposta direta (leve) e raciocínio (alto).
   const kind: Capability | 'auto' = effort === 'low' ? 'text' : effort === 'high' ? 'reasoning' : 'auto';
@@ -146,6 +152,15 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   useEffect(() => () => { if (active.current) void native('cancel_job', { requestId: active.current }); recorder.current?.stop(); }, []);
   useEffect(() => { onBusy(busy); }, [busy, onBusy]);
 
+  // Saindo de uma conversa sem nenhuma mensagem (ex.: o envio falhou), ela é apagada; o núcleo
+  // confere de novo que não há mensagens nem arquivos.
+  useEffect(() => {
+    if (!conversationId) return;
+    return () => {
+      if (shownMessages.current > 0 || active.current) return;
+      void native<boolean>('conversation_discard_empty', { id: conversationId }).then(gone => { if (gone) discarded.current?.(conversationId); }).catch(() => {});
+    };
+  }, [conversationId]);
   // Abre a conversa escolhida na barra do espaço (ou limpa a tela para uma nova).
   useEffect(() => {
     if (created.current === conversationId) { created.current = null; return; }

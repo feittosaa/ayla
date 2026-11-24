@@ -426,6 +426,39 @@ pub fn graph_targets(text: &str) -> Vec<String> {
     targets
 }
 
+/// Apelidos da nota (`aliases` ou `alias` nas propriedades do topo, como no Obsidian): em lista
+/// `[a, b]`, em itens `- a` ou num valor só.
+pub fn aliases(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") { return Vec::new(); }
+    let unquote = |v: &str| v.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_string();
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in lines {
+        if matches!(line.trim_end(), "---" | "...") { break; }
+        if inside {
+            if let Some(item) = line.trim_start().strip_prefix('-') {
+                out.push(unquote(item));
+                continue;
+            }
+            if line.starts_with([' ', '\t']) && line.trim().is_empty() { continue; }
+            inside = false;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        if line.starts_with([' ', '\t']) || !matches!(key.trim().to_lowercase().as_str(), "aliases" | "alias") { continue; }
+        let value = value.trim();
+        match value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            Some(list) => out.extend(list.split(',').map(unquote)),
+            None if value.is_empty() => inside = true,
+            None => out.push(unquote(value)),
+        }
+    }
+    out.retain(|a| !a.is_empty());
+    out.dedup();
+    out
+}
+
 /// O alvo de um link aponta para esta nota? Pelo nome (como o Obsidian) ou pelo caminho sem `.md`.
 pub fn links_to(target: &str, note_path: &str) -> bool {
     let target = target.trim().trim_end_matches(".md").to_lowercase();
@@ -994,6 +1027,16 @@ pub fn context_block(chunks: &[(String, String, String)]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aliases_from_properties() {
+        assert_eq!(super::aliases("---\naliases:\n  - Kael\n  - \"Kûarasy\"\ntags: [npc]\n---\n# Kael"), ["Kael", "Kûarasy"]);
+        assert_eq!(super::aliases("---\naliases:\n- Kael\n---\n"), ["Kael"]);
+        assert_eq!(super::aliases("---\nAliases: [Kael, 'K']\n---"), ["Kael", "K"]);
+        assert_eq!(super::aliases("---\nalias: Kael\n---"), ["Kael"]);
+        assert!(super::aliases("aliases: [Kael]\n").is_empty());
+        assert!(super::aliases("---\ntags:\n  - npc\n---\naliases: [Kael]").is_empty());
+    }
+
     use super::*;
 
     fn temp() -> PathBuf {
