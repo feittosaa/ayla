@@ -14,6 +14,7 @@ pub mod library;
 pub mod media;
 pub mod upscale;
 pub mod editor;
+pub mod design;
 pub mod memory;
 pub mod policy;
 pub mod research;

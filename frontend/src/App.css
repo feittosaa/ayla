@@ -836,3 +836,113 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-strip-handle::after { content: ''; position: absolute; left: 5px; top: 50%; width: 4px; height: 18px; transform: translateY(-50%); border-radius: 2px; background: var(--ayla-on-accent); opacity: .8; }
 .iris-strip-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 4px rgb(0 0 0 / .6); pointer-events: none; }
 @media (max-width: 720px) { .iris-editor-timeline { padding: 0 16px 12px; } }
+
+/* Designs da Iris (estilo Canva): galeria e editor. */
+.designs { display: flex; flex-direction: column; gap: 22px; padding-bottom: 24px; }
+.designs h2 { margin: 6px 0 10px; font-size: 15px; font-weight: 600; color: var(--ayla-text-soft); }
+.design-formats, .design-templates, .design-saved { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.app-shell .design-format { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 6px; min-height: 150px; padding: 14px 10px; border: 1px solid var(--ayla-border-soft); border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text); text-align: center; }
+.app-shell button.design-format:hover { border-color: var(--ayla-accent); }
+.design-format small, .design-template small, .design-card small { color: var(--ayla-text-faint); font-size: 12px; }
+.design-format-shape { display: block; margin: 6px 0 4px; border: 2px solid var(--ayla-accent); border-radius: calc(4px * var(--ayla-round, 1)); background: var(--ayla-accent-ring, transparent); }
+.design-custom { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.app-shell .design-custom input { width: 64px; padding: 4px 6px; }
+.app-shell .design-template, .app-shell .design-card-open { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 8px; border: 1px solid var(--ayla-border-soft); border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text); text-align: left; height: auto; min-height: 0; width: 100%; }
+.app-shell .design-template:hover, .app-shell .design-card-open:hover { border-color: var(--ayla-accent); }
+.design-template-preview { display: flex; align-items: center; justify-content: center; max-height: 220px; overflow: hidden; border-radius: calc(8px * var(--ayla-round, 1)); background: repeating-conic-gradient(var(--ayla-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.design-template-preview img { width: 100%; height: 100%; object-fit: contain; }
+.design-card { position: relative; }
+.design-card b, .design-template b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.app-shell .design-card-delete { position: absolute; top: 12px; right: 12px; background: var(--ayla-panel); opacity: 0; }
+.design-card:hover .design-card-delete, .design-card-delete:focus-visible { opacity: 1; }
+.design-card-confirm { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.app-shell .ghost-button.danger { color: var(--ayla-error, #e5484d); }
+.design-pack { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px dashed var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); font-size: 13px; color: var(--ayla-text-soft); }
+.design-pack p { margin: 0; }
+.design-pack.inline { flex-direction: row; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.design-pack.inline p { flex: 1 1 320px; }
+.design-notice { margin: 0; padding: 8px 12px; border-radius: calc(8px * var(--ayla-round, 1)); background: var(--ayla-panel); }
+
+/* Sem animação de entrada: no WebKitGTK, criar o canvas do Fabric durante uma animação com
+   transform congela a apresentação da janela inteira (o editor fica invisível por cima de tudo). */
+.design-editor { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: var(--ayla-bg); color: var(--ayla-text); }
+.design-bar { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 6px 12px; border-bottom: 1px solid var(--ayla-border-soft); background: var(--ayla-panel); }
+.app-shell .design-name { width: min(320px, 30vw); padding: 6px 8px; border: 1px solid transparent; background: transparent; font-weight: 600; font-size: 15px; }
+.app-shell .design-name:hover, .app-shell .design-name:focus { border-color: var(--ayla-border); }
+.design-size { color: var(--ayla-text-faint); font-size: 12px; white-space: nowrap; }
+.design-bar-gap { flex: 1; }
+.design-zoom { display: flex; align-items: center; gap: 2px; }
+.app-shell .design-zoom .ghost-button { min-width: 58px; padding: 4px 6px; font-variant-numeric: tabular-nums; }
+.design-status { color: var(--ayla-text-faint); font-size: 12px; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.design-export { position: relative; }
+.app-shell .design-export .primary-action { display: inline-flex; align-items: center; gap: 6px; }
+.design-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 3; display: flex; flex-direction: column; gap: 6px; width: 320px; padding: 10px; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); box-shadow: 0 10px 30px #0006; }
+.design-menu-row { display: grid; grid-template-columns: 44px 1fr 1fr; align-items: center; gap: 6px; }
+.design-menu small { color: var(--ayla-text-faint); }
+.design-error { margin: 8px 12px 0; }
+.dialog-backdrop.design-leave { z-index: 70; }
+.design-leave .dialog { width: min(480px, 100%); box-shadow: 0 20px 60px #0008; }
+.design-leave-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.design-body { flex: 1; min-height: 0; display: flex; }
+.design-tabs { display: flex; flex-direction: column; gap: 2px; width: 76px; padding: 8px 6px; border-right: 1px solid var(--ayla-border-soft); background: var(--ayla-panel); }
+.app-shell .design-tab { display: flex; flex-direction: column; align-items: center; gap: 4px; height: auto; min-height: 0; padding: 10px 4px; border: 0; border-radius: calc(8px * var(--ayla-round, 1)); background: none; color: var(--ayla-text-soft); font-size: 11px; }
+.design-tab span { font-size: 18px; line-height: 1; height: 18px; }
+.app-shell .design-tab.active { background: var(--ayla-hover); color: var(--ayla-text); }
+.design-panel, .design-props { width: 264px; flex: none; min-width: 0; overflow-y: auto; padding: 12px; border-right: 1px solid var(--ayla-border-soft); }
+.design-props { border-right: 0; border-left: 1px solid var(--ayla-border-soft); }
+/* Borda arrastável dos painéis (a linha fica por cima da borda do painel). */
+.design-resizer { position: relative; z-index: 2; flex: none; width: 7px; margin: 0 -4px 0 -3px; cursor: col-resize; touch-action: none; }
+.design-resizer::after { content: ''; position: absolute; inset: 0 3px; background: transparent; transition: background 120ms; }
+.design-resizer:hover::after, .design-resizer:focus-visible::after, .design-resizer:active::after { background: var(--ayla-accent); }
+.design-resizer:focus-visible { outline: none; }
+.design-sources { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px; border-radius: calc(9px * var(--ayla-round, 1)); background: var(--ayla-hover); }
+.app-shell .design-sources button { height: 30px; min-height: 0; padding: 0 6px; border: 0; border-radius: calc(7px * var(--ayla-round, 1)); background: none; color: var(--ayla-text-soft); font-size: 13px; }
+.app-shell .design-sources button.active { background: var(--ayla-panel); color: var(--ayla-text); box-shadow: 0 1px 3px #0004; }
+.design-drop { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 22px 12px; border: 1px dashed var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); color: var(--ayla-text-soft); text-align: center; cursor: pointer; }
+.design-drop:hover { border-color: var(--ayla-accent); color: var(--ayla-text); }
+.design-drop b { font-size: 13px; font-weight: 600; }
+.design-drop small { font-size: 12px; color: var(--ayla-text-faint); line-height: 1.4; }
+.design-online-search { display: flex; gap: 6px; }
+.design-online-search .organ-search { flex: 1; min-width: 0; }
+.design-brushes { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 6px; }
+.app-shell .design-brushes button { display: flex; flex-direction: column; align-items: center; gap: 4px; height: auto; min-height: 0; padding: 10px 4px; border: 1px solid var(--ayla-border-soft); background: none; color: var(--ayla-text-soft); }
+.app-shell .design-brushes button.active { border-color: var(--ayla-accent); color: var(--ayla-text); background: var(--ayla-hover); }
+.design-brushes small { font-size: 11px; }
+.design-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ayla-text-soft); cursor: pointer; }
+.design-credit { overflow-wrap: anywhere; }
+.design-stack { display: flex; flex-direction: column; gap: 10px; }
+.design-stack .sidebar-label { margin: 6px 0 0; }
+.design-hint { margin: 0; color: var(--ayla-text-faint); font-size: 12px; line-height: 1.4; }
+.app-shell .design-add { justify-content: flex-start; height: auto; padding: 12px; border: 1px solid var(--ayla-border-soft); background: var(--ayla-control, var(--ayla-hover)); text-align: left; }
+.app-shell .design-add.title { font-size: 20px; font-weight: 700; }
+.app-shell .design-add.subtitle { font-size: 16px; font-weight: 600; }
+.app-shell .design-add.body { font-size: 13px; }
+.design-shapes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.app-shell .design-shape { display: flex; flex-direction: column; align-items: center; gap: 4px; height: auto; padding: 10px 4px; border: 1px solid var(--ayla-border-soft); background: none; color: var(--ayla-accent); }
+.design-shape small { color: var(--ayla-text-soft); font-size: 11px; }
+.design-upload { cursor: pointer; justify-content: center; }
+.design-thumbs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.app-shell .design-thumbs button { height: 96px; padding: 0; overflow: hidden; border: 1px solid var(--ayla-border-soft); background: var(--ayla-hover); }
+.design-thumbs img { width: 100%; height: 100%; object-fit: cover; }
+.design-icons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.app-shell .design-icons button { height: 52px; padding: 10px; border: 1px solid var(--ayla-border-soft); background: #f4f4f6; }
+.design-icons img { width: 100%; height: 100%; }
+.design-swatches { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.design-swatches.big { grid-template-columns: repeat(4, 1fr); }
+.app-shell .design-swatches button { height: 30px; min-height: 0; padding: 0; border: 1px solid var(--ayla-border); border-radius: calc(6px * var(--ayla-round, 1)); }
+.design-swatches.big button { height: 44px; }
+.design-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ayla-text-soft); }
+.app-shell .design-field input[type=color] { width: 100%; height: 32px; padding: 2px; }
+.app-shell .design-field input[type=number], .app-shell .design-field select { width: 100%; }
+.design-field input[type=range] { width: 100%; accent-color: var(--ayla-accent); }
+.design-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.app-shell .design-row .ghost-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.design-toggles { display: flex; flex-wrap: wrap; gap: 2px; }
+.design-grid-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.design-grid-buttons.three { grid-template-columns: repeat(3, 1fr); }
+.app-shell .design-grid-buttons .ghost-button { padding: 6px 4px; font-size: 12px; }
+.design-stage { flex: 1; min-width: 0; min-height: 0; overflow: auto; display: flex; padding: 32px; background: var(--ayla-sidebar, var(--ayla-hover)); }
+.design-stage.fit { overflow: hidden; }
+.design-page { flex: none; margin: auto; box-shadow: 0 6px 30px #0005, 0 0 0 1px #0002; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 20px 20px; }
+.app-shell .design-stack .ghost-button, .app-shell .design-menu .ghost-button, .app-shell .design-pack .ghost-button { border: 1px solid var(--ayla-border-soft); }
+.app-shell .design-stack .ghost-button:hover:not(:disabled) { border-color: var(--ayla-accent); }

@@ -34,6 +34,10 @@ export default function IrisVideoStrip({ src, duration, ratio, range, time, disa
     let stopped = false;
     const probe = document.createElement('video');
     probe.muted = true; probe.preload = 'auto'; probe.src = src;
+    // No WebKitGTK, um vídeo fora da página não entrega quadros ao canvas: fica nela, invisível.
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+    document.body.appendChild(probe);
     const at = (seconds: number) => new Promise<void>(resolve => {
       const done = () => { probe.removeEventListener('seeked', done); resolve(); };
       probe.addEventListener('seeked', done);
@@ -53,7 +57,13 @@ export default function IrisVideoStrip({ src, duration, ratio, range, time, disa
       }
     };
     probe.addEventListener('loadeddata', () => void run(), { once: true });
-    return () => { stopped = true; probe.removeAttribute('src'); probe.load(); };
+    // O decodificador às vezes recusa abrir enquanto o vídeo principal abre: tenta de novo.
+    let retries = 0;
+    probe.addEventListener('error', () => {
+      if (stopped || retries++ >= 3) return;
+      setTimeout(() => { if (!stopped) { probe.src = src; probe.load(); } }, 500 * retries);
+    });
+    return () => { stopped = true; probe.removeAttribute('src'); probe.load(); probe.remove(); };
   }, [src, count, duration]);
 
   const secondsAt = (clientX: number) => {

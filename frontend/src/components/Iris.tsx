@@ -8,6 +8,7 @@ import { mediaUrl, openInSystem, type MediaRef } from '../services/Media';
 import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
 import IrisEditor, { type EditResult } from './IrisEditor';
+import IrisDesigns from './IrisDesigns';
 
 type Kind = 'image' | 'video' | 'pdf';
 type Source = 'athena' | 'chat' | 'gerada' | 'arquivos' | 'computer';
@@ -151,6 +152,9 @@ export default function Iris({ active, external }: { active: boolean; external?:
   const [changing, setChanging] = useState(false);
   const request = useRef(0); const [error, setError] = useState('');
   const [kind, setKind] = useState<Kind>(() => kinds.find(k => k.id === localStorage.getItem(TAB))?.id ?? 'image');
+  // Designs (estilo Canva) ficam numa aba própria, ao lado dos tipos de arquivo.
+  const [designing, setDesigning] = useState(() => localStorage.getItem(TAB) === 'design');
+  const [designCount, setDesignCount] = useState<number | null>(null);
   const [source, setSource] = useState<Source | 'all'>(() => localStorage.getItem(TAB) === 'folder' ? 'computer' : 'all'); const [query, setQuery] = useState('');
   const [open, setOpen] = useState<string | null>(null); const [shown, setShown] = useState(PAGE);
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -220,7 +224,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
     return { target, after: event.clientY >= bounds.top + bounds.height / 2 };
   }
 
-  useEffect(() => { localStorage.setItem(TAB, kind); }, [kind]);
+  useEffect(() => { localStorage.setItem(TAB, designing ? 'design' : kind); }, [kind, designing]);
   useEffect(() => { if (active) preloadPdf(); }, [active]);
   useEffect(() => { localStorage.setItem(SIDE, sidebar ? '1' : '0'); }, [sidebar]);
   useEffect(() => {
@@ -341,7 +345,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
   function system(item: Item) {
     void openInSystem(mediaOf(item)).catch(e => setError(errorText(e)));
   }
-  const choose = (next: Kind) => { setKind(next); setShown(PAGE); };
+  const choose = (next: Kind) => { setKind(next); setDesigning(false); setShown(PAGE); };
 
   function selectFolder(next: 'athena' | 'computer', folder: FolderSelection) {
     setSelection(folder);
@@ -425,12 +429,14 @@ export default function Iris({ active, external }: { active: boolean; external?:
       <header className="note-tabs organ-bar">
         {!sidebar && <button className="icon-button" data-tip="Mostrar a barra lateral" aria-label="Mostrar a barra lateral" onClick={() => setSidebar(true)}><SidebarIcon size={18} /></button>}
         <div className="tab-strip iris-kinds" role="tablist" aria-label="Biblioteca da Iris">
-          {kinds.map(k => <button key={k.id} role="tab" aria-selected={kind === k.id} className={kind === k.id ? 'note-tab iris-kind active' : 'note-tab iris-kind'} onClick={() => choose(k.id)}><span className="tab-title">{k.label}</span><small>{counts[k.id]}</small></button>)}
+          {kinds.map(k => { const on = !designing && kind === k.id; return <button key={k.id} role="tab" aria-selected={on} className={on ? 'note-tab iris-kind active' : 'note-tab iris-kind'} onClick={() => choose(k.id)}><span className="tab-title">{k.label}</span><small>{counts[k.id]}</small></button>; })}
+          <button role="tab" aria-selected={designing} className={designing ? 'note-tab iris-kind active' : 'note-tab iris-kind'} onClick={() => setDesigning(true)}><span className="tab-title">Designs</span>{designCount !== null && <small>{designCount}</small>}</button>
         </div>
-        <button className="icon-button tip-end" data-tip="Atualizar" aria-label="Atualizar a lista" disabled={loading} onClick={load}><RefreshIcon size={17} /></button>
+        {!designing && <button className="icon-button tip-end" data-tip="Atualizar" aria-label="Atualizar a lista" disabled={loading} onClick={load}><RefreshIcon size={17} /></button>}
       </header>
       {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
-    <main className="iris-grid-area" ref={grid}>
+    {designing && <main className="iris-grid-area"><IrisDesigns active={active && designing} onCount={setDesignCount} onExported={() => void load()} /></main>}
+    <main className="iris-grid-area" ref={grid} hidden={designing}>
       <div className="iris-controls"><label className="iris-order">Ordenar por <select aria-label="Ordenar por" value={order} onChange={event => {
         const value = event.target.value as Order;
         setOrder(value); setShown(PAGE); localStorage.setItem('ayla-iris-ordem', value);
@@ -476,7 +482,8 @@ export default function Iris({ active, external }: { active: boolean; external?:
         {trashError && <span role="alert">{trashError}</span>}
       </div>}
       <div className="iris-stage" onClick={e => e.stopPropagation()}>
-        <MediaView key={current.key + current.date + current.bytes} media={mediaOf(current)} name={current.name} kind={current.kind} version={`${current.date}-${current.bytes}`} autoPlay onError={setError} />
+        {/* Com o editor aberto, o vídeo do visualizador sai (um player a menos aberto). */}
+        {!editing && <MediaView key={current.key + current.date + current.bytes} media={mediaOf(current)} name={current.name} kind={current.kind} version={`${current.date}-${current.bytes}`} autoPlay onError={setError} />}
       </div>
       {list.length > 1 && !confirmTrash && !editing && <>
         <button className="iris-nav prev" aria-label="Anterior" onClick={e => { e.stopPropagation(); step(-1); }}><ChevronLeftIcon size={26} /></button>

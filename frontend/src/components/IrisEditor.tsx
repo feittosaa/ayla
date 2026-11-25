@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { errorText, formatBytes, native, nativeTask, taskId } from '../services/Desktop';
 import { aspects, clock, cropPixels, dragCrop, fitCrop, fractionRatio, isFull, rotated, type Aspect, type Crop, type Handle } from '../services/Editor';
 import { CloseIcon } from './Icons';
 import IrisVideoStrip from './IrisVideoStrip';
+import { releaseVideo, useVideoBlob } from '../services/VideoBlob';
 
 export type EditTarget = { file?: string; root?: string | null; path?: string; name: string; kind: 'image' | 'video'; src: string };
 export type EditResult = { file?: string; root?: string; path?: string; name: string; replaced?: boolean };
@@ -39,8 +40,23 @@ export default function IrisEditor({ target, onDone, onClose }: { target: EditTa
   const [box, setBox] = useState({ width: 0, height: 0 });
   const stage = useRef<HTMLDivElement>(null);
   const player = useRef<HTMLVideoElement>(null);
+  // O decodificador (OpenH264) às vezes recusa abrir logo depois de outro vídeo: tenta de novo.
+  const [attempt, setAttempt] = useState(0);
+  const retryVideo = useCallback(() => {
+    if (attempt < 4) setTimeout(() => setAttempt(a => a + 1), 300 * (attempt + 1));
+    else setError('O vídeo não abriu na prévia. Tente abrir de novo ou use o player do sistema.');
+  }, [attempt]);
   const job = useRef<string | null>(null);
   const drag = useRef<{ handle: Handle; x: number; y: number; start: Crop } | null>(null);
+  // Vídeo: carregado inteiro antes (como no visualizador); imagem: direto do endereço.
+  const clip = useVideoBlob(video ? target.src : '');
+  // Às vezes o WebKit fica parado sem avisar erro: sem as medidas em 3 s, tenta de novo.
+  useEffect(() => {
+    if (!video || !clip.url || natural) return;
+    const timer = setTimeout(retryVideo, 3000);
+    return () => clearTimeout(timer);
+  }, [video, clip.url, natural, attempt, retryVideo]);
+  useEffect(() => { if (clip.error) setError(clip.error === 'grande' ? 'Vídeo grande demais para editar dentro da Ayla (mais de 300 MB).' : 'Não foi possível carregar este vídeo.'); }, [clip.error]);
   const media = { file: target.file ?? null, root: target.file ? null : target.root ?? null, path: target.file ? null : target.path ?? null };
 
   useEffect(() => { void native<Tools>('iris_editor', media).then(setTools).catch(e => setError(errorText(e))); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -160,10 +176,10 @@ export default function IrisEditor({ target, onDone, onClose }: { target: EditTa
       <div className="iris-editor-stage" ref={stage}>
         <div className="iris-editor-frame" style={{ width: shown.width, height: shown.height }}>
           {video
-            ? <video ref={player} src={target.src} style={mediaStyle} muted={mute} preload="auto" playsInline
+            ? clip.url && <video key={attempt} ref={el => { player.current = el; return () => releaseVideo(el); }} src={clip.url} style={mediaStyle} muted={mute} preload="auto" playsInline
                 onLoadedMetadata={e => { const v = e.currentTarget; setNatural({ width: v.videoWidth, height: v.videoHeight }); setDuration(v.duration); setRange([0, v.duration]); }}
                 onTimeUpdate={e => { const t = e.currentTarget.currentTime; setTime(t); if (t >= range[1] && !e.currentTarget.paused) { e.currentTarget.pause(); } }}
-                onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onError={() => setError('O vídeo não abriu na prévia.')} />
+                onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onError={retryVideo} />
             : <img src={target.src} alt="" style={mediaStyle} draggable={false} onLoad={e => setNatural({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })} onError={() => setError('A imagem não abriu na prévia.')} />}
           {frame && <div className={isFull(crop) ? 'iris-crop full' : 'iris-crop'} style={{ left: area.x * shown.width, top: area.y * shown.height, width: area.width * shown.width, height: area.height * shown.height }}
             onPointerDown={e => startDrag('move', e)} onPointerMove={moveDrag} onPointerUp={() => { drag.current = null; }}>
@@ -176,7 +192,7 @@ export default function IrisEditor({ target, onDone, onClose }: { target: EditTa
           <button className="ghost-button iris-outline-button" disabled={busy} onClick={toggle}>{playing ? 'Pausar' : 'Tocar'}</button>
           <span className="iris-editor-time">{clock(time)}</span>
         </div>
-        <IrisVideoStrip src={target.src} duration={duration} ratio={frame ? frame.width / frame.height : 16 / 9} range={range} time={time} disabled={busy}
+        <IrisVideoStrip src={clip.url ?? ''} duration={duration} ratio={frame ? frame.width / frame.height : 16 / 9} range={range} time={time} disabled={busy}
           onRange={setRange} onSeek={seconds => { player.current?.pause(); seek(seconds); }} />
       </div>}
       </div>

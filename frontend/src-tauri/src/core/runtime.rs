@@ -40,6 +40,100 @@ pub fn artifacts() -> Vec<Artifact> {
 ]
 }
 
+/// Pacote de recursos dos designs da Iris (download opcional): fontes livres do Fontsource
+/// (redistribuição das fontes do Google Fonts) e os ícones do Lucide (ISC). Só os arquivos usados
+/// são extraídos: fontes `latin` e `latin-ext` em 400 e 700, SVGs, palavras-chave e licenças.
+pub struct PackFile { pub name: &'static str, pub url: &'static str, pub bytes: u64, pub sha256: &'static str }
+pub const DESIGN_PACK: &str = "design";
+pub fn design_pack() -> Vec<PackFile> {
+    macro_rules! font { ($slug:literal, $bytes:literal, $sha:literal) => {
+        PackFile { name: $slug, url: concat!("https://registry.npmjs.org/@fontsource/", $slug, "/-/", $slug, "-5.3.0.tgz"), bytes: $bytes, sha256: $sha }
+    } }
+    vec![
+        font!("inter", 4050993, "02034af8d41dcc67ac8eab88f642e129bb8a2e8922abf30229c32725f54d8fd6"),
+        font!("montserrat", 3080222, "919dce59bbe45ace8a517c1e9de5076282bfeb97e8aa8f5f2dc989451c14c7cb"),
+        font!("poppins", 2325037, "f4779bb12acaaa07dc7dd8da82ab0f61515fea2f30664535f7a249eeb0dd5bcf"),
+        font!("playfair-display", 1438428, "564e61951ecc3e962793cd50395f718cda6350cb934f9000dbe0139c768dc023"),
+        font!("bebas-neue", 47974, "57928e0ee30b9e8a99033cdd5dc74ad06761007b4ad8fc32173e5d9072ba91fa"),
+        font!("oswald", 565176, "27bf46420288bb65bd186638cde54686aa8f9d5dc975b1d597dfe81a7dd472cb"),
+        font!("lobster", 214571, "4ac6f6ab805b684026cb719f55dd605c892ca5d1db3f32fca88ca554a63b86d7"),
+        font!("pacifico", 231921, "397f4f0a8a4c44e929cafa4cfede7240f7ac81a922f6779d3fefe2192c67d619"),
+        font!("dancing-script", 391335, "e392efa74afec672f1c97f8699a16bb8439c8aca1a367ddb5cd035f11e70e31a"),
+        font!("roboto-slab", 1107358, "45d42c2f30be7fa361c673a297cb75e151e977a57905e449d25875adf97e77f5"),
+        font!("lora", 1653508, "3f2e66b0934b8652bb1a37645a9fc3e77e83b5841a09e97174e7bb11e11063c9"),
+        font!("anton", 115630, "796d0b1b7a503636458c0869ef9993659411c86443a4e4e7555ead4b29293db4"),
+        PackFile { name: "lucide", url: "https://registry.npmjs.org/lucide-static/-/lucide-static-1.79.0.tgz", bytes: 7630881, sha256: "ce0cf7d2474fae7abb2b0b587e4187605658d69f620cd28494c03ec67e6f2583" },
+    ]
+}
+/// Destino (relativo à pasta do pacote) de um arquivo do .tgz, ou `None` se não for usado.
+pub fn design_pack_entry(pack: &str, path: &str) -> Option<String> {
+    let path = path.strip_prefix("package/")?;
+    if path == "LICENSE" { return Some(format!("licencas/{pack}.txt")); }
+    if pack == "lucide" {
+        if path == "tags.json" { return Some("icons/tags.json".into()); }
+        let name = path.strip_prefix("icons/")?;
+        return (name.ends_with(".svg") && !name.contains('/') && !name.starts_with('.')).then(|| format!("icons/{name}"));
+    }
+    let name = path.strip_prefix("files/")?.strip_suffix(".woff2")?;
+    let rest = name.strip_prefix(pack)?.strip_prefix('-')?;
+    let ok = ["latin-400-normal", "latin-400-italic", "latin-700-normal", "latin-700-italic",
+        "latin-ext-400-normal", "latin-ext-400-italic", "latin-ext-700-normal", "latin-ext-700-italic"].contains(&rest);
+    ok.then(|| format!("fonts/{name}.woff2"))
+}
+fn extract_pack(archive: &Path, pack: &str, destination: &Path, cancel: &CancellationToken) -> io::Result<usize> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(archive)?));
+    let mut written = 0;
+    for entry in archive.entries()? {
+        if cancel.is_cancelled() { return Err(io::Error::other("Instalação interrompida")); }
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() { continue; }
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let Some(target) = design_pack_entry(pack, &path) else { continue };
+        let target = destination.join(target);
+        if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+        let mut out = fs::File::create(&target)?;
+        io::copy(&mut (&mut entry).take(8 << 20), &mut out)?;
+        written += 1;
+    }
+    Ok(written)
+}
+pub fn design_pack_installed(root: &Path) -> bool {
+    root.join(DESIGN_PACK).join("icons/tags.json").is_file()
+}
+/// Baixa e confere cada arquivo do pacote (tamanho e SHA-256) e extrai só o que a Iris usa.
+pub async fn install_design_pack(root: &Path, cancel: &CancellationToken, mut report: impl FnMut(Value)) -> Result<(), String> {
+    if design_pack_installed(root) { return Ok(()); }
+    let files = design_pack();
+    let total: u64 = files.iter().map(|f| f.bytes).sum();
+    let target = root.join(DESIGN_PACK);
+    let staging = root.join(format!("{DESIGN_PACK}.installing"));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|_| "Não foi possível preparar o pacote")?;
+    let result = async {
+        let mut done = 0u64;
+        for file in &files {
+            let temporary = root.join(format!("{DESIGN_PACK}-{}.part", file.name));
+            let downloaded = download(file.url, file.bytes, file.sha256, &temporary, cancel, |received| {
+                report(json!({"type":"download","received":done + received,"total":total}))
+            }).await;
+            if let Err(error) = downloaded { let _ = fs::remove_file(&temporary); return Err(error); }
+            let (source, dest, cancellation, name) = (temporary.clone(), staging.clone(), cancel.clone(), file.name);
+            let extracted = tokio::task::spawn_blocking(move || extract_pack(&source, name, &dest, &cancellation)).await
+                .map_err(|_| "Falha ao extrair o pacote".to_string())?;
+            let _ = fs::remove_file(&temporary);
+            if extracted.map_err(|_| "Pacote inválido ou instalação interrompida".to_string())? == 0 {
+                return Err(format!("O pacote {} veio sem os arquivos esperados", file.name));
+            }
+            done += file.bytes;
+        }
+        if !staging.join("icons/tags.json").is_file() { return Err("O pacote não inclui os ícones".into()); }
+        let _ = fs::remove_dir_all(&target);
+        fs::rename(&staging, &target).map_err(|_| "Não foi possível concluir a instalação".to_string())
+    }.await;
+    if result.is_err() { let _ = fs::remove_dir_all(&staging); }
+    result
+}
+
 pub fn find_binary(root: &Path, name: &str) -> Option<PathBuf> {
     if !root.is_dir() {
         return None;
@@ -1023,6 +1117,25 @@ mod tests {
         out.extend_from_slice(&start.to_le_bytes());
         out.extend_from_slice(&[0, 0]);
         out
+    }
+
+    /// Instala o pacote de recursos dos designs a partir dos arquivos reais (cache de desenvolvimento).
+    #[test]
+    #[ignore = "precisa dos pacotes em AYLA_MODEL_CACHE"]
+    fn installs_the_design_pack_from_cache() {
+        let root = std::env::temp_dir().join(format!("ayla-design-pack-{}", super::super::store::id()));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut last = 0;
+        runtime.block_on(install_design_pack(&root, &CancellationToken::new(), |e| last = e["received"].as_u64().unwrap_or(last))).unwrap();
+        assert_eq!(last, design_pack().iter().map(|f| f.bytes).sum::<u64>());
+        let pack = root.join(DESIGN_PACK);
+        let fonts = super::super::design::fonts(&pack);
+        assert_eq!(fonts.len(), 12, "{fonts:?}");
+        let icons = fs::read_dir(pack.join("icons")).unwrap().count();
+        assert!(icons > 2000, "{icons}");
+        assert_eq!(fs::read_dir(pack.join("licencas")).unwrap().count(), 13);
+        assert!(!super::super::design::icons(&pack, "heart", 0, 5)["items"].as_array().unwrap().is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Instala o ampliador a partir do pacote real (cache de desenvolvimento) e amplia uma imagem.

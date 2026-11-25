@@ -769,10 +769,9 @@ pub async fn install_runtime(
         .try_lock()
         .map_err(|_| "Outra instalação está em andamento")?;
     let token = state.job(&request_id)?;
-    let result = runtime::install(&state.root.join("runtimes"), &id, &token, |e| {
-        let _ = events.send(e);
-    })
-    .await;
+    let root = state.root.join("runtimes");
+    let report = |e| { let _ = events.send(e); };
+    let result = if id == runtime::DESIGN_PACK { runtime::install_design_pack(&root, &token, report).await } else { runtime::install(&root, &id, &token, report).await };
     state.finish(&request_id);
     result
 }
@@ -3031,6 +3030,151 @@ fn iris_source(state: &Core, file: &Option<String>, root: &Option<String>, path:
         }
         _ => Err("Arquivo não informado".into()),
     }
+}
+
+/// Designs da Iris: os guardados e o estado do pacote de recursos (fontes e ícones).
+#[tauri::command]
+pub async fn design_list(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    let (root, pack) = (state.root.clone(), state.root.join("runtimes"));
+    tauri::async_runtime::spawn_blocking(move || json!({
+        "designs": super::design::list(&root),
+        "pack": runtime::design_pack_installed(&pack),
+        "packBytes": runtime::design_pack().iter().map(|f| f.bytes).sum::<u64>(),
+    })).await.map_err(|_| "Falha ao ler os designs".into())
+}
+
+#[tauri::command]
+pub async fn design_read(state: tauri::State<'_, Core>, id: String) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || super::design::read(&root, &id)).await.map_err(|_| "Falha ao abrir o design")?
+}
+
+#[tauri::command]
+pub async fn design_save(state: tauri::State<'_, Core>, id: Option<String>, name: String, width: u32, height: u32, data: String, preview: String) -> Result<String, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || super::design::save(&root, super::design::Save { id: id.as_deref(), name: &name, width, height, data: &data, preview: &preview }, store::id, store::now()))
+        .await.map_err(|_| "Falha ao guardar o design")?
+}
+
+/// Manda o design para a lixeira do sistema (a interface confirma antes).
+#[tauri::command]
+pub fn design_delete(state: tauri::State<'_, Core>, id: String) -> Result<(), String> {
+    use webkit2gtk::gio::{self, prelude::FileExt};
+    let dir = super::design::path(&state.root, &id)?;
+    gio::File::for_path(&dir).trash(gio::Cancellable::NONE).map_err(|_| "Não foi possível mover o design para a lixeira do sistema.".into())
+}
+
+/// Exporta a imagem pronta do design (PNG, JPG ou PDF montado a partir de um JPEG): para a Iris
+/// (arquivo guardado na Ayla) ou para um arquivo escolhido no computador. `page` é o tamanho da
+/// página do PDF em pontos.
+#[tauri::command]
+pub async fn design_export(app: tauri::AppHandle, state: tauri::State<'_, Core>, name: String, format: String, image: String,
+    pixels: (u32, u32), page: Option<(f64, f64)>, target: String) -> Result<Value, String> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(image.as_bytes()).map_err(|_| "Imagem da exportação inválida")?;
+    let (extension, bytes) = match format.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG") => ("png", bytes),
+        "jpg" if bytes.starts_with(&[0xFF, 0xD8]) => ("jpg", bytes),
+        "pdf" => ("pdf", super::design::pdf_from_jpeg(&bytes, pixels, page.ok_or("Tamanho de página ausente")?)?),
+        _ => return Err("Formato de exportação inválido".into()),
+    };
+    let file_name = super::design::export_name(&name, extension);
+    if target == "computer" {
+        let dialog = app.clone();
+        let suggested = file_name.clone();
+        let chosen = tauri::async_runtime::spawn_blocking(move || dialog.dialog().file().set_title("Salvar design").set_file_name(&suggested).blocking_save_file())
+            .await.map_err(|_| "Falha ao abrir o diálogo")?;
+        let Some(path) = chosen.and_then(|p| p.into_path().ok()) else { return Ok(json!({"cancelled": true})) };
+        fs::write(&path, &bytes).map_err(|_| "Não foi possível salvar o arquivo")?;
+        return Ok(json!({"path": path, "name": path.file_name().map(|n| n.to_string_lossy().into_owned())}));
+    }
+    let saved = state.store_file(&file_name, |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a exportação".to_string()), None, true)?;
+    Ok(json!({"file": saved.id, "name": saved.name}))
+}
+
+/// Fontes do pacote (família e arquivos) e bytes de um arquivo, para o `FontFace` da interface.
+#[tauri::command]
+pub fn design_fonts(state: tauri::State<'_, Core>) -> Vec<Value> {
+    super::design::fonts(&state.root.join("runtimes").join(runtime::DESIGN_PACK))
+}
+#[tauri::command]
+pub fn design_font(state: tauri::State<'_, Core>, file: String) -> Result<tauri::ipc::Response, String> {
+    super::design::font(&state.root.join("runtimes").join(runtime::DESIGN_PACK), &file).map(tauri::ipc::Response::new)
+}
+#[tauri::command]
+pub async fn design_icons(state: tauri::State<'_, Core>, query: String, offset: Option<usize>) -> Result<Value, String> {
+    let pack = state.root.join("runtimes").join(runtime::DESIGN_PACK);
+    tauri::async_runtime::spawn_blocking(move || super::design::icons(&pack, &query, offset.unwrap_or(0), 60)).await.map_err(|_| "Falha ao ler os ícones".into())
+}
+
+/// Uma imagem da Iris (ou da Athena) como data URL, para entrar no design sem "sujar" o canvas.
+#[tauri::command]
+pub async fn design_image(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<String, String> {
+    let (source, name, _) = iris_source(&state, &file, &root, &path, "Imagens de pastas protegidas não entram nos designs")?;
+    let mime = match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png", Some("jpg" | "jpeg" | "jfif") => "image/jpeg", Some("webp") => "image/webp",
+        Some("gif") => "image/gif", Some("svg") => "image/svg+xml", Some("avif") => "image/avif", Some("bmp") => "image/bmp",
+        _ => return Err("Este formato de imagem não entra nos designs".into()),
+    };
+    if fs::metadata(&source).map(|m| m.len()).unwrap_or(u64::MAX) > 25 << 20 { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
+    let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(source)).await.map_err(|_| "Falha ao ler a imagem")?.map_err(|_| "Não foi possível ler a imagem")?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Bancos de imagens dos designs: o Openverse (sem chave) e as fontes livres com chave guardada
+/// em Configurações › Busca de imagens (nunca devolve as chaves).
+#[tauri::command]
+pub fn design_image_sources(state: tauri::State<'_, Core>) -> Vec<Value> {
+    let keys = state.image_keys();
+    let mut out = vec![json!({"id": "openverse", "label": "Openverse"})];
+    for (id, key) in [("unsplash", &keys.unsplash), ("pexels", &keys.pexels), ("pixabay", &keys.pixabay)] {
+        if key.is_some() { out.push(json!({"id": id, "label": super::images::label(id)})); }
+    }
+    out
+}
+
+/// Busca num banco de imagens (um por vez: a interface pede a todos juntos e mostra cada um quando
+/// chega, sem esperar o mais lento). Só o termo buscado sai do computador.
+#[tauri::command]
+pub async fn design_image_search(state: tauri::State<'_, Core>, query: String, provider: String) -> Result<Vec<super::images::Item>, String> {
+    use super::images;
+    let query: String = query.trim().chars().take(100).collect();
+    let provider: &'static str = ["openverse", "unsplash", "pexels", "pixabay"].into_iter().find(|p| *p == provider).ok_or("Fonte desconhecida")?;
+    if query.is_empty() { return Ok(Vec::new()); }
+    let (items, failed) = images::search(&search_client()?, images::Kind::Free, &query, &state.image_keys(), &[provider]).await;
+    if !failed.is_empty() { return Err(format!("{} não respondeu", images::label(provider))); }
+    Ok(items)
+}
+
+/// Baixa uma imagem encontrada para entrar no design (data URL), com o crédito. Só baixa das
+/// fontes da busca; no Openverse, o endereço vem do próprio Openverse pelo id, não da interface.
+#[tauri::command]
+pub async fn design_image_fetch(state: tauri::State<'_, Core>, item: Value) -> Result<Value, String> {
+    use super::images;
+    let provider = item["provider"].as_str().unwrap_or("");
+    let client = search_client()?;
+    let full = if provider == "openverse" {
+        let id = item["id"].as_str().filter(|id| images::openverse_id(id)).ok_or("Imagem desconhecida")?;
+        let data: Value = client.get(format!("https://api.openverse.org/v1/images/{id}/")).send().await.map_err(|_| "O Openverse não respondeu")?
+            .error_for_status().map_err(|_| "O Openverse não encontrou a imagem")?.json().await.map_err(|_| "Resposta inválida do Openverse")?;
+        if images::openverse_license(data["license"].as_str().unwrap_or("")).is_none() { return Err("A licença desta imagem não permite usá-la num design".into()); }
+        data["url"].as_str().filter(|u| u.starts_with("https://") || u.starts_with("http://")).ok_or("A imagem não tem endereço")?.to_string()
+    } else {
+        let full = item["full"].as_str().unwrap_or("");
+        if !images::PROVIDERS.contains(&provider) || !images::allowed_download(provider, full) { return Err("Endereço de imagem não reconhecido".into()); }
+        if provider == "unsplash" {
+            if let (Some(ping), Some(key)) = (item["download_ping"].as_str().filter(|p| images::allowed_ping(p)), state.image_keys().unsplash) {
+                let _ = client.get(ping).header("Authorization", format!("Client-ID {key}")).send().await;
+            }
+        }
+        full.to_string()
+    };
+    let response = client.get(&full).timeout(std::time::Duration::from_secs(90)).send().await.map_err(|_| "Não foi possível baixar a imagem")?
+        .error_for_status().map_err(|_| "A fonte não entregou a imagem")?;
+    if response.content_length().is_some_and(|l| l > 25 << 20) { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
+    let bytes = response.bytes().await.map_err(|_| "Download interrompido")?;
+    if bytes.len() > 25 << 20 { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
+    let mime = match images::image_extension(&bytes).ok_or("O arquivo baixado não é uma imagem")? { "png" => "image/png", "webp" => "image/webp", _ => "image/jpeg" };
+    Ok(json!({"url": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)), "credit": images::credit(&item)}))
 }
 
 /// Iris: o editor de vídeo precisa do FFmpeg (download opcional, o mesmo da leitura de vídeos).
