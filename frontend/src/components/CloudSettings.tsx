@@ -56,7 +56,7 @@ export default function CloudSettings({ snapshot, saving, save }: Props) {
 
   return <section id="nuvem" className="settings-group" aria-labelledby="cloud-title"><h2 id="cloud-title">Nuvem</h2>
     <div className="group-card">
-      <label className="group-row">
+      <label className="group-row" data-search={enabled ? undefined : "quando usar modo automático contas conectadas plataformas provedores chave de API cofre modelo de imagem"}>
         <span className="row-text"><span className="row-title">Usar IA na nuvem</span><span className="row-hint">{enabled ? 'Conteúdo sensível ou não verificado continua neste computador. No modo Automático, pedidos classificados como públicos seguem direto para a conta conectada.' : 'Desligado: a Ayla funciona 100% neste computador.'}</span></span>
         <input type="checkbox" role="switch" className="switch" checked={enabled} disabled={saving} onChange={e => void save({ usage_mode: e.target.checked ? 'explicit_request' : 'local_only', cloud_asked: true }, e.target.checked ? 'Nuvem ligada. Conecte uma conta abaixo.' : 'A Ayla agora funciona 100% neste computador.')} />
       </label>

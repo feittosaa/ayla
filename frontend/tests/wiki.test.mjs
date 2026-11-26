@@ -72,3 +72,12 @@ test('ajustes do banner preservam o corpo e as outras propriedades do cofre', ()
   assert.equal(changeBanner(text, 'banner_y', 37.25).split('\r\n')[2], 'banner_y: "37.3"');
   assert.deepEqual(frontmatter(resized), { banner: { target: 'Imagens/Coruja.jpg', y: 1, height: 320 }, properties: [{ key: 'tags', values: ['fera'] }], body: '[[Feras|Fera]]' });
 });
+
+test('texto que começa com --- (separador) não vira propriedades nem esconde o começo da nota', () => {
+  const text = '---\njogo de luta rogue like\ncartas de habilidades\n\nmain game (modo historia) - rogue like\n---\n10 - composite\n';
+  assert.deepEqual(frontmatter(text), { properties: [], banner: null, body: text });
+  assert.equal(changeBanner(text, 'banner_y', 30), text);
+  const valid = frontmatter('---\n# comentário\ntags:\n- rpg\naliases: [a, b]\n---\nCorpo');
+  assert.deepEqual(valid.properties, [{ key: 'tags', values: ['rpg'] }, { key: 'aliases', values: ['a', 'b'] }]);
+  assert.equal(valid.body, 'Corpo');
+});

@@ -8,10 +8,12 @@ import { mediaKey, mediaKind, mediaUrl, openInSystem, type MediaKind, type Media
 /** Leitor de mídia comum à Athena e à Iris: imagem com zoom (Ctrl + roda) e arrastar, vídeo com
  * controles e PDF no leitor da Ayla. Com `bar`, mostra o nome e "Abrir no visualizador do
  * sistema" (no PDF, o botão vai para a barra do próprio leitor). */
-export default function MediaView({ media, name, kind, bar, autoPlay, actions, onError }: {
+export default function MediaView({ media, name, kind, bar, autoPlay, actions, onError, version }: {
   media: MediaRef; name: string; kind?: MediaKind; bar?: boolean; autoPlay?: boolean; actions?: ReactNode; onError?: (text: string) => void;
+  /** Muda quando o arquivo muda (ex.: data e tamanho): evita o WebKit mostrar a versão antiga do cache. */
+  version?: string;
 }) {
-  const src = mediaUrl(media); const key = mediaKey(media);
+  const src = mediaUrl(media) + (version ? `?v=${encodeURIComponent(version)}` : ''); const key = mediaKey(media);
   const system = () => void openInSystem(media).catch(e => onError?.(errorText(e)));
   const systemButton = <button type="button" className="ghost-button" onClick={system}>Abrir no visualizador do sistema</button>;
   const type = kind ?? mediaKind(name);

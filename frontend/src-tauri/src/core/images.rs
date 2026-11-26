@@ -133,6 +133,9 @@ pub struct Item {
     /// Unsplash: endereço que registra o download, chamado ao salvar.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_ping: Option<String>,
+    /// Crédito pronto, quando a fonte manda o texto (Openverse).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -157,14 +160,14 @@ pub fn parse_unsplash(data: &Value) -> Vec<Item> {
         provider: "unsplash", id: p["id"].as_str()?.to_string(), thumb: s(&p["urls"]["small"]), full: s(&p["urls"]["full"]),
         page: with_utm(&s(&p["links"]["html"])), author: s(&p["user"]["name"]), author_url: with_utm(&s(&p["user"]["links"]["html"])),
         license: "livre", license_name: "Licença Unsplash", license_url: "https://unsplash.com/license",
-        width: p["width"].as_u64().unwrap_or(0), height: p["height"].as_u64().unwrap_or(0), download_ping: p["links"]["download_location"].as_str().map(str::to_string),
+        width: p["width"].as_u64().unwrap_or(0), height: p["height"].as_u64().unwrap_or(0), download_ping: p["links"]["download_location"].as_str().map(str::to_string), attribution: None,
     })).collect()
 }
 pub fn parse_pexels(data: &Value) -> Vec<Item> {
     data["photos"].as_array().into_iter().flatten().filter_map(|p| Some(Item {
         provider: "pexels", id: p["id"].as_u64()?.to_string(), thumb: s(&p["src"]["medium"]), full: s(&p["src"]["original"]), page: s(&p["url"]),
         author: s(&p["photographer"]), author_url: s(&p["photographer_url"]), license: "livre", license_name: "Licença Pexels", license_url: "https://www.pexels.com/license/",
-        width: p["width"].as_u64().unwrap_or(0), height: p["height"].as_u64().unwrap_or(0), download_ping: None,
+        width: p["width"].as_u64().unwrap_or(0), height: p["height"].as_u64().unwrap_or(0), download_ping: None, attribution: None,
     })).collect()
 }
 pub fn parse_pixabay(data: &Value) -> Vec<Item> {
@@ -172,7 +175,7 @@ pub fn parse_pixabay(data: &Value) -> Vec<Item> {
         provider: "pixabay", id: p["id"].as_u64()?.to_string(), thumb: s(&p["webformatURL"]), full: s(&p["largeImageURL"]), page: s(&p["pageURL"]),
         author: s(&p["user"]), author_url: format!("https://pixabay.com/users/{}-{}/", s(&p["user"]), p["user_id"].as_u64().unwrap_or(0)),
         license: "livre", license_name: "Licença de conteúdo Pixabay", license_url: "https://pixabay.com/service/license-summary/",
-        width: p["imageWidth"].as_u64().unwrap_or(0), height: p["imageHeight"].as_u64().unwrap_or(0), download_ping: None,
+        width: p["imageWidth"].as_u64().unwrap_or(0), height: p["imageHeight"].as_u64().unwrap_or(0), download_ping: None, attribution: None,
     })).collect()
 }
 pub fn parse_wallhaven(data: &Value) -> Vec<Item> {
@@ -181,9 +184,36 @@ pub fn parse_wallhaven(data: &Value) -> Vec<Item> {
         Some(Item {
             provider: "wallhaven", id: p["id"].as_str()?.to_string(), thumb: s(&p["thumbs"]["large"]), full: s(&p["path"]), page: s(&p["url"]),
             author: String::new(), author_url: s(&p["source"]), license: "referencia", license_name: "Direitos dos autores (Wallhaven)",
-            license_url: "https://wallhaven.cc/about", width: w, height: h, download_ping: None,
+            license_url: "https://wallhaven.cc/about", width: w, height: h, download_ping: None, attribution: None,
         })
     }).collect()
+}
+
+/// Licenças do Openverse aceitas nos designs: as que permitem uso comercial e modificação.
+pub fn openverse_license(code: &str) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        "cc0" => ("CC0 (domínio público)", "https://creativecommons.org/publicdomain/zero/1.0/deed.pt-br"),
+        "pdm" => ("Domínio público", "https://creativecommons.org/publicdomain/mark/1.0/deed.pt-br"),
+        "by" => ("CC BY (com crédito)", "https://creativecommons.org/licenses/by/4.0/deed.pt-br"),
+        "by-sa" => ("CC BY-SA (com crédito, mesma licença)", "https://creativecommons.org/licenses/by-sa/4.0/deed.pt-br"),
+        _ => return None,
+    })
+}
+pub fn parse_openverse(data: &Value) -> Vec<Item> {
+    data["results"].as_array().into_iter().flatten().filter_map(|p| {
+        let (license_name, license_url) = openverse_license(p["license"].as_str()?)?;
+        let id = p["id"].as_str().filter(|id| openverse_id(id))?.to_string();
+        Some(Item {
+            provider: "openverse", thumb: format!("https://api.openverse.org/v1/images/{id}/thumb/"), full: s(&p["url"]), page: s(&p["foreign_landing_url"]),
+            author: s(&p["creator"]), author_url: s(&p["creator_url"]), license: "livre", license_name, license_url,
+            width: p["width"].as_u64().unwrap_or(0), height: p["height"].as_u64().unwrap_or(0), download_ping: None,
+            attribution: p["attribution"].as_str().map(|a| a.chars().take(400).collect()), id,
+        })
+    }).collect()
+}
+/// Id do Openverse (UUID): o único dado do item usado para chegar ao arquivo.
+pub fn openverse_id(id: &str) -> bool {
+    id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn encode(text: &str) -> String {
@@ -221,11 +251,17 @@ pub async fn search(client: &reqwest::Client, kind: Kind, query: &str, keys: &Ke
                 "pexels" => client.get(format!("https://api.pexels.com/v1/search?query={q}&per_page=12{}", if landscape { "&orientation=landscape" } else { "" }))
                     .header("Authorization", keys.pexels.clone()?),
                 "pixabay" => client.get(format!("https://pixabay.com/api/?key={}&q={q}&image_type=photo&safesearch=true&per_page=12", encode(&keys.pixabay.clone()?))),
+                // O Openverse sem chave às vezes demora (ou devolve 504 na primeira vez): mais tempo para ele.
+                "openverse" => client.get(format!("https://api.openverse.org/v1/images/?q={q}&page_size=20&license_type=commercial,modification&mature=false"))
+                    .timeout(std::time::Duration::from_secs(40)),
                 _ => client.get(format!("https://wallhaven.cc/api/v1/search?q={q}&purity=100&categories=111&sorting=relevance{}", if landscape { "&atleast=1920x1080&ratios=landscape" } else { "" })),
             };
             let result = async {
-                let data: Value = request.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
-                Some(match provider { "unsplash" => parse_unsplash(&data), "pexels" => parse_pexels(&data), "pixabay" => parse_pixabay(&data), _ => parse_wallhaven(&data) })
+                let mut response = request.try_clone()?.send().await.ok()?;
+                // Openverse: um 504 costuma passar na segunda tentativa (a busca fica em cache lá).
+                if provider == "openverse" && response.status().is_server_error() { response = request.send().await.ok()?; }
+                let data: Value = response.error_for_status().ok()?.json().await.ok()?;
+                Some(match provider { "unsplash" => parse_unsplash(&data), "pexels" => parse_pexels(&data), "pixabay" => parse_pixabay(&data), "openverse" => parse_openverse(&data), _ => parse_wallhaven(&data) })
             }.await;
             Some((provider, result))
         }
@@ -241,7 +277,7 @@ pub async fn search(client: &reqwest::Client, kind: Kind, query: &str, keys: &Ke
         }
     }
     let mut out = Vec::new();
-    for i in 0..12 {
+    for i in 0..20 {
         for list in &lists { if let Some(item) = list.get(i) { out.push(item.clone()); } }
     }
     out.truncate(24);
@@ -270,7 +306,7 @@ pub fn links(query: &str, only: &[String]) -> Vec<(&'static str, String)> {
 }
 
 pub fn label(provider: &str) -> &'static str {
-    match provider { "unsplash" => "Unsplash", "pexels" => "Pexels", "pixabay" => "Pixabay", _ => "Wallhaven" }
+    match provider { "unsplash" => "Unsplash", "pexels" => "Pexels", "pixabay" => "Pixabay", "openverse" => "Openverse", _ => "Wallhaven" }
 }
 
 /// Resposta guardada na conversa (a grade aparece por cima, durante a sessão).
@@ -306,6 +342,13 @@ pub fn reply(kind: Kind, query: &str, items: &[Item], missing: &[&str], failed: 
         out.push_str(&format!("\n{} não respondeu agora.", names.join(", ")));
     }
     out
+}
+
+/// Crédito curto guardado junto da imagem no design.
+pub fn credit(item: &Value) -> String {
+    if let Some(text) = item["attribution"].as_str().filter(|t| !t.is_empty()) { return text.chars().take(400).collect(); }
+    let by = item["author"].as_str().filter(|a| !a.is_empty()).map(|a| format!("Foto de {a} no ")).unwrap_or_else(|| "Imagem do ".into());
+    format!("{by}{} ({})", label(item["provider"].as_str().unwrap_or("")), item["license_name"].as_str().unwrap_or(""))
 }
 
 /// Endereços de imagem aceitos ao salvar (as fontes da busca), para nunca baixar de outro lugar.
@@ -397,6 +440,31 @@ mod tests {
         assert_eq!(image_extension(b"<html>"), None);
         assert_eq!(file_name("unsplash", "Ana Lúcia", "a1", "jpg"), "unsplash-ana-lucia-a1.jpg");
         assert!(links("céu azul", &[])[0].1.ends_with("c%C3%A9u%20azul"));
+    }
+
+    #[test]
+    fn openverse_keeps_only_licenses_usable_in_designs() {
+        let data = json!({"results": [
+            {"id": "4bc43a04-ef46-4544-a0c1-63c63f56e276", "license": "by", "url": "https://live.staticflickr.com/x.jpg", "creator": "Ana", "attribution": "\"Lago\" by Ana is licensed under CC BY 2.0.", "width": 800, "height": 600},
+            {"id": "5bc43a04-ef46-4544-a0c1-63c63f56e276", "license": "by-nc", "url": "https://x/y.jpg"},
+            {"id": "../../etc", "license": "cc0", "url": "https://x/z.jpg"}
+        ]});
+        let items = parse_openverse(&data);
+        assert_eq!(items.len(), 1, "sem NC e sem id estranho");
+        assert_eq!(items[0].thumb, "https://api.openverse.org/v1/images/4bc43a04-ef46-4544-a0c1-63c63f56e276/thumb/");
+        assert_eq!(credit(&serde_json::to_value(&items[0]).unwrap()), "\"Lago\" by Ana is licensed under CC BY 2.0.");
+        let unsplash = json!({"provider": "unsplash", "author": "Bia", "license_name": "Licença Unsplash"});
+        assert_eq!(credit(&unsplash), "Foto de Bia no Unsplash (Licença Unsplash)");
+    }
+
+    /// Real (rede, sem chave): `cargo test --lib -- --ignored openverse_real --nocapture`
+    #[test]
+    #[ignore]
+    fn openverse_real() {
+        let client = reqwest::Client::builder().user_agent("Ayla/0.1 (assistente local)").build().unwrap();
+        let (items, failed) = tauri::async_runtime::block_on(search(&client, Kind::Free, "mountain lake", &Keys::default(), &["openverse"]));
+        for i in items.iter().take(3) { eprintln!("{} {} {:?}", i.license_name, i.full, i.attribution); }
+        assert!(!items.is_empty() && failed.is_empty(), "{failed:?}");
     }
 
     /// Real (rede, sem chave): `cargo test --lib -- --ignored imagens_real --nocapture`

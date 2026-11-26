@@ -1,10 +1,13 @@
+import { OPEN_DESIGN_EVENT } from './services/Design';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { emitTo, listen } from '@tauri-apps/api/event';
+import SettingsSearch from './components/SettingsSearch';
 import AppearanceSettings from './components/AppearanceSettings';
 import BrandMark from './components/BrandMark';
 import { AppearanceContext, DEFAULT_APPEARANCE, applyAppearance, palette, useMode, useSystemIcon, type Appearance } from './services/Appearance';
 import { DesktopSettings } from './components/DesktopIntegration';
 import { quickStyle, useDesktopView } from './services/DesktopView';
+import type { ProjectSource } from './components/ProjectSources';
 import Space, { type Incoming } from './components/Space';
 import Models from './components/Models';
 import Capabilities from './components/Capabilities';
@@ -31,7 +34,7 @@ const profiles: { id: Profile | null; title: string; percent?: number; text: str
 ];
 const sections = [
   { id: 'desktop', label: 'Integração com o sistema' }, { id: 'aparencia', label: 'Aparência' }, { id: 'uso', label: 'Uso e personalidade' }, { id: 'microfone', label: 'Microfone' }, { id: 'notificacoes', label: 'Notificações' }, { id: 'lembretes', label: 'Lembretes' }, { id: 'athena', label: 'Athena' }, { id: 'nuvem', label: 'Nuvem' },
-  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'bases', label: 'Bases de dados' }, { id: 'imagens', label: 'Imagens e pesquisa' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
+  { id: 'memoria', label: 'Memória' }, { id: 'orgaos', label: 'Órgãos' }, { id: 'bases', label: 'Bases de dados' }, { id: 'imagens', label: 'Imagens e pesquisa' }, { id: 'backups', label: 'Backups' }, { id: 'avancado', label: 'Opções avançadas' }, { id: 'sessao', label: 'Encerrar ou reiniciar' },
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
@@ -129,8 +132,20 @@ export default function App() {
     if (id === 'athena') setAthenaVisited(true);
     if (id === 'iris') setIrisVisited(true);
   }
+  // Design criado na conversa: "Abrir no editor" leva à Iris › Designs.
+  useEffect(() => {
+    const open = () => { setSpace('iris'); setIrisVisited(true); setNotice(''); setError(''); };
+    window.addEventListener(OPEN_DESIGN_EVENT, open);
+    return () => window.removeEventListener(OPEN_DESIGN_EVENT, open);
+  }, []);
   // "Abrir com": Ayla anexa numa conversa nova; Iris mostra a mídia; Athena abre o texto.
   const [opened, setOpened] = useState<Partial<Record<OpenRequest['target'], Incoming>>>({});
+  const [projectTarget, setProjectTarget] = useState<{ target: 'athena' | 'iris'; item: ProjectSource; id: number }>();
+  function openProjectSource(item: ProjectSource) {
+    const target = item.kind === 'folder' || item.kind === 'image' ? 'iris' : 'athena';
+    openSpace(target);
+    setProjectTarget({ target, item, id: ++openCounter });
+  }
   const openFiles = useRef<(request: OpenRequest) => void>(() => {});
   openFiles.current = request => {
     const incoming = { id: ++openCounter, paths: request.paths };
@@ -224,15 +239,15 @@ export default function App() {
         const project = snapshot.projects.find(item => item.id === id);
         if (!project) return null;
         const shown = space === 'ayla' && openProject === id;
-        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} active={shown} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
+        return <div key={id} className="page" hidden={!shown}><Space compact={view.quick} quickOpening={view.pending} snapshot={snapshot} refresh={refresh} project={project} onOpenSource={openProjectSource} active={shown} onOpenSettings={section => go('settings', section)} onOpenNote={path => openFiles.current({ target: 'athena', paths: [path] })}
           onBack={() => showProject(null)} onDeleted={() => { setVisited(prev => prev.filter(item => item !== id)); showProject(null); }} /></div>;
       })}
 
       {athenaVisited && !view.quick && <div className="page" hidden={space !== 'athena'}>
-        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} external={opened.athena} />
+        <Athena active={space === 'athena'} onOpenSettings={() => go('settings', 'athena')} projectTarget={projectTarget?.target === 'athena' ? projectTarget : undefined} external={opened.athena} />
       </div>}
       {irisVisited && !view.quick && <div className="page" hidden={space !== 'iris'}>
-        <Iris active={space === 'iris'} external={opened.iris} />
+        <Iris active={space === 'iris'} projectTarget={projectTarget?.target === 'iris' ? projectTarget : undefined} external={opened.iris} />
       </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />
@@ -262,7 +277,7 @@ export default function App() {
           {page === 'capabilities' && <><button className="ghost-button back-button" onClick={() => go('settings', 'avancado')}><ChevronLeftIcon size={18} />Configurações</button><Capabilities snapshot={snapshot} refresh={refresh} /></>}
 
           {page === 'settings' && <>
-            <header className="settings-header"><h1>Configurações</h1><p>A Ayla cuida das escolhas do dia a dia. Mude só o que quiser.</p></header>
+            <header className="settings-header"><h1>Configurações</h1><p>A Ayla cuida das escolhas do dia a dia. Mude só o que quiser.</p><SettingsSearch /></header>
             {error && <p role="alert" className="app-error">{error}</p>}
 
             <section id="uso" className="settings-group" aria-labelledby="uso-title"><h2 id="uso-title">Uso e personalidade</h2>
@@ -330,10 +345,17 @@ export default function App() {
 
             <ImageSearchSettings />
 
+            <section id="backups" className="settings-group" aria-labelledby="backups-title"><h2 id="backups-title">Backups</h2>
+              <div className="group-card">
+                <div className="group-row"><span className="row-text"><span className="row-title">Pasta de backups</span><span className="row-hint">Cópias de antes das mudanças, só neste computador: fichas de RPG antes da primeira edição pela Ayla e os dados antes das atualizações.</span></span>
+                  <button onClick={() => void native('backups_abrir').catch(err => setError(errorText(err)))}>Abrir a pasta</button></div>
+              </div>
+            </section>
+
             <section id="avancado" className="settings-group" aria-labelledby="advanced-title"><h2 id="advanced-title">Opções avançadas</h2>
               <div className="group-card">
-                <button className="group-row link-row" onClick={() => go('models')}><span className="row-text"><span className="row-title">Modelos e componentes</span><span className="row-hint">Baixar, importar e remover modelos e motores</span></span><ChevronRightIcon size={18} /></button>
-                <button className="group-row link-row" onClick={() => go('capabilities')}><span className="row-text"><span className="row-title">Ferramentas de transcrição e memória</span><span className="row-hint">Transcrever arquivos e buscar memórias por significado</span></span><ChevronRightIcon size={18} /></button>
+                <button className="group-row link-row" data-search="modelos recomendados biblioteca local importar modelo capacidade nome componentes de execução" onClick={() => go('models')}><span className="row-text"><span className="row-title">Modelos e componentes</span><span className="row-hint">Baixar, importar e remover modelos e motores</span></span><ChevronRightIcon size={18} /></button>
+                <button className="group-row link-row" data-search="voz memória semântica privacidade transcrever arquivo WAV gravar áudio guardar nota buscar por significado solicitar provedor cloud" onClick={() => go('capabilities')}><span className="row-text"><span className="row-title">Ferramentas de transcrição e memória</span><span className="row-hint">Transcrever arquivos e buscar memórias por significado</span></span><ChevronRightIcon size={18} /></button>
               </div>
               <details className="group-card advanced-details">
                 <summary>Recursos, nuvem e dados</summary>

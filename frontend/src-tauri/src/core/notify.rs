@@ -35,15 +35,20 @@ pub fn should_notify(event: Event, prefs: &Preferences, focused: bool) -> bool {
     !focused && event.enabled(prefs)
 }
 
+fn show(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .icon(crate::desktop::notification_icon())
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|_| "O sistema recusou a notificação".to_string())
+}
+
 /// Botão "Testar notificação" em Configurações: avisa na hora, com ou sem foco.
 #[tauri::command]
 pub fn notify_test(app: tauri::AppHandle) -> Result<(), String> {
-    app.notification()
-        .builder()
-        .title("Ayla")
-        .body("As notificações estão funcionando.")
-        .show()
-        .map_err(|_| "O sistema recusou a notificação".to_string())
+    show(&app, "Ayla", "As notificações estão funcionando.")
 }
 
 /// Lembrete na hora marcada: o texto é do próprio lembrete; avisa mesmo com a Ayla em foco.
@@ -52,7 +57,7 @@ pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: b
         return;
     }
     let title = if late { "Lembrete atrasado" } else { "Lembrete" };
-    let _ = app.notification().builder().title(title).body(text).show();
+    let _ = show(app, title, text);
 }
 
 pub fn send(app: &tauri::AppHandle, prefs: &Preferences, event: Event) {
@@ -60,7 +65,7 @@ pub fn send(app: &tauri::AppHandle, prefs: &Preferences, event: Event) {
     if !should_notify(event, prefs, focused) {
         return;
     }
-    let _ = app.notification().builder().title("Ayla").body(event.text()).show();
+    let _ = show(app, "Ayla", event.text());
 }
 
 #[cfg(test)]
