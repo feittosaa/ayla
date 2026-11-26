@@ -149,3 +149,30 @@ export const formatOf = (id: string) => formats.find(f => f.id === id);
 export function defaultName(label: string, now = new Date()) {
   return `${label} · ${now.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}`;
 }
+
+/** Rascunho que a Ayla cria pela conversa (`{"ayla_draft": …}` no design guardado): os mesmos
+ * elementos dos modelos, mais ícones do pacote (SVG) e fotos (data URL com crédito). */
+export type DraftObject = Spec
+  | { type: 'icon'; svg: string; left: number; top: number; size: number; color: string }
+  | { type: 'image'; url: string; credit: string; left: number; top: number; width: number; height: number; radius: number; opacity: number };
+export type Draft = { format: string; width: number; height: number; background: Fill; objects: DraftObject[] };
+export type { DesignCard } from './Desktop';
+
+export function draftOf(data: string): Draft | null {
+  try {
+    const value = JSON.parse(data) as { ayla_draft?: Draft };
+    const draft = value.ayla_draft;
+    return draft && Array.isArray(draft.objects) && draft.width > 0 && draft.height > 0 ? draft : null;
+  } catch { return null; }
+}
+
+/** Abrir um design no editor da Iris a partir de outro lugar (a conversa). A Iris pode ainda não
+ * existir na tela: o pedido fica guardado até ela abrir. */
+let pendingDesign: string | null = null;
+export const OPEN_DESIGN_EVENT = 'ayla-open-design';
+export function openDesign(id: string) {
+  pendingDesign = id;
+  window.dispatchEvent(new CustomEvent(OPEN_DESIGN_EVENT));
+}
+export const hasPendingDesign = () => pendingDesign !== null;
+export function takePendingDesign() { const id = pendingDesign; pendingDesign = null; return id; }

@@ -24,12 +24,14 @@ pub struct Understanding {
     /// Pergunta sobre a agenda dela (compromissos, eventos, lembretes, avisos): responde neste
     /// computador com o calendário da Athena.
     pub agenda: bool,
+    /// Pede para criar um design gráfico (post, story, cartaz, convite, capa, wallpaper).
+    pub design: bool,
 }
 
 impl Understanding {
     /// Sem entendimento (modelo indisponível ou resposta inválida): busca como antes e sem decisão de destino.
     pub fn unknown() -> Self {
-        Self { keywords: Vec::new(), consult: true, privacy: Privacy::Doubt, compare_photos: false, collection: false, offline: false, agenda: false }
+        Self { keywords: Vec::new(), consult: true, privacy: Privacy::Doubt, compare_photos: false, collection: false, offline: false, agenda: false, design: false }
     }
     /// Texto da busca: as palavras-chave, ou a própria mensagem quando não houver.
     pub fn query<'a>(&self, message: &'a str) -> std::borrow::Cow<'a, str> {
@@ -59,6 +61,7 @@ pub fn parse(raw: &str) -> Option<Understanding> {
         collection: value["sobre_colecao"].as_bool().unwrap_or(false),
         offline: value["sem_internet"].as_bool().unwrap_or(false),
         agenda: value["agenda"].as_bool().unwrap_or(false),
+        design: value["design"].as_bool().unwrap_or(false),
     })
 }
 
@@ -69,7 +72,8 @@ privacidade: publico para pedidos gerais que não revelam nada sobre a pessoa ou
 compara_fotos: true se pede para comparar fotos ou imagens dela ao longo do tempo (evolução, antes e depois). \
 sem_internet: true somente se a pessoa pede, de forma explícita, para não usar internet, nuvem ou pesquisa, ou para responder só no computador. \
 sobre_colecao: true se pergunta qual é o melhor, o favorito ou o mais/menos entre vários itens das notas dela. \
-agenda: true se pergunta sobre a agenda dela: compromissos, eventos, lembretes, avisos ou notificações marcados, o que tem para fazer num dia ou período, quando é algo que ela marcou; false para pedidos de criar lembrete e para perguntas gerais sobre datas.";
+agenda: true se pergunta sobre a agenda dela: compromissos, eventos, lembretes, avisos ou notificações marcados, o que tem para fazer num dia ou período, quando é algo que ela marcou; false para pedidos de criar lembrete e para perguntas gerais sobre datas. \
+design: true se pede para criar, fazer ou montar uma peça visual para ser usada (post, story, cartaz, panfleto, convite, banner, capa, thumbnail, wallpaper, card, arte para divulgar algo); false para pedidos de buscar imagens prontas, explicar design ou editar fotos.";
 
 /// Lê a mensagem (e as imagens, em `content`) com o modelo local. `None` se o modelo falhar.
 pub async fn understand(state: &Core, model: &models::Model, prefs: &Preferences, content: Value, cancel: &CancellationToken) -> Option<Understanding> {
@@ -77,8 +81,8 @@ pub async fn understand(state: &Core, model: &models::Model, prefs: &Preferences
         "palavras_chave":{"type":"array","items":{"type":"string"},"maxItems":6},
         "consultar":{"type":"boolean"},
         "privacidade":{"type":"string","enum":["local","publico","pesquisa_publica","duvida"]},
-        "compara_fotos":{"type":"boolean"},"sem_internet":{"type":"boolean"},"sobre_colecao":{"type":"boolean"},"agenda":{"type":"boolean"}},
-        "required":["palavras_chave","consultar","privacidade","compara_fotos","sem_internet","sobre_colecao","agenda"],"additionalProperties":false});
+        "compara_fotos":{"type":"boolean"},"sem_internet":{"type":"boolean"},"sobre_colecao":{"type":"boolean"},"agenda":{"type":"boolean"},"design":{"type":"boolean"}},
+        "required":["palavras_chave","consultar","privacidade","compara_fotos","sem_internet","sobre_colecao","agenda","design"],"additionalProperties":false});
     let raw = state.runtime.complete_json(model, prefs, vec![json!({"role":"system","content":INSTRUCTIONS}), json!({"role":"user","content":content})], schema, cancel).await.ok()?;
     parse(&raw)
 }
@@ -97,6 +101,7 @@ mod tests {
         assert!(parse(r#"{"palavras_chave":[],"consultar":false,"privacidade":"publico","sem_internet":true}"#).unwrap().offline);
         assert!(parse(r#"{"palavras_chave":["amanhã"],"consultar":true,"privacidade":"local","agenda":true}"#).unwrap().agenda);
         assert!(!parse(r#"{"palavras_chave":[],"consultar":false,"privacidade":"publico"}"#).unwrap().agenda, "sem o campo: não é agenda");
+        assert!(parse(r#"{"palavras_chave":["post"],"consultar":false,"privacidade":"publico","design":true}"#).unwrap().design);
         assert!(parse(r#"{"consultar":true}"#).is_none() && parse("texto").is_none());
     }
 

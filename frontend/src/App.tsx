@@ -1,3 +1,4 @@
+import { OPEN_DESIGN_EVENT } from './services/Design';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import AppearanceSettings from './components/AppearanceSettings';
@@ -129,6 +130,12 @@ export default function App() {
     if (id === 'athena') setAthenaVisited(true);
     if (id === 'iris') setIrisVisited(true);
   }
+  // Design criado na conversa: "Abrir no editor" leva à Iris › Designs.
+  useEffect(() => {
+    const open = () => { setSpace('iris'); setIrisVisited(true); setNotice(''); setError(''); };
+    window.addEventListener(OPEN_DESIGN_EVENT, open);
+    return () => window.removeEventListener(OPEN_DESIGN_EVENT, open);
+  }, []);
   // "Abrir com": Ayla anexa numa conversa nova; Iris mostra a mídia; Athena abre o texto.
   const [opened, setOpened] = useState<Partial<Record<OpenRequest['target'], Incoming>>>({});
   const openFiles = useRef<(request: OpenRequest) => void>(() => {});

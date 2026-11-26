@@ -24,6 +24,8 @@ export const SettingsIcon = ({ size }: Props) => <Icon size={size}><circle cx="1
 export const CalendarIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 10h18M8 3v4M16 3v4" /></Icon>;
 export const FileIcon = ({ size }: Props) => <Icon size={size}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></Icon>;
 export const CloseIcon = ({ size }: Props) => <Icon size={size}><path d="M18 6L6 18M6 6l12 12" /></Icon>;
+/** Layout de página (designs). */
+export const LayoutIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 21V9" /></Icon>;
 export const ImageIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></Icon>;
 export const DownloadIcon = ({ size }: Props) => <Icon size={size}><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></Icon>;
 export const PencilIcon = ({ size }: Props) => <Icon size={size}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></Icon>;

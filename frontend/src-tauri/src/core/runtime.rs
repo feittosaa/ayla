@@ -880,8 +880,23 @@ impl Runtime {
         schema: Value,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
+        self.complete_json_sized(model, prefs, messages, schema, 700, 0.2, cancel).await
+    }
+    /// Como `complete_json`, com limite de tokens e temperatura próprios (layouts de design são
+    /// maiores e pedem um pouco de variação entre as opções).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_json_sized(
+        &self,
+        model: &Model,
+        prefs: &Preferences,
+        messages: Vec<Value>,
+        schema: Value,
+        max_tokens: u32,
+        temperature: f32,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
         let (url, token) = self.ensure(model, prefs, cancel).await?;
-        let body = json!({"messages":messages,"max_tokens":700,"temperature":0.2,
+        let body = json!({"messages":messages,"max_tokens":max_tokens,"temperature":temperature,
             "chat_template_kwargs":{"enable_thinking":false},
             "response_format":{"type":"json_schema","json_schema":{"name":"memorias","schema":schema}}});
         let response = tokio::select! {_=cancel.cancelled()=>return Err("Tarefa interrompida".into()),r=self.client.post(format!("{url}/v1/chat/completions")).bearer_auth(token).json(&body).send()=>r.map_err(|_|"Falha ao consultar o modelo")?};

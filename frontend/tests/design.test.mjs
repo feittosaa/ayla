@@ -89,3 +89,12 @@ test('guias: encaixa no centro, na margem e na borda de outro elemento, e mostra
   assert.ok(edge.guides.x.includes(600));
   assert.deepEqual(snap({ left: 120, top: 300, width: 10, height: 10 }, lines, 6), { dx: 0, dy: 0, guides: { x: [], y: [] } });
 });
+
+test('rascunho da Ayla: reconhece só o formato da conversa', async () => {
+  const { draftOf } = await import('../src/services/Design.ts');
+  const draft = { format: 'post', width: 1080, height: 1080, background: '#fff', objects: [{ type: 'icon', svg: '<svg/>', left: 0, top: 0, size: 50, color: '#000' }] };
+  assert.deepEqual(draftOf(JSON.stringify({ ayla_draft: draft })), draft);
+  assert.equal(draftOf(JSON.stringify({ objects: [], version: '7.0.0' })), null, 'projeto do editor não é rascunho');
+  assert.equal(draftOf(JSON.stringify({ ayla_draft: { ...draft, width: 0 } })), null);
+  assert.equal(draftOf('{quebrado'), null);
+});

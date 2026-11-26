@@ -1,6 +1,6 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { errorText, formatBytes, native, nativeTask, taskId } from '../services/Desktop';
-import { clampSide, defaultName, formatOf, formats, templates, type DesignSummary, type Format, type Template } from '../services/Design';
+import { OPEN_DESIGN_EVENT, clampSide, defaultName, draftOf, formatOf, formats, takePendingDesign, templates, type DesignSummary, type Format, type Template } from '../services/Design';
 import { loadPackFonts, resetPackFonts } from '../services/DesignFonts';
 import { PlusIcon, TrashIcon } from './Icons';
 import type { Opening } from './IrisDesignEditor';
@@ -76,13 +76,39 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
     setNotice('');
     setOpening({ name: defaultName(template?.name ?? format.label), width: format.width, height: format.height, template });
   }
-  async function open(design: DesignSummary) {
+  async function open(design: Pick<DesignSummary, 'id'>) {
     setNotice(''); setError('');
     try {
-      const file = await native<DesignSummary & { data: string }>('design_read', { id: design.id });
+      let file = await native<DesignSummary & { data: string }>('design_read', { id: design.id });
+      // Rascunho criado pela Ayla na conversa e ainda não montado: monta e salva antes de abrir.
+      if (draftOf(file.data)) {
+        await (await import('../services/DesignCanvas')).ensureDesign(design.id);
+        file = await native<DesignSummary & { data: string }>('design_read', { id: design.id });
+      }
       setOpening({ id: file.id, name: file.name, width: file.width, height: file.height, data: file.data });
     } catch (e) { setError(errorText(e)); }
   }
+  // "Abrir no editor" na conversa: abre o design pedido assim que Designs aparece.
+  useEffect(() => {
+    if (!active) return;
+    const take = () => { const id = takePendingDesign(); if (id) { setOpening(null); void open({ id }); } };
+    take();
+    window.addEventListener(OPEN_DESIGN_EVENT, take);
+    return () => window.removeEventListener(OPEN_DESIGN_EVENT, take);
+  }, [active]);
+  // Rascunhos da conversa ainda sem prévia (criados com a conversa fechada): monta ao listar.
+  useEffect(() => {
+    const drafts = designs?.filter(d => !d.preview) ?? [];
+    if (!active || !drafts.length) return;
+    let alive = true;
+    void (async () => {
+      const canvas = await import('../services/DesignCanvas');
+      let changed = false;
+      for (const d of drafts) { try { if (await canvas.ensureDesign(d.id)) changed = true; } catch { /* fica sem prévia */ } }
+      if (alive && changed) void load();
+    })();
+    return () => { alive = false; };
+  }, [active, designs, load]);
   async function remove(id: string) {
     try { await native('design_delete', { id }); setConfirmDelete(null); await load(); }
     catch (e) { setError(errorText(e)); }

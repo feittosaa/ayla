@@ -63,6 +63,20 @@ pub fn save(root: &Path, design: Save, new_id: impl FnOnce() -> String, now: i64
     Ok(id)
 }
 
+/// Rascunho criado pela Ayla na conversa (`{"ayla_draft": …}`), ainda sem prévia: a interface monta
+/// com o Fabric.js e salva por cima, com a prévia, no mesmo id.
+pub fn save_draft(root: &Path, name: &str, width: u32, height: u32, draft: &Value, id: String, now: i64) -> Result<String, String> {
+    if !(16..=MAX_SIDE).contains(&width) || !(16..=MAX_SIDE).contains(&height) { return Err("Tamanho de design inválido".into()); }
+    let data = json!({"ayla_draft": draft}).to_string();
+    if data.len() > MAX_DATA { return Err("O design passou de 80 MB (imagens grandes demais)".into()); }
+    let dir = folder(root, &id)?;
+    fs::create_dir_all(&dir).map_err(|_| "Não foi possível guardar o design")?;
+    write_atomic(&dir.join("design.json"), data.as_bytes())?;
+    let meta = json!({"name": clean_name(name), "width": width, "height": height, "created": now, "modified": now});
+    write_atomic(&dir.join("meta.json"), meta.to_string().as_bytes())?;
+    Ok(id)
+}
+
 fn read_meta(dir: &Path) -> Option<Value> {
     serde_json::from_slice::<Value>(&fs::read(dir.join("meta.json")).ok()?).ok().filter(Value::is_object)
 }
@@ -221,6 +235,19 @@ mod tests {
         let read = read(&root, "abc").unwrap();
         assert_eq!((read["name"].as_str(), read["height"].as_u64(), read["created"].as_i64(), read["modified"].as_i64()), (Some("Novo"), Some(1920), Some(10), Some(20)));
         assert_eq!(read["data"], r#"{"objects":[1]}"#);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_is_listed_without_preview_and_replaced_by_the_editor() {
+        let root = temp();
+        let id = save_draft(&root, "Promo", 1080, 1920, &json!({"format": "story", "objects": []}), "rasc1".into(), 5).unwrap();
+        let listed = list(&root);
+        assert_eq!((listed[0]["name"].as_str(), listed[0]["preview"].is_null()), (Some("Promo"), true));
+        assert_eq!(serde_json::from_str::<Value>(read(&root, &id).unwrap()["data"].as_str().unwrap()).unwrap()["ayla_draft"]["format"], "story");
+        save(&root, Save { id: Some(&id), name: "Promo", width: 1080, height: 1920, data: r#"{"objects":[]}"#, preview: PNG }, || unreachable!(), 9).unwrap();
+        assert_eq!((list(&root)[0]["created"].as_i64(), list(&root)[0]["preview"].is_string()), (Some(5), true));
+        assert!(save_draft(&root, "x", 1080, 1080, &json!({}), "../fora".into(), 1).is_err());
         let _ = fs::remove_dir_all(root);
     }
 

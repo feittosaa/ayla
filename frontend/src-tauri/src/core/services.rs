@@ -1129,6 +1129,9 @@ pub struct ChatRequest {
     /// Bases escolhidas pela pessoa para esta mensagem (etiquetas na caixa de texto).
     #[serde(default)]
     pub bases: Vec<String>,
+    /// Botão "Criar design": esta mensagem vira um design na Iris, sem depender do entendimento.
+    #[serde(default)]
+    pub design: bool,
 }
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
@@ -2569,6 +2572,7 @@ fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: V
     if let Ok(mut kept) = extras.lock() {
         match event["type"].as_str() {
             Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
+            Some("designs") => kept["designs"] = event["items"].clone(),
             Some("sources") => {
                 let mut list = kept["sources"].as_array().cloned().unwrap_or_default();
                 for file in event["files"].as_array().into_iter().flatten() {
@@ -3110,13 +3114,18 @@ pub async fn design_icons(state: tauri::State<'_, Core>, query: String, offset: 
 #[tauri::command]
 pub async fn design_image(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<String, String> {
     let (source, name, _) = iris_source(&state, &file, &root, &path, "Imagens de pastas protegidas não entram nos designs")?;
+    tauri::async_runtime::spawn_blocking(move || image_data_url(&source, &name)).await.map_err(|_| "Falha ao ler a imagem")?
+}
+
+/// Imagem do computador como data URL para um design (formatos que o canvas lê, até 25 MB).
+fn image_data_url(source: &std::path::Path, name: &str) -> Result<String, String> {
     let mime = match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
         Some("png") => "image/png", Some("jpg" | "jpeg" | "jfif") => "image/jpeg", Some("webp") => "image/webp",
         Some("gif") => "image/gif", Some("svg") => "image/svg+xml", Some("avif") => "image/avif", Some("bmp") => "image/bmp",
         _ => return Err("Este formato de imagem não entra nos designs".into()),
     };
-    if fs::metadata(&source).map(|m| m.len()).unwrap_or(u64::MAX) > 25 << 20 { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
-    let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(source)).await.map_err(|_| "Falha ao ler a imagem")?.map_err(|_| "Não foi possível ler a imagem")?;
+    if fs::metadata(source).map(|m| m.len()).unwrap_or(u64::MAX) > 25 << 20 { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
+    let bytes = fs::read(source).map_err(|_| "Não foi possível ler a imagem")?;
     Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
@@ -3149,6 +3158,10 @@ pub async fn design_image_search(state: tauri::State<'_, Core>, query: String, p
 /// fontes da busca; no Openverse, o endereço vem do próprio Openverse pelo id, não da interface.
 #[tauri::command]
 pub async fn design_image_fetch(state: tauri::State<'_, Core>, item: Value) -> Result<Value, String> {
+    fetch_design_image(&state, &item).await
+}
+
+async fn fetch_design_image(state: &Core, item: &Value) -> Result<Value, String> {
     use super::images;
     let provider = item["provider"].as_str().unwrap_or("");
     let client = search_client()?;
@@ -3174,7 +3187,7 @@ pub async fn design_image_fetch(state: tauri::State<'_, Core>, item: Value) -> R
     let bytes = response.bytes().await.map_err(|_| "Download interrompido")?;
     if bytes.len() > 25 << 20 { return Err("Imagem grande demais para o design (até 25 MB)".into()); }
     let mime = match images::image_extension(&bytes).ok_or("O arquivo baixado não é uma imagem")? { "png" => "image/png", "webp" => "image/webp", _ => "image/jpeg" };
-    Ok(json!({"url": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)), "credit": images::credit(&item)}))
+    Ok(json!({"url": format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)), "credit": images::credit(item)}))
 }
 
 /// Iris: o editor de vídeo precisa do FFmpeg (download opcional, o mesmo da leitura de vídeos).
@@ -3416,6 +3429,78 @@ pub async fn cloud_references(state: tauri::State<'_, Core>, project: Option<Str
     Ok(facts.into_iter().map(|f| memory::Reference { id: f.id, content: f.content }).collect())
 }
 
+/// A Ayla cria designs na Iris: o modelo local lê o pedido (formato, quantas opções, fotos) e monta
+/// cada opção; o núcleo confere tudo e guarda os rascunhos, que a interface monta e salva com prévia.
+/// Fotos: as anexadas (ficam no computador) ou, só num pedido público, de um banco de imagens livres,
+/// mandando apenas os termos em inglês. Devolve o texto da resposta.
+async fn create_designs(state: &Core, prefs: &Preferences, request: &ChatRequest, allow_photos: bool, events: &Channel<Value>,
+    extras: &Mutex<Value>, token: &CancellationToken) -> Result<String, String> {
+    use super::{design, design_ai as ai, images};
+    let models = state.models()?;
+    let model = models::choose(&models, Capability::Text, state.budget(prefs), prefs.context_tokens, None)
+        .map_err(|_| "Para criar designs, a Ayla precisa de um modelo de conversa neste computador (Configurações › Modelos).".to_string())?;
+    let _ = events.send(json!({"type":"status","text":"Planejando o design…"}));
+    let recent = state.store.lock().map_err(|_| "Dados ocupados")?.context(&request.conversation, 6, 3000).unwrap_or_default().iter()
+        .filter_map(|m| Some(format!("{}: {}", if m["role"] == "user" { "Pessoa" } else { "Ayla" }, m["content"].as_str()?.chars().take(600).collect::<String>())))
+        .collect::<Vec<_>>().join("\n");
+    let raw = state.runtime.complete_json_sized(&model, prefs, ai::brief_request(&request.message, &recent), ai::brief_schema(), 900, 0.2, token).await?;
+    let brief = ai::parse_brief(&raw).ok_or("Não consegui entender o design pedido. Diga o tipo (post, story, cartaz…) e o que ele deve dizer.")?;
+    let pack = state.root.join("runtimes").join(runtime::DESIGN_PACK);
+    let mut fonts: Vec<String> = design::fonts(&pack).iter().filter_map(|f| f["family"].as_str().map(str::to_string)).collect();
+    if fonts.is_empty() { fonts = ai::SYSTEM_FONTS.iter().map(|f| f.to_string()).collect(); }
+    let mut photos: Vec<(String, String)> = Vec::new();
+    for id in &request.attachments {
+        if photos.len() >= ai::MAX_PHOTOS { break; }
+        if let Ok((source, name, _)) = iris_source(state, &Some(id.clone()), &None, &None, "") {
+            if let Ok(url) = image_data_url(&source, &name) { photos.push((url, String::new())); }
+        }
+    }
+    let mut photo_note = None;
+    if photos.is_empty() && allow_photos && !brief.personal && !brief.photos.is_empty() {
+        let keys = state.image_keys();
+        // As fontes com chave respondem em segundos; o Openverse (sem chave) fica de reserva.
+        let keyed: Vec<&'static str> = images::PROVIDERS.iter().copied().filter(|p| prefs.source_shown(&format!("imagens:{p}")) && match *p {
+            "unsplash" => keys.unsplash.is_some(), "pexels" => keys.pexels.is_some(), _ => keys.pixabay.is_some() }).collect();
+        let providers = if keyed.is_empty() { vec!["openverse"] } else { keyed };
+        let _ = events.send(json!({"type":"status","text":"Buscando fotos para o design…"}));
+        let client = search_client()?;
+        for term in &brief.photos {
+            if token.is_cancelled() { break; }
+            let (items, _) = images::search(&client, images::Kind::Free, term, &keys, &providers).await;
+            for item in items.iter().take(3) {
+                let Ok(item) = serde_json::to_value(item) else { continue };
+                if let Ok(fetched) = fetch_design_image(state, &item).await {
+                    photos.push((fetched["url"].as_str().unwrap_or("").to_string(), fetched["credit"].as_str().unwrap_or("").to_string()));
+                    break;
+                }
+            }
+        }
+        let names: Vec<&str> = providers.iter().map(|p| images::label(p)).collect();
+        let _ = events.send(json!({"type":"routing","text":format!("Busca externa: só os termos \"{}\" foram enviados a {}", brief.photos.join("\", \""), names.join(", "))}));
+        if !photos.is_empty() { photo_note = Some("As fotos vêm de bancos de imagens livres; o crédito de cada uma aparece ao selecioná-la no editor."); }
+    }
+    if photos.is_empty() && !brief.photos.is_empty() && (brief.personal || !allow_photos) {
+        photo_note = Some("Para o pedido não sair deste computador, não busquei fotos na internet; anexe uma foto à mensagem ou escolha uma no editor (aba Imagens).");
+    }
+    let (width, height) = (brief.format.width, brief.format.height);
+    let (mut made, mut previous, mut failed) = (Vec::new(), Vec::new(), 0usize);
+    for index in 0..brief.count {
+        if token.is_cancelled() { return Err("Tarefa interrompida".into()); }
+        let label = if brief.count > 1 { format!("Montando a opção {} de {}…", index + 1, brief.count) } else { "Montando o design…".into() };
+        let _ = events.send(json!({"type":"status","text":label}));
+        let raw = state.runtime.complete_json_sized(&model, prefs, ai::layout_request(&brief, &fonts, photos.len(), index, &previous),
+            ai::layout_schema(&fonts, photos.len()), 3000, if brief.count > 1 { 0.8 } else { 0.5 }, token).await;
+        let Some(layout) = raw.ok().and_then(|r| ai::parse_layout(&r, brief.format, &fonts, photos.len())) else { failed += 1; continue };
+        previous.push(ai::summary(&layout, index));
+        let draft = ai::draft(brief.format, &layout, |name| design::icons(&pack, name, 0, 1)["items"][0]["svg"].as_str().map(str::to_string), &photos);
+        let name = if brief.count > 1 { format!("{} · opção {}", brief.name, index + 1) } else { brief.name.clone() };
+        let id = design::save_draft(&state.root, &name, width, height, &draft, store::id(), store::now())?;
+        made.push(json!({"id": id, "name": name, "width": width, "height": height}));
+        send_kept(events, extras, json!({"type":"designs","items":made}));
+    }
+    Ok(ai::reply(&brief, made.len(), failed, photo_note))
+}
+
 #[tauri::command]
 pub async fn chat(
     app: tauri::AppHandle,
@@ -3649,6 +3734,17 @@ pub async fn chat(
             }.await;
             planned.unwrap_or_else(Understanding::unknown)
         };
+        // Designs: pelo botão "Criar design" ou quando o entendimento reconhece o pedido.
+        if request.design||(!use_cloud&&plan.design){
+            // Fotos de bancos livres só num pedido público: o Automático já o classificou assim ao
+            // escolher a nuvem; nas respostas locais, vale o entendimento.
+            let public=if use_cloud{request.automatic}else{matches!(plan.privacy,super::understand::Privacy::Public|super::understand::Privacy::Search)&&!plan.offline};
+            let allow_photos=public&&request.sensitivity!=Sensitivity::Sensitive&&!super::policy::suspect_content(&request.message);
+            let reply=create_designs(&state,&prefs,&request,allow_photos,&events,&extras,&token).await?;
+            metric_model="designs".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
+            let _=events.send(json!({"type":"token","text":reply}));
+            return Ok(());
+        }
         // Iris: comparar fotos no tempo. Só neste computador (fotos pessoais são sensíveis) e
         // quando a mensagem não trouxe imagens próprias.
         let mut photo_note=None;

@@ -86,8 +86,9 @@ pub async fn automatic_route(state: &super::services::Core, prefs: &super::prefe
     let Ok(model) = super::models::choose(&models, super::models::Capability::Text, state.budget(prefs), prefs.context_tokens, None)
         else { return AutoRoute::Ask };
     let Some(found) = understand(state, &model, prefs, json!(message), cancel).await else { return AutoRoute::Ask };
-    // A agenda é dado da Athena: fica neste computador em qualquer modo.
-    let route = if found.offline || found.agenda { AutoRoute::Local } else { match found.privacy {
+    // A agenda é dado da Athena: fica neste computador em qualquer modo. Designs são montados pelo
+    // modelo local e guardados na Iris.
+    let route = if found.offline || found.agenda || found.design { AutoRoute::Local } else { match found.privacy {
         Privacy::Search => AutoRoute::Search,
         Privacy::Public => AutoRoute::Cloud,
         Privacy::Local => AutoRoute::Local,

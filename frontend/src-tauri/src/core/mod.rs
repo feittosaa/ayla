@@ -15,6 +15,7 @@ pub mod media;
 pub mod upscale;
 pub mod editor;
 pub mod design;
+pub mod design_ai;
 pub mod memory;
 pub mod policy;
 pub mod research;

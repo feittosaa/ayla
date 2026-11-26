@@ -9,6 +9,7 @@ import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
 import IrisEditor, { type EditResult } from './IrisEditor';
 import IrisDesigns from './IrisDesigns';
+import { OPEN_DESIGN_EVENT, hasPendingDesign } from '../services/Design';
 
 type Kind = 'image' | 'video' | 'pdf';
 type Source = 'athena' | 'chat' | 'gerada' | 'arquivos' | 'computer';
@@ -153,7 +154,12 @@ export default function Iris({ active, external }: { active: boolean; external?:
   const request = useRef(0); const [error, setError] = useState('');
   const [kind, setKind] = useState<Kind>(() => kinds.find(k => k.id === localStorage.getItem(TAB))?.id ?? 'image');
   // Designs (estilo Canva) ficam numa aba própria, ao lado dos tipos de arquivo.
-  const [designing, setDesigning] = useState(() => localStorage.getItem(TAB) === 'design');
+  const [designing, setDesigning] = useState(() => hasPendingDesign() || localStorage.getItem(TAB) === 'design');
+  useEffect(() => {
+    const open = () => setDesigning(true);
+    window.addEventListener(OPEN_DESIGN_EVENT, open);
+    return () => window.removeEventListener(OPEN_DESIGN_EVENT, open);
+  }, []);
   const [designCount, setDesignCount] = useState<number | null>(null);
   const [source, setSource] = useState<Source | 'all'>(() => localStorage.getItem(TAB) === 'folder' ? 'computer' : 'all'); const [query, setQuery] = useState('');
   const [open, setOpen] = useState<string | null>(null); const [shown, setShown] = useState(PAGE);

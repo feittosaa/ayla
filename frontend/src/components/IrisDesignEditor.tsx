@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { ActiveSelection, Canvas, Circle, FabricImage, FabricObject, Gradient, Line, PencilBrush, Polygon, Rect, SprayBrush, Textbox, Triangle, cache, loadSVGFromString, util } from 'fabric';
+import { ActiveSelection, Canvas, Circle, FabricImage, FabricObject, Gradient, Line, PencilBrush, Polygon, Rect, SprayBrush, Textbox, Triangle, cache } from 'fabric';
 import { EraserBrush } from '@erase2d/fabric';
 import { errorText, native } from '../services/Desktop';
 import { mediaUrl, type MediaRef } from '../services/Media';
 import { History, exportScale, fontName, fontValue, gradientCoords, pdfPage, previewScale, systemFonts, type Fill, type PackFont, type Template } from '../services/Design';
-import { EXTRA, applyTemplate, fillFrom, withSoftwareCanvases } from '../services/DesignCanvas';
+import { EXTRA, applyTemplate, fillFrom, fitImage, iconFrom, iconParts, withSoftwareCanvases } from '../services/DesignCanvas';
 import { loadPackFonts } from '../services/DesignFonts';
 import { marginOf, snap, snapLines, type Guides } from '../services/DesignGuides';
 import { CloseIcon, DownloadIcon, ImageIcon, TrashIcon, CopyIcon } from './Icons';
@@ -27,7 +27,6 @@ function storedSides() {
 }
 type Leave = 'close' | null;
 
-const MAX_IMAGE_SIDE = 2400;
 const swatches = ['#ffffff', '#f4efe6', '#111111', '#264653', '#2a9d8f', '#e9c46a', '#f4a261', '#e76f51', '#ff3d77', '#7c5cff', '#4cc9f0', '#80ed99'];
 const gradients: Fill[] = [
   { angle: 135, colors: ['#ff7a59', '#ff3d77'] }, { angle: 160, colors: ['#1b1446', '#5b2a86'] }, { angle: 120, colors: ['#0f2027', '#2c5364'] },
@@ -37,8 +36,7 @@ const gradients: Fill[] = [
 const fillCss = (fill: Fill) => typeof fill === 'string' ? fill : `linear-gradient(${fill.angle + 90}deg, ${fill.colors[0]}, ${fill.colors[1]})`;
 const isText = (o: FabricObject | undefined): o is Textbox => o instanceof Textbox;
 const isIcon = (o: FabricObject | undefined) => Boolean(o && (o as FabricObject & { icon?: boolean }).icon);
-/** Partes de um ícone: o Fabric devolve um grupo, ou o próprio caminho quando o SVG tem um só. */
-const parts = (o: FabricObject): FabricObject[] => 'getObjects' in o && typeof o.getObjects === 'function' ? (o.getObjects as () => FabricObject[])() : [o];
+const parts = iconParts;
 const solid = (value: unknown) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : null;
 const hex = (value: unknown, fallback = '#000000') => {
   if (typeof value !== 'string') return fallback;
@@ -47,20 +45,6 @@ const hex = (value: unknown, fallback = '#000000') => {
   const rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value);
   return rgb ? '#' + rgb.slice(1, 4).map(n => Number(n).toString(16).padStart(2, '0')).join('') : fallback;
 };
-
-/** Reduz imagens grandes antes de entrarem no projeto (que guarda a imagem dentro dele). */
-async function fitImage(url: string): Promise<string> {
-  const image = new Image();
-  image.src = url;
-  await image.decode();
-  const side = Math.max(image.naturalWidth, image.naturalHeight);
-  if (side <= MAX_IMAGE_SIDE) return url;
-  const k = MAX_IMAGE_SIDE / side;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(image.naturalWidth * k); canvas.height = Math.round(image.naturalHeight * k);
-  canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL(/^data:image\/jpe?g/.test(url) ? 'image/jpeg' : 'image/png', 0.9);
-}
 
 function Tool({ label, onClick, children, disabled, active }: { label: string; onClick: () => void; children: ReactNode; disabled?: boolean; active?: boolean }) {
   return <button type="button" className={active ? 'icon-button active' : 'icon-button'} data-tip={label} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}>{children}</button>;
@@ -413,10 +397,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   }
   async function addIcon(svg: string) {
     try {
-      const { objects, options } = await loadSVGFromString(svg);
-      const group = util.groupSVGElements(objects.filter((o): o is NonNullable<typeof o> => Boolean(o)), options);
-      parts(group).forEach(child => child.set({ stroke: '#1d1d2b', fill: child.fill && child.fill !== 'none' ? '#1d1d2b' : '' }));
-      group.set({ icon: true } as Record<string, unknown>);
+      const group = await iconFrom(svg, '#1d1d2b');
       group.scaleToWidth(unit * 0.25);
       add(group);
     } catch (e) { setError(`Não foi possível usar o ícone: ${errorText(e)}`); }

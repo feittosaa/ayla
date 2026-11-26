@@ -226,3 +226,15 @@
 .conversation-spinner i:nth-child(3) { animation-delay: .6s; }
 @keyframes conversation-breathe { 0%, 100% { opacity: .25; transform: scale(.85); } 40% { opacity: .9; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .conversation-spinner i { animation-duration: 3.6s; } }
+
+/* Designs criados pela Ayla (Iris › Designs). */
+.chat-designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 260px)); gap: 12px; margin-top: 10px; }
+.chat-design { margin: 0; display: flex; flex-direction: column; border: 1px solid var(--ayla-border); border-radius: calc(12px * var(--ayla-round, 1)); overflow: hidden; background: var(--ayla-bg); }
+.chat-design-preview { display: flex; align-items: center; justify-content: center; width: 100%; max-height: 340px; padding: 0; border: 0; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 16px 16px; color: #555; font-size: 12px; cursor: pointer; }
+.chat-design-preview:disabled { cursor: default; }
+.chat-design-preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.chat-design figcaption { display: flex; flex-direction: column; gap: 4px; padding: 8px; font-size: 12px; }
+.chat-design figcaption small { color: var(--ayla-text-faint); }
+.chat-design-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.chat-design-actions .ghost-button { min-height: 26px; padding: 0 8px; font-size: 12px; }
+.chat-design-note { grid-column: 1 / -1; margin: 0; color: var(--ayla-text-faint); font-size: 12px; }
