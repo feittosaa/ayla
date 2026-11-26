@@ -444,6 +444,7 @@ pub fn run() {
             core::organs::organ_local_words,
             core::research::suggests_web_search,
             core::research::automatic_check,
+            core::research::cloud_notes_check,
             core::services::set_response_source,
             core::services::source_remove,
             core::services::iris_upscale,

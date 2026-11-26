@@ -804,11 +804,15 @@ impl Runtime {
         report: impl FnMut(Value),
     ) -> Result<(String, Option<u64>, u64), String> {
         let (url, token) = self.ensure(model, prefs, cancel).await?;
+        // O limite de geração segue o contexto com que o modelo está rodando (32K no automático com
+        // placa de vídeo), não só o número das Configurações: respostas longas, como uma nota inteira
+        // com raciocínio antes, cabiam no contexto e eram cortadas no meio.
+        let context = self.context_for(model, prefs);
         let request = self
             .client
             .post(format!("{url}/v1/chat/completions"))
             .bearer_auth(token)
-            .json(&chat_body(kind, prefs, messages));
+            .json(&chat_body(kind, context, messages));
         let result = stream_chat(request, cancel, report).await;
         if cancel.is_cancelled() {
             self.stop();
@@ -1004,11 +1008,11 @@ impl Drop for Runtime {
 /// Corpo do pedido local. Modelos híbridos (ex.: Qwen3.5) raciocinam por
 /// padrão; o modo só fica ligado quando o pedido foi roteado para raciocínio.
 /// Templates sem essa opção a ignoram.
-fn chat_body(kind: Capability, prefs: &Preferences, messages: Vec<Value>) -> Value {
+fn chat_body(kind: Capability, context: u32, messages: Vec<Value>) -> Value {
     json!({
         "messages": messages,
         "stream": true,
-        "max_tokens": prefs.context_tokens / 2,
+        "max_tokens": context / 2,
         "chat_template_kwargs": {"enable_thinking": kind == Capability::Reasoning},
     })
 }
@@ -1235,9 +1239,10 @@ mod tests {
             (Capability::Vision, false),
             (Capability::Reasoning, true),
         ] {
-            let body = chat_body(kind, &prefs, vec![json!({"role":"user","content":"oi"})]);
+            let body = chat_body(kind, prefs.context_tokens, vec![json!({"role":"user","content":"oi"})]);
             assert_eq!(body["chat_template_kwargs"]["enable_thinking"], expected);
             assert_eq!(body["max_tokens"], prefs.context_tokens / 2);
+            assert_eq!(chat_body(kind, 32768, Vec::new())["max_tokens"], 16384, "segue o contexto real do modelo");
             assert_eq!(body["stream"], true);
         }
     }

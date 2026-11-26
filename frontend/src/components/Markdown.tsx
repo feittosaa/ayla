@@ -5,6 +5,7 @@ import type { Parent } from 'unist';
 import { errorText, native } from '../services/Desktop';
 import MediaView from './MediaView';
 import ZoomImage from './ZoomImage';
+import Diagram from './Diagram';
 import { TAG, WIKI, imageWidth, isAttachment, wikiToMarkdown } from '../services/Wiki';
 import { mediaKind, mediaUrl, type MediaRef } from '../services/Media';
 
@@ -70,6 +71,16 @@ export default function Markdown({ text, onNoteLink, onTag, media, onAttachment,
         else if (onAttachment && relative(href) && isAttachment(href)) onAttachment(decodeURIComponent(href.split('#')[0]));
         else if (onNoteLink && /\.md$/i.test(href.split('#')[0])) onNoteLink(decodeURIComponent(href.split('#')[0]));
       }}>{children}</a>;
+    },
+    // ```mermaid vira o diagrama desenhado (como no Obsidian).
+    pre: ({ node, children }) => {
+      const code = node?.children[0];
+      const classes = code && code.type === 'element' ? code.properties.className : undefined;
+      if (code && code.type === 'element' && Array.isArray(classes) && classes.includes('language-mermaid')) {
+        const text = code.children.map(child => child.type === 'text' ? child.value : '').join('');
+        return <Diagram code={text.trimEnd()} />;
+      }
+      return <pre>{children}</pre>;
     },
     img: ({ src, alt, title }) => {
       if (typeof src !== 'string') return null;

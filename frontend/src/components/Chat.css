@@ -21,13 +21,15 @@
 .conversation-row { position: relative; display: flex; align-items: center; flex-shrink: 0; border-radius: calc(10px * var(--ayla-round, 1)); }
 .conversation-row .conversation-item { flex: 1; min-width: 0; }
 .row-tools { position: absolute; right: 4px; display: flex; gap: 2px; padding-left: 12px; opacity: 0; background: linear-gradient(90deg, transparent, var(--ayla-sidebar) 30%); pointer-events: none; }
-.conversation-row:hover .row-tools, .conversation-row:focus-within .row-tools { opacity: 1; pointer-events: auto; }
+.conversation-row:hover .row-tools, .conversation-row:has(:focus-visible) .row-tools { opacity: 1; pointer-events: auto; }
 .conversation-row:has(.conversation-item[aria-current=page]) .row-tools { background: linear-gradient(90deg, transparent, var(--ayla-selected) 30%); }
 .app-shell .icon-button.tiny { width: 30px; height: 30px; min-height: 30px; border-radius: calc(8px * var(--ayla-round, 1)); }
+/* O pino fica sempre na ponta direita (como na Athena): no hover, renomear e apagar entram à esquerda dele. */
+.app-shell .conversation-pin { order: 1; }
 .app-shell .conversation-pin[aria-pressed=true] { color: var(--ayla-accent); }
 .conversation-row:has(.conversation-pin[aria-pressed=true]) .conversation-item { padding-right: 38px; }
-.conversation-row:not(:hover):not(:focus-within):has(.conversation-pin[aria-pressed=true]) .row-tools { opacity: 1; pointer-events: auto; }
-.conversation-row:not(:hover):not(:focus-within) .conversation-pin[aria-pressed=true] ~ button { display: none; }
+.conversation-row:not(:hover):not(:has(:focus-visible)):has(.conversation-pin[aria-pressed=true]) .row-tools { opacity: 1; pointer-events: auto; }
+.conversation-row:not(:hover):not(:has(:focus-visible)) .conversation-pin[aria-pressed=true] ~ button { display: none; }
 .conversation-edit input, .title-edit input { width: 100%; min-height: 38px; padding: 6px 10px; font-size: 14px; }
 .conversation-confirm { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); font-size: 13px; flex-shrink: 0; }
 .conversation-confirm span { overflow-wrap: anywhere; }
@@ -55,6 +57,13 @@
 .markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 14px; }
 .markdown th, .markdown td { padding: 6px 10px; border: 1px solid var(--ayla-border); text-align: left; }
 .markdown th { background: var(--ayla-control); font-weight: 600; }
+/* Diagramas Mermaid (```mermaid), centralizados e com os nós arredondados. */
+.diagram { display: flex; justify-content: center; margin: 0 0 12px; overflow-x: auto; }
+.diagram svg { max-width: 100%; height: auto; }
+.diagram .node rect, .diagram .label-container { rx: 10px; ry: 10px; }
+.diagram-loading { justify-content: flex-start; color: var(--ayla-text-faint); font-size: 13px; }
+.diagram-error { flex-direction: column; align-items: stretch; }
+.diagram-error p { margin: 0; color: var(--ayla-error); font-size: 13px; }
 .markdown input[type=checkbox] { margin-right: 6px; }
 .md-image-alt { color: var(--ayla-text-faint); font-style: italic; }
 .app-shell .conversation-item { min-height: 40px; padding: 0 12px; border: 0; border-radius: calc(10px * var(--ayla-round, 1)); background: transparent; color: var(--ayla-text-soft); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
@@ -102,8 +111,8 @@
 .message.user:hover + .user-actions, .user-actions:hover, .user-actions:focus-within, .user-actions:has(.message-versions) { opacity: 1; }
 .message-versions { display: inline-flex; align-items: center; gap: 2px; color: var(--ayla-text-soft); font-size: 13px; font-variant-numeric: tabular-nums; }
 .message-versions .icon-button { width: 30px; height: 30px; }
-.message.user.editing { display: flex; flex-direction: column; gap: 8px; width: min(80%, 640px); max-width: none; white-space: normal; }
-.message.user.editing textarea { width: 100%; min-height: 60px; resize: vertical; border: 0; background: transparent; color: inherit; font: inherit; line-height: 1.6; outline: none; }
+.message.user.editing { display: flex; flex-direction: column; gap: 8px; width: 80%; max-width: none; white-space: normal; }
+.message.user.editing textarea { width: 100%; min-height: 60px; resize: none; overflow: hidden; border: 0; background: transparent; color: inherit; font: inherit; line-height: 1.6; outline: none; }
 .message.user.editing .row-actions { justify-content: flex-end; }
 .memory-note { align-self: center; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: 100%; padding: 2px 4px 2px 14px; border: 1px solid var(--ayla-border); border-radius: calc(999px * var(--ayla-round, 1)); color: var(--ayla-text-soft); font-size: 13px; }
 .memory-note span { overflow-wrap: anywhere; }
@@ -122,6 +131,10 @@
 .chat-error { margin-bottom: 10px; padding: 0 6px; font-size: 14px; line-height: 1.5; }
 .route-ask { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; padding: 14px 16px; border: 1px solid var(--ayla-border); border-radius: calc(14px * var(--ayla-round, 1)); background: var(--ayla-panel); }
 .route-ask p { font-size: 14px; line-height: 1.5; color: var(--ayla-text); }
+.route-ask .route-ask-hint, .route-notice { font-size: 13px; color: var(--ayla-text-soft); }
+.route-notice { margin: 0 0 8px; }
+.route-ask-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 14px; }
+.route-ask-notes label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .response-options, .cloud-review { display: flex; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 10px; padding: 14px 16px; border: 1px solid var(--ayla-border-soft); border-radius: calc(16px * var(--ayla-round, 1)); background: var(--ayla-panel); font-size: 14px; line-height: 1.5; }
 .response-options label:not(.check) { min-width: 0; display: flex; flex-direction: column; gap: 6px; flex: 1 1 180px; color: var(--ayla-text-soft); font-size: 13px; }
 .response-options p, .cloud-review p, .cloud-review b, .cloud-review pre, .cloud-review label { width: 100%; margin: 0; }
@@ -153,6 +166,7 @@
   .messages, .composer-area { padding-left: 14px; padding-right: 14px; }
   .chat-header { padding-left: 10px; }
   .message.user { max-width: 92%; }
+  .message.user.editing { width: 92%; }
 }
 
 /* Imagens na conversa */
@@ -250,3 +264,6 @@
 .chat-design-actions .ghost-button { min-height: 26px; padding: 0 8px; font-size: 12px; }
 .chat-design-note { grid-column: 1 / -1; margin: 0; color: var(--ayla-text-faint); font-size: 12px; }
 .project-source-options { max-height: 20rem; overflow-y: auto; }
+
+.message-created { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.diagram .edgeLabel, .diagram .edgeLabel p { border-radius: 999px; }

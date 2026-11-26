@@ -1,9 +1,9 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
 import Confirm from './Confirm';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { native, nativeTask, taskId, errorText, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type DesignCard, type Effort, type Reference } from '../services/Desktop';
-import { base64, recordWav, type Recording } from '../services/Audio';
+import { native, nativeTask, taskId, errorText, formatBytes, supports, savePreferences, fileLabels, type Capability, type Conversation, type Fact, type FileInfo, type Message, type Project, type Sensitivity, type Snapshot, type ChatRequest, type DesignCard, type Effort, type Reference, type OfferedNote, type KeptNote, type CreatedNote } from '../services/Desktop';
+import { base64, recordWav, RECORD_LIMIT_MS, type Recording } from '../services/Audio';
 import { asksForImage, asksAboutScreen } from '../services/Intent';
 import ImageResults from './ImageResults';
 import ChatDesigns from './ChatDesigns';
@@ -43,11 +43,13 @@ type Props = {
 };
 type ResponseSource = 'local' | 'auto' | 'cloud';
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+/** Altura da caixa de texto igual à do conteúdo, sem barra de rolagem. */
+const fitHeight = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
 
 /** Editar uma pergunta (nova versão dela) ou gerar outra resposta: `id` da pergunta; `cut`, a
  * posição a partir da qual a tela troca; `files`, os anexos da pergunta original. */
 type Branch = { kind: 'edit' | 'regenerate'; id: number; text: string; cut: number; files: FileInfo[] };
-const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha } : m;
+const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha, created: m.extras.created ?? m.created } : m;
 
 /** Setas para alternar entre as versões de uma mensagem (‹ 2/3 ›). */
 function Versions({ message, disabled, onPick }: { message: Message; disabled: boolean; onPick: (id: number) => void }) {
@@ -84,8 +86,14 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   // O modo escolhido vale para as próximas conversas até ser trocado.
   const [source, setSource] = useState<ResponseSource>(snapshot.preferences.response_source || (snapshot.preferences.usage_mode === 'hybrid' ? 'auto' : 'local'));
   /** Automático em dúvida: a pessoa escolhe entre nuvem e este computador. */
-  const [ask, setAsk] = useState<{ message: string; search: boolean } | null>(null);
-  useEffect(() => { if (ask && input.trim() !== ask.message) setAsk(null); }, [ask, input]);
+  const [ask, setAsk] = useState<{ message: string; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; manual?: boolean } | null>(null);
+  const [skipNotes, setSkipNotes] = useState<string[]>([]);
+  const [routeNotice, setRouteNotice] = useState('');
+  /** A nuvem falhou no Automático (limite, sem conexão): dá para responder aqui com um clique. */
+  const [retryLocal, setRetryLocal] = useState<string | null>(null);
+  useEffect(() => { if (retryLocal !== null && (askBranch.current ? input.trim() !== '' : input.trim() !== retryLocal)) setRetryLocal(null); }, [retryLocal, input]);
+  // Editar/Gerar de novo não devolvem a pergunta à caixa: aí o cartão só some se a pessoa escrever.
+  useEffect(() => { if (ask && (askBranch.current ? input.trim() !== '' : input.trim() !== ask.message)) setAsk(null); }, [ask, input]);
   function chooseSource(next: ResponseSource) {
     setError(''); setSource(next); setSensitivity('uncertain'); setReviewed(false); setEffort(''); setAsk(null);
     void native('set_response_source', { source: next }).then(refresh).catch(e => setError(errorText(e)));
@@ -109,7 +117,10 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   const [localWords, setLocalWords] = useState<string[]>([]);
   useEffect(() => { void native<string[]>('organ_local_words').then(setLocalWords).catch(() => setLocalWords([])); }, [snapshot]);
   const projectContext = bases.some(b => b.id.startsWith('project-source:'));
-  const organLocal = projectContext || localWords.some(word => input.toLowerCase().includes(word));
+  // Num pedido longo, "cria uma nota…" não prende a resposta aqui: a Ayla responde (podendo oferecer a
+  // nuvem com as notas) e guarda a resposta como nota.
+  const longRequest = input.trim().split(/\s+/).length >= 25;
+  const organLocal = projectContext || localWords.some(word => input.toLowerCase().includes(word) && !(longRequest && /nota|athena/.test(word)));
   const provider = snapshot.preferences.cloud_provider;
   const destination = projectContext || mode === 'local_only' ? 'local' : mode === 'cloud_only' ? 'cloud' : source;
   const canResearch = destination === 'cloud' && !organLocal && !attachments.length && sensitivity !== 'sensitive' && Boolean(input.trim());
@@ -346,29 +357,40 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
     }
     const message = text; if (spokenText === undefined && !branch) setInput('');
-    const sent = branch ? branch.files : shot ? [...attachments, shot] : attachments; if (!branch) setAttachments([]); setAsk(null);
+    const sent = branch ? branch.files : shot ? [...attachments, shot] : attachments; if (!branch) setAttachments([]);
+    const offered = choice === 'cloud' ? (ask?.notes ?? []).filter(note => !skipNotes.includes(note.path)) : []; setAsk(null); setRouteNotice(''); setRetryLocal(null);
     const question: Message = { role: 'user', content: message, complete: true, attachments: sent };
     const pending: Message = { role: 'assistant', content: '', complete: false };
     setMessages(prev => branch ? [...prev.slice(0, branch.cut), ...(branch.kind === 'edit' ? [question] : []), pending] : [...prev, question, pending]);
     // Automático: a Ayla classifica neste computador antes do envio e pergunta quando houver dúvida.
     let autoRoute: ChatRequest['auto_route'] = null;
+    // Sem internet, o Automático responde neste computador.
     const automaticCloud = destination === 'auto' && !designing && Boolean(provider) && !sent.length && !organLocal && sensitivity !== 'sensitive'
-      && (mode !== 'per_conversation' || Boolean(current.cloud_consent));
+      && (mode !== 'per_conversation' || Boolean(current.cloud_consent)) && navigator.onLine;
+    // Gerar de novo/editar: a nota da versão anterior não conta como "o último".
+    const versionOf = { conversation: current.id, editOf: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null };
+    /** Devolve o pedido à caixa de texto e mostra o cartão de escolha. */
+    const holdFor = async (next: NonNullable<typeof ask>) => {
+      if (branch) { askBranch.current = branch; await reload(current.id); } else { setMessages(prev => prev.slice(0, -2)); setAttachments(sent); setInput(message); }
+      setAsk(next); setSkipNotes([]); active.current = null; setBusy(false); setStatus('');
+    };
     if (automaticCloud && choice) autoRoute = choice === 'cloud' && ask?.search ? 'search' : choice;
     else if (automaticCloud) {
       setStatus('Verificando a privacidade do pedido…');
       try {
-        const check = await native<{ route: 'local' | 'cloud' | 'search' | 'ask'; search: boolean }>('automatic_check', { message });
-        if (check.route === 'ask') {
-          if (branch) { askBranch.current = branch; await reload(current.id); } else { setMessages(prev => prev.slice(0, -2)); setAttachments(sent); setInput(message); }
-          setAsk({ message, search: check.search });
-          active.current = null; setBusy(false); setStatus('');
-          return;
-        }
+        const check = await native<{ route: 'local' | 'cloud' | 'search' | 'ask' | 'notes'; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; notice?: string }>('automatic_check', { message, project: project?.id ?? null, ...versionOf });
+        if (check.route === 'ask' || check.route === 'notes') { await holdFor({ message, search: check.search, notes: check.notes, kept: check.kept }); return; }
+        if (check.notice) setRouteNotice(check.notice);
         autoRoute = check.route;
       } catch { autoRoute = 'local'; }
+    } else if (cloud && !choice && !sent.length && !designing) {
+      // Nuvem manual: as notas que o pedido usa só vão junto se a pessoa aceitar.
+      setStatus('Procurando notas para o pedido…');
+      const check = await native<{ notes: OfferedNote[]; kept?: KeptNote[]; notice?: string }>('cloud_notes_check', { message, project: project?.id ?? null, ...versionOf }).catch(() => ({ notes: [] as OfferedNote[], kept: undefined, notice: undefined }));
+      if (check.notes.length) { await holdFor({ message, search: false, notes: check.notes, kept: check.kept, manual: true }); return; }
+      if (check.notice) setRouteNotice(check.notice);
     }
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: branch ? [] : sent.map(file => file.id), edit_of: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null, sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: branch ? [] : sent.map(file => file.id), edit_of: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null, sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing, notes: offered.map(note => note.path) };
     if (designing) setDesigning(false);
     if (bases.length) onBasesUsed?.();
     let receivedText = false;
@@ -377,6 +399,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'origin') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, origin: event.origin } : m));
         if (event.type === 'routing') { setRouting(event.text || ''); setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, notice: event.text || '' } : m)); }
         if (event.type === 'images') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, images: { query: event.query ?? '', items: event.items ?? [], links: event.links ?? [] } } : m));
+        if (event.type === 'note_created') { const item = (event as unknown as { item?: CreatedNote }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, created: [...(m.created ?? []), item] } : m)); }
         if (event.type === 'ficha') { const item = (event as unknown as { item?: FichaCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, ficha: item } : m)); }
         if (event.type === 'designs') { const items = (event as unknown as { items?: DesignCard[] }).items ?? []; setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, designs: items } : m)); }
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
@@ -392,11 +415,16 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       await reload(current.id, true);
     } catch (e) {
       setError(errorText(e));
-      if (branch) await reload(current.id);
+      if (branch) {
+        await reload(current.id);
+        // A nuvem falhou ao gerar de novo/editar: dá para refazer aqui, na mesma versão.
+        if (!receivedText && (autoRoute === 'cloud' || autoRoute === 'search')) { askBranch.current = branch; setRetryLocal(message); }
+      }
       else if (!receivedText && (research || destination === 'auto')) {
         setMessages(prev => prev.slice(0, -2));
         setAttachments(sent);
         setInput(message);
+        if (autoRoute === 'cloud' || autoRoute === 'search') setRetryLocal(message);
       }
     } finally { active.current = null; setBusy(false); setReviewed(false); setStatus(''); await refresh(); }
   }
@@ -430,6 +458,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       // A fala fica na caixa de texto para revisar e enviar quando quiser (nunca é enviada sozinha).
       setInput(heard ? join(heard) : before);
       if (heard) field.current?.focus(); else setError('Não entendi o áudio. Tente falar de novo.');
+      if (session.reachedLimit()) setError(`A gravação vai até ${RECORD_LIMIT_MS / 60000} minutos: parei aí e transcrevi o que você falou. Toque no microfone para continuar.`);
     } catch (e) { recorder.current = null; setListening('idle'); setInput(before); setError(errorText(e)); }
   }
   async function consent(allowed: boolean) {
@@ -470,9 +499,11 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     if (!conversation || !title || title === conversation.title) return;
     try { await native('rename_conversation', { id: conversation.id, title }); onConversation({ ...conversation, title }); } catch (e) { setError(errorText(e)); }
   }
+  // A caixa de edição abre do tamanho da mensagem inteira e cresce enquanto se digita.
+  const fitEdit = useCallback((el: HTMLTextAreaElement | null) => { if (el) { fitHeight(el); el.setSelectionRange(el.value.length, el.value.length); } }, []);
   async function copy(text: string, index: number) {
     try { await navigator.clipboard.writeText(text); setCopied(index); setTimeout(() => setCopied(c => c === index ? null : c), 1500); }
-    catch { setError('Não consegui copiar a resposta.'); }
+    catch { setError('Não consegui copiar o texto.'); }
   }
 
   return <>
@@ -507,8 +538,8 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
           {messages.map((m, i) => m.role === 'user'
             ? editing?.index === i
               ? <form key={i} className="message user editing" onSubmit={submitEdit}>
-                  <textarea aria-label="Editar a mensagem" autoFocus value={editing.text} rows={Math.min(12, editing.text.split('\n').length + 1)}
-                    onChange={e => setEditing({ index: i, text: e.target.value })}
+                  <textarea ref={fitEdit} aria-label="Editar a mensagem" autoFocus value={editing.text} rows={1}
+                    onChange={e => { fitHeight(e.currentTarget); setEditing({ index: i, text: e.target.value }); }}
                     onKeyDown={e => { if (e.key === 'Escape') setEditing(null); if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) submitEdit(e); }} />
                   <div className="row-actions"><button type="button" className="ghost-button" onClick={() => setEditing(null)}>Cancelar</button><button className="primary-action" disabled={!editing.text.trim() || busy}>Enviar</button></div>
                 </form>
@@ -516,6 +547,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   <div className="message user">{m.attachments?.length ? <span className="message-files">{m.attachments.map(file => file.kind === 'image' || file.kind === 'gif' ? <FilePreview key={file.id} file={file} /> : <span key={file.id} className="file-chip"><FileIcon size={14} />{file.name}</span>)}</span> : null}{m.content}</div>
                   {m.id && <div className="message-actions user-actions">
                     <Versions message={m} disabled={busy} onPick={id => void pickVersion(id)} />
+                    {m.content && <button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={15} />{copied === i ? 'Copiado' : 'Copiar'}</button>}
                     <button className="ghost-button" disabled={busy} title="Editar e enviar de novo a partir daqui" onClick={() => setEditing({ index: i, text: m.content })}><PencilIcon size={15} />Editar</button>
                   </div>}
                 </Fragment>
@@ -527,6 +559,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.designs?.length ? <ChatDesigns items={m.designs} /> : null}
                   {m.ficha ? <ChatFicha item={m.ficha} /> : null}
                   {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
+                  {m.created?.length && onOpenNote ? <p className="message-created">{m.created.map(item => <button key={item.note} type="button" className="file-chip link-chip" title={item.note} onClick={() => onOpenNote(item.note)}><FileIcon size={14} />Abrir “{item.title}” na Athena</button>)}</p> : null}
                   {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => {
                     const label = <><FileIcon size={14} />{source.name}{source.date ? ` · ${source.date}` : ''}{source.pages.length ? ` · p. ${source.pages.join(', ')}` : ''}</>;
                     if (source.note && onOpenNote) return <button key={source.id} type="button" className="file-chip link-chip" title="Abrir na Athena" onClick={() => onOpenNote(source.note!)}>{label}</button>;
@@ -551,13 +584,28 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
 
       <div className="composer-area">
         {error && <p className="chat-error" role="alert">{error}</p>}
-        {ask && !busy && <div className="route-ask" role="group" aria-label="Onde responder">
+        {retryLocal !== null && !busy && <div className="route-ask" role="group" aria-label="Responder neste computador">
+          <p>Posso responder neste computador, com o modelo local e as suas notas.</p>
+          <div className="button-row"><button type="button" onClick={() => void send(undefined, 'local')}>Responder neste computador</button></div>
+        </div>}
+        {routeNotice && !busy && !ask && <p className="route-notice" role="status">{routeNotice}</p>}
+        {ask && !busy && (ask.notes?.length ? <div className="route-ask" role="group" aria-label="Enviar notas à nuvem">
+          <p>{ask.notes.length === 1 ? 'Achei esta nota para o pedido' : 'Achei estas notas para o pedido'} e conferi neste computador: nada sensível. {ask.manual ? 'Envio junto à nuvem?' : `Posso ${ask.search ? 'pesquisar na internet' : 'responder pela nuvem'} enviando seu pedido com as notas marcadas, ou manter tudo neste computador.`}</p>
+          <ul className="route-ask-notes">{ask.notes.map(note => <li key={note.path}><label title={note.path}>
+            <input type="checkbox" checked={!skipNotes.includes(note.path)} onChange={e => setSkipNotes(prev => e.target.checked ? prev.filter(p => p !== note.path) : [...prev, note.path])} />{note.title}</label></li>)}</ul>
+          {ask.kept?.map(note => <p key={note.title} className="route-ask-hint">A nota “{note.title}” fica neste computador ({note.reason}).</p>)}
+          {ask.notes.some(note => note.cut) && <p className="route-ask-hint">Notas longas vão com o começo e o final (até 12 mil caracteres); o meio fica aqui.</p>}
+          <div className="button-row">
+            <button type="button" onClick={() => void send(undefined, 'cloud')}>{ask.notes.every(note => skipNotes.includes(note.path)) ? (ask.manual ? 'Enviar só o pedido' : 'Usar a nuvem sem notas') : ask.notes.length - skipNotes.length === 1 ? 'Enviar com a nota' : 'Enviar com as notas'}</button>
+            <button type="button" onClick={() => void send(undefined, 'local')}>{ask.manual ? 'Enviar só o pedido' : 'Manter neste computador'}</button>
+          </div>
+        </div> : <div className="route-ask" role="group" aria-label="Onde responder">
           <p>Não tenho certeza se este pedido tem algo pessoal. {ask.search ? 'Posso pesquisar na internet' : 'Posso responder pela nuvem'} ou manter tudo neste computador.</p>
           <div className="button-row">
             <button type="button" onClick={() => void send(undefined, 'cloud')}>{ask.search ? 'Pesquisar na internet' : 'Usar a nuvem'}</button>
             <button type="button" onClick={() => void send(undefined, 'local')}>Manter neste computador</button>
           </div>
-        </div>}
+        </div>)}
         {options && <div className="response-options" id="response-options" role="group" aria-label="Ajustes desta resposta">
           {routing && <p role="status">Última resposta: {routing}</p>}
           <label>Modo<select value={destination} disabled={busy || mode === 'local_only' || mode === 'cloud_only'} onChange={e => chooseSource(e.target.value as ResponseSource)}><option value="local">Neste computador</option><option value="auto">Automático</option><option value="cloud">Na nuvem{provider ? '' : ' · conecte uma conta'}</option></select></label>
@@ -591,7 +639,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
           <label className="check"><input type="checkbox" checked={reviewed} disabled={busy || pendingRoute} onChange={e => { setSensitivity(e.target.checked ? 'public' : 'uncertain'); setReviewed(e.target.checked); }} />Confirmo que este pedido não tem dados pessoais e pode ir para a nuvem.</label>
         </div>}
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>
-          {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}` : 'Transcrevendo…'}</p>}
+          {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}${RECORD_LIMIT_MS / 1000 - seconds <= 30 ? ` · para em ${RECORD_LIMIT_MS / 1000 - seconds} s` : ''}` : 'Transcrevendo…'}</p>}
           {(attachments.length > 0 || adding) && <ul className="composer-files" aria-label="Arquivos anexados">
             {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><Confirm className="chip-remove" ariaLabel={`Remover ${file.name}`} disabled={busy} question="Tirar este anexo?" confirm="Tirar" onConfirm={() => removeAttachment(file)}><CloseIcon size={14} /></Confirm></li>)}
             {adding && <li className="file-chip" role="status">Guardando…</li>}

@@ -587,6 +587,26 @@ impl Store {
             (None, None) => Ok((Placement { parent: self.leaf(conversation)?, user: None, files_from: None }, None)),
         }
     }
+    /// Notas criadas pelas outras versões desta resposta (gerar de novo: respostas da mesma pergunta;
+    /// editar: respostas das outras versões da pergunta), como ficaram em `extras.created`.
+    pub fn sibling_notes(&self, conversation: &str, placement: &Placement) -> rusqlite::Result<Vec<serde_json::Value>> {
+        let rows: Vec<Option<String>> = match placement.user {
+            Some(question) => {
+                let mut statement = self.conn.prepare("SELECT extras FROM messages WHERE conversation_id=?1 AND role='assistant' AND parent_id=?2")?;
+                let rows = statement.query_map(params![conversation, question], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                rows
+            }
+            None => {
+                let mut statement = self.conn.prepare("SELECT a.extras FROM messages a JOIN messages q ON a.parent_id=q.id WHERE q.conversation_id=?1 AND q.role='user' AND q.parent_id IS ?2 AND a.role='assistant'")?;
+                let rows = statement.query_map(params![conversation, placement.parent], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                rows
+            }
+        };
+        Ok(rows.into_iter().flatten()
+            .filter_map(|extras| serde_json::from_str::<serde_json::Value>(&extras).ok())
+            .flat_map(|extras| extras["created"].as_array().cloned().unwrap_or_default())
+            .collect())
+    }
     /// Arquivos de uma pergunta (os da versão original, quando ela os reaproveita).
     pub fn message_files(&self, conversation: &str, message: i64) -> rusqlite::Result<Vec<FileInfo>> {
         let owner: i64 = self.conn.query_row("SELECT COALESCE(files_from,id) FROM messages WHERE id=?1 AND conversation_id=?2", params![message, conversation], |r| r.get(0))?;
@@ -1534,6 +1554,32 @@ mod tests {
         assert_eq!(db.delete_conversation(&a.id).unwrap(), None);
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn notas_criadas_pelas_outras_versoes_da_resposta() {
+        let root = std::env::temp_dir().join(format!("ayla-versoes-notas-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Store::open(&root.join("ayla.db")).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        let turn = |placement: Placement, q: &str, a: &str, note: Option<&str>| {
+            db.save_turn(&chat.id, placement, q, a, true, &[], &[], None).unwrap();
+            if let Some(note) = note { db.set_last_reply_extras(&chat.id, &serde_json::json!({"created":[{"title":"Gancho 10","note":note,"modified":1}]}).to_string()).unwrap(); }
+        };
+        turn(db.placement(&chat.id, None, None).unwrap().0, "monta o próximo gancho", "# Gancho 10", Some("/cofre/Gancho 10.md"));
+        let q1 = db.messages(&chat.id).unwrap()[0].id;
+        let notes = |placement: &Placement| db.sibling_notes(&chat.id, placement).unwrap().iter().map(|n| n["note"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // Gerar de novo: a nota da resposta anterior é da mesma pergunta.
+        let (again, _) = db.placement(&chat.id, None, Some(q1)).unwrap();
+        assert_eq!(notes(&again), ["/cofre/Gancho 10.md"]);
+        // Editar a pergunta: a nota da resposta à versão original também conta.
+        let (edit, _) = db.placement(&chat.id, Some(q1), None).unwrap();
+        assert_eq!(notes(&edit), ["/cofre/Gancho 10.md"]);
+        // Uma pergunta nova depois não é versão: "o último gancho" passa a ser essa nota.
+        turn(db.placement(&chat.id, None, None).unwrap().0, "agora o seguinte", "ok", None);
+        assert!(notes(&db.placement(&chat.id, None, None).unwrap().0).is_empty());
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
