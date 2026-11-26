@@ -103,6 +103,10 @@
 .pad-dialog-notes { width: min(680px, 100%); height: min(420px, 100%); overflow: hidden; }
 .pad-dialog-notes .pad-notes { flex: 1; min-height: 0; overflow-y: auto; }
 .pad-dialog-head { display: flex; align-items: center; justify-content: space-between; }
+.pad-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.pad-dialog-actions button { border: 1px solid var(--ayla-border); background: var(--ayla-control, transparent); color: var(--ayla-text); border-radius: 8px; padding: 6px 14px; }
+.pad-dialog-actions button.primary { background: var(--ayla-accent); color: var(--ayla-on-accent); border-color: transparent; }
+.pad-dialog-actions button:disabled { opacity: .5; }
 .pad-dialog h2 { font-size: 17px; }
 .pad-dialog h3 { font-size: 13px; color: var(--ayla-text-soft); margin-top: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .pad-toggle, .pad-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; }

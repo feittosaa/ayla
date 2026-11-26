@@ -3,7 +3,11 @@ import { closeBrackets, closeBracketsKeymap, insertBracket } from '@codemirror/a
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxTree } from '@codemirror/language';
-import { Annotation, Compartment, EditorState, Prec, Transaction, type Range } from '@codemirror/state';
+import { Annotation, Compartment, EditorState, Prec, StateField, Transaction, type Range } from '@codemirror/state';
+import type { SyntaxNodeRef } from '@lezer/common';
+import { createRoot, type Root } from 'react-dom/client';
+import Markdown from './Markdown';
+import Diagram from './Diagram';
 import { Decoration, EditorView, keymap, placeholder, ViewPlugin, WidgetType, type ViewUpdate } from '@codemirror/view';
 import { IMAGE, imageWidth, isAttachment, resizedImage } from '../services/Wiki';
 import { mediaUrl } from '../services/Media';
@@ -22,6 +26,8 @@ type Props = {
   /** Teclas da lista de sugestões de link; devolve true quando a lista usou a tecla. */
   onSuggestKey: (key: 'Enter' | 'Tab' | 'ArrowUp' | 'ArrowDown') => boolean;
   onLink: (target: string) => void;
+  /** O cursor mudou de lugar sem digitar (clique, setas). */
+  onCaret?: (caret: number) => void;
 };
 
 const external = Annotation.define<boolean>();
@@ -163,6 +169,64 @@ class InlineAtom extends WidgetType {
   }
 }
 
+/** Bloco ```mermaid: o código do diagrama, ou `null` se for outro bloco de código. */
+function diagramCode(state: EditorState, node: SyntaxNodeRef) {
+  if (node.name !== 'FencedCode') return null;
+  const info = node.node.getChild('CodeInfo');
+  if (!info || state.sliceDoc(info.from, info.to).trim().toLowerCase() !== 'mermaid') return null;
+  const text = node.node.getChild('CodeText');
+  return text ? state.sliceDoc(text.from, text.to) : '';
+}
+const touches = (state: EditorState, from: number, to: number) => state.selection.ranges.some(r => r.from <= to && r.to >= from);
+/** Tabela ou diagrama que aparece desenhado: o cursor não está nele (como no Obsidian). */
+function drawnBlock(state: EditorState, node: SyntaxNodeRef) {
+  if (node.name !== 'Table' && diagramCode(state, node) === null) return null;
+  const from = state.doc.lineAt(node.from).from; const to = state.doc.lineAt(node.to).to;
+  return touches(state, from, to) ? null : { from, to };
+}
+
+const roots = new WeakMap<HTMLElement, Root>();
+class DrawnBlock extends WidgetType {
+  constructor(readonly kind: 'table' | 'diagram', readonly text: string, readonly options: { current: Props }) { super(); }
+  eq(other: DrawnBlock) { return other.kind === this.kind && other.text === this.text; }
+  toDOM(view: EditorView) {
+    const dom = document.createElement('div');
+    dom.className = `athena-drawn athena-drawn-${this.kind}`;
+    dom.title = 'Clique para editar';
+    const root = createRoot(dom);
+    root.render(this.kind === 'table'
+      ? <Markdown text={this.text} onNoteLink={target => this.options.current.onLink(target)} />
+      : <Diagram code={this.text} />);
+    roots.set(dom, root);
+    // Clique fora de um link: volta ao texto do bloco para editar.
+    dom.addEventListener('mousedown', event => {
+      if (event.button !== 0 || (event.target as HTMLElement).closest('a') || view.state.readOnly) return;
+      event.preventDefault();
+      view.dispatch({ selection: { anchor: view.posAtDOM(dom) } });
+      view.focus();
+    });
+    return dom;
+  }
+  destroy(dom: HTMLElement) { const root = roots.get(dom); if (root) queueMicrotask(() => root.unmount()); }
+  ignoreEvent() { return true; }
+  get estimatedHeight() { return this.kind === 'diagram' ? 320 : 36 * (this.text.split('\n').length - 1); }
+}
+
+function drawnBlocks(state: EditorState, options: { current: Props }) {
+  const ranges: Range<Decoration>[] = [];
+  syntaxTree(state).iterate({
+    enter(node) {
+      const block = drawnBlock(state, node);
+      if (!block) return node.name !== 'Table' && node.name !== 'FencedCode';
+      const code = diagramCode(state, node);
+      const widget = new DrawnBlock(code === null ? 'table' : 'diagram', code ?? state.sliceDoc(block.from, block.to), options);
+      ranges.push(Decoration.replace({ widget, block: true }).range(block.from, block.to));
+      return false;
+    },
+  });
+  return Decoration.set(ranges, true);
+}
+
 function decorations(view: EditorView, options: { current: Props }) {
   const ranges: Range<Decoration>[] = [];
   const hidden: Range<Decoration>[] = [];
@@ -172,9 +236,11 @@ function decorations(view: EditorView, options: { current: Props }) {
     hidden.push(Decoration.replace({ widget: new InlineAtom(data, from, to, options) }).range(from, to));
   };
   const hide = (from: number, to: number) => hidden.push(Decoration.replace({}).range(from, to));
-  // Link com o cursor dentro aparece como texto cru (como no Obsidian): virar bloco enquanto se
-  // digita empurraria o cursor para depois do fechamento.
-  const editing = (from: number, to: number) => view.state.selection.ranges.some(r => r.head > from && r.head < to);
+  // Link com o cursor dentro ou encostado aparece como texto cru (como no Obsidian): as setas
+  // chegam à borda, o link abre e o cursor entra nos colchetes. Imagens só abrem com o cursor dentro.
+  const editing = (from: number, to: number, edge = true) => view.state.selection.ranges.some(r => edge ? r.head >= from && r.head <= to : r.head > from && r.head < to);
+  // Marcas de formatação (#, *, ~~, `, >) aparecem enquanto o cursor toca o trecho, como no Obsidian.
+  const touched = (from: number, to: number) => view.state.selection.ranges.some(r => r.from <= to && r.to >= from);
   const styles: Record<string, string> = {
     StrongEmphasis: 'athena-strong', Emphasis: 'athena-emphasis', Strikethrough: 'athena-strike',
     InlineCode: 'athena-code', CodeText: 'athena-code', Blockquote: 'athena-quote',
@@ -184,9 +250,11 @@ function decorations(view: EditorView, options: { current: Props }) {
     from, to,
     enter({ name, node, from, to }) {
       const line = view.state.doc.lineAt(from);
+      // Desenhado inteiro pelo campo dos blocos (tabela, diagrama).
+      if (drawnBlock(view.state, node)) return false;
       if (name === 'AthenaLink') {
-        if (editing(from, to)) return false;
         const [, bang, target, alias] = wikiPattern.exec(slice(from, to))!;
+        if (editing(from, to, !bang)) return false;
         const clean = target.trim();
         const width = imageWidth(alias);
         const path = clean.split('#')[0];
@@ -196,7 +264,7 @@ function decorations(view: EditorView, options: { current: Props }) {
       }
       if ((name === 'Link' || name === 'Image' || name === 'Autolink') && to <= line.to) {
         const url = node.getChild('URL');
-        if (!url || editing(from, to)) return;
+        if (!url || editing(from, to, name !== 'Image')) return;
         const marks = node.getChildren('LinkMark');
         const destination = slice(url.from, url.to).replace(/^<|>$/g, '');
         const label = name === 'Autolink' ? destination : slice(marks[0].to, marks[1].from);
@@ -211,12 +279,20 @@ function decorations(view: EditorView, options: { current: Props }) {
         atom(from, to, { label: url, target: /^www\./i.test(url) ? `https://${url}` : url });
         return false;
       }
+      // `---` vira uma linha; com o cursor nela, volta a ser texto (como no Obsidian).
+      if (name === 'HorizontalRule') {
+        if (view.state.selection.ranges.some(r => r.head >= line.from && r.head <= line.to)) return false;
+        ranges.push(Decoration.line({ class: 'athena-rule' }).range(line.from));
+        hide(from, to);
+        return false;
+      }
       if (name.startsWith('ATXHeading') || name.startsWith('SetextHeading')) {
         ranges.push(Decoration.line({ class: `athena-heading athena-heading-${name.slice(-1)}` }).range(line.from));
       }
       if (styles[name]) ranges.push(Decoration.mark({ class: styles[name] }).range(from, to));
-      if (['EmphasisMark', 'StrikethroughMark', 'CodeMark', 'CodeInfo'].includes(name)) hide(from, to);
-      if (name === 'HeaderMark' || name === 'QuoteMark') {
+      if (['EmphasisMark', 'StrikethroughMark', 'CodeMark', 'CodeInfo'].includes(name) && !touched(node.parent?.from ?? from, node.parent?.to ?? to)) hide(from, to);
+      if ((name === 'HeaderMark' && !touched(node.parent?.from ?? line.from, node.parent?.to ?? line.to))
+        || (name === 'QuoteMark' && !touched(line.from, line.to))) {
         const space = slice(to, line.to).match(/^[ \t]+/)?.[0].length ?? 0;
         hide(from, to + space);
       }
@@ -246,11 +322,16 @@ export default function AthenaEditor(props: Props) {
       decorations: value => value.decorations.visible,
       provide: extension => EditorView.atomicRanges.of(view => view.plugin(extension)?.decorations.atomic ?? Decoration.none),
     });
+    const drawn = StateField.define({
+      create: state => drawnBlocks(state, options),
+      update: (value, tr) => tr.docChanged || tr.selection || syntaxTree(tr.state) !== syntaxTree(tr.startState) ? drawnBlocks(tr.state, options) : value,
+      provide: field => EditorView.decorations.from(field),
+    });
     const view = new EditorView({
       parent: mount.current!,
       doc: initial.value,
       extensions: [
-        language, language.language.data.of({ closeBrackets: pairs }), closeBrackets(), plugin, history(),
+        language, language.language.data.of({ closeBrackets: pairs }), closeBrackets(), plugin, drawn, history(),
         Prec.highest(keymap.of((['Enter', 'Tab', 'ArrowUp', 'ArrowDown'] as const).map(key => ({ key, run: () => options.current.onSuggestKey(key) })))),
         Prec.high(keymap.of([{ key: 'Enter', run: leavePair }])),
         keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
@@ -276,7 +357,7 @@ export default function AthenaEditor(props: Props) {
         EditorView.updateListener.of(update => {
           if (update.docChanged && !update.transactions.some(transaction => transaction.annotation(external))) {
             options.current.onChange(update.state.doc.toString(), update.state.selection.main.head);
-          }
+          } else if (update.selectionSet && !update.docChanged) options.current.onCaret?.(update.state.selection.main.head);
         }),
       ],
     });

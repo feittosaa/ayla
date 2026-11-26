@@ -7,6 +7,13 @@ import { base64 } from '../services/Audio';
 import { attachmentUrl, changeBanner, folderOf, frontmatter, isAttachment, titleOf, type Banner as BannerSettings } from '../services/Wiki';
 
 const AthenaEditor = lazy(() => import('./AthenaEditor'));
+/** Link sendo digitado antes do cursor ("[[Bo|"): o que já foi escrito e onde começa. */
+function linkAt(body: string, caret: number) {
+  const prefix = body.slice(0, caret);
+  const open = prefix.lastIndexOf('[[');
+  if (open < 0 || prefix.slice(open).includes(']]') || prefix.slice(open).includes('\n') || caret - open > 80) return null;
+  return { query: prefix.slice(open + 2), start: open + 2 };
+}
 
 export type Note = { path: string; title: string; modified: number; bytes: number };
 export type Tab = { root: string; path: string; pinned: boolean; editing: boolean };
@@ -278,11 +285,16 @@ export default function AthenaNote(props: Props) {
     const prior = frontmatter(text).body;
     const newline = prior.includes('\r\n') ? '\r\n' : '\n';
     change(text.slice(0, text.length - prior.length) + body.replace(/\n/g, newline));
-    const prefix = body.slice(0, caret);
-    const open = prefix.lastIndexOf('[[');
-    if (open >= 0 && !prefix.slice(open).includes(']]') && !prefix.slice(open).includes('\n') && caret - open <= 80) setSuggest({ query: prefix.slice(open + 2), start: open + 2 });
-    else setSuggest(null);
+    setSuggest(linkAt(body, caret));
     setHighlight(0);
+  }
+  // Cursor levado para fora do link (clique ou setas, sem Enter): a lista fecha. Só digitar a abre.
+  function caretMoved(caret: number) {
+    setSuggest(current => {
+      if (!current) return current;
+      const next = linkAt(editor.current?.state.doc.toString() ?? '', caret);
+      return next && next.start === current.start ? next : null;
+    });
   }
 
   function pick(title: string, alias?: string) {
@@ -370,7 +382,7 @@ export default function AthenaNote(props: Props) {
             <Suspense fallback={<div className="athena-visual-editor" aria-busy="true" />}>
               <AthenaEditor editor={editor} root={tab.root} value={note.body} readOnly={pasting}
               autoFocus={renaming === null && !note.body.trim()} onChange={typed} onPaste={pasteImage}
-              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} />
+              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} onCaret={caretMoved} />
             </Suspense>
           </div>
         : <>

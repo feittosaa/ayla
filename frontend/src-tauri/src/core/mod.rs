@@ -28,6 +28,7 @@ pub mod models;
 pub mod organs;
 pub mod pad;
 pub mod notify;
+pub mod note_offer;
 pub mod runtime;
 pub mod services;
 pub mod store;

@@ -122,16 +122,51 @@ pub fn confirmed_route(message: &str, choice: &str) -> AutoRoute {
 
 /// Classifica antes do envio, para a interface perguntar quando houver dúvida.
 #[tauri::command]
-pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, message: String) -> Result<Value, String> {
+pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, message: String, project: Option<String>, conversation: Option<String>, edit_of: Option<i64>, regenerate: Option<i64>) -> Result<Value, String> {
     let prefs = state.prefs()?;
     let token = tokio_util::sync::CancellationToken::new();
+    if super::understand::guard(&message) {
+        return Ok(json!({"route": "local", "search": false}));
+    }
     // O classificador usa o modelo local: espera a vez como as respostas.
-    let route = if super::understand::guard(&message) { AutoRoute::Local } else {
-        let _gate = state.take_gate(&token, || {}).await?;
-        automatic_route(&state, &prefs, &message, &token).await
-    };
+    let _gate = state.take_gate(&token, || {}).await?;
+    let route = automatic_route(&state, &prefs, &message, &token).await;
+    let search = route == AutoRoute::Search || suggests_web_search(&message);
+    // O pedido usa notas da Athena: elas só vão junto se estiverem tranquilas e a pessoa aceitar.
+    let plan = state.understood.lock().ok().and_then(|kept| kept.clone()).filter(|(m, _)| *m == message).map(|(_, plan)| plan);
+    if let Some(plan) = plan {
+        use super::note_offer::{offer, Offer};
+        let skip = super::note_offer::sibling_paths(&state, conversation.as_deref(), edit_of, regenerate);
+        match offer(&state, &prefs, &message, &plan, project.as_deref(), &skip, &token).await {
+            Offer::Notes(notes, kept) => return Ok(json!({"route": "notes", "notes": notes, "kept": kept, "search": search})),
+            Offer::Kept { title, reason } => return Ok(json!({"route": "local", "search": false,
+                "notice": format!("A nota \"{title}\" ficou neste computador ({reason}), então a resposta também fica.")})),
+            Offer::None => {}
+        }
+    }
     let name = match route { AutoRoute::Local => "local", AutoRoute::Cloud => "cloud", AutoRoute::Search => "search", AutoRoute::Ask => "ask" };
-    Ok(json!({"route": name, "search": suggests_web_search(&message)}))
+    Ok(json!({"route": name, "search": search}))
+}
+
+/// Nuvem manual: as notas que o pedido usa, conferidas neste computador, para a pessoa decidir se
+/// vão junto. Sem modelo local para entender o pedido, nenhuma nota é oferecida.
+#[tauri::command]
+pub async fn cloud_notes_check(state: tauri::State<'_, super::services::Core>, message: String, project: Option<String>, conversation: Option<String>, edit_of: Option<i64>, regenerate: Option<i64>) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let token = tokio_util::sync::CancellationToken::new();
+    if super::understand::guard(&message) { return Ok(json!({"notes": []})); }
+    let Ok(models) = state.models() else { return Ok(json!({"notes": []})) };
+    let Ok(model) = super::models::choose(&models, super::models::Capability::Text, state.budget(&prefs), prefs.context_tokens, None)
+        else { return Ok(json!({"notes": []})) };
+    let _gate = state.take_gate(&token, || {}).await?;
+    let Some(plan) = super::understand::understand(&state, &model, &prefs, json!(message), &token).await else { return Ok(json!({"notes": []})) };
+    use super::note_offer::{offer, Offer};
+    let skip = super::note_offer::sibling_paths(&state, conversation.as_deref(), edit_of, regenerate);
+    Ok(match offer(&state, &prefs, &message, &plan, project.as_deref(), &skip, &token).await {
+        Offer::Notes(notes, kept) => json!({"notes": notes, "kept": kept}),
+        Offer::Kept { title, reason } => json!({"notes": [], "notice": format!("A nota \"{title}\" não vai junto ({reason}).")}),
+        Offer::None => json!({"notes": []}),
+    })
 }
 
 // Apenas a saída final de uma pesquisa concluída pode virar resposta na conversa.

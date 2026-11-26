@@ -33,7 +33,7 @@ use super::understand::{understand, Understanding};
 pub struct Core {
     pub root: PathBuf,
     preferences: Mutex<PreferenceStore>,
-    store: Mutex<Store>,
+    pub(super) store: Mutex<Store>,
     pub runtime: Arc<Runtime>,
     install_gate: tokio::sync::Mutex<()>,
     /// Renovação do acesso ao ChatGPT: uma por vez (o token de renovação é rotativo).
@@ -206,7 +206,7 @@ impl Core {
     }
     /// Raízes da Athena: as notas da própria Athena, os cofres (ex.: do Obsidian) e os projetos da Ayla,
     /// cada projeto com a própria pasta de notas.
-    fn athena_roots(&self, prefs: &Preferences) -> Vec<AthenaRoot> {
+    pub(super) fn athena_roots(&self, prefs: &Preferences) -> Vec<AthenaRoot> {
         let mut out = vec![AthenaRoot { id: "ayla".into(), kind: "ayla", name: "Athena".into(), path: self.root.join("athena"), available: true }];
         for vault in prefs.vaults() {
             let path = PathBuf::from(&vault);
@@ -294,7 +294,7 @@ impl Core {
     /// notas da Athena, os cofres e, numa conversa de projeto, as notas daquele projeto (as de outros
     /// projetos ficam de fora, como a memória). Uma pasta que corresponde ao pedido fornece
     /// trechos de notas distintas. Para os demais pedidos, vale a busca por significado ou palavras.
-    async fn notes_context(&self, prefs: &Preferences, message: &str, collection: bool, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String, String)> {
+    pub(super) async fn notes_context(&self, prefs: &Preferences, message: &str, collection: bool, project: Option<&str>, cancel: &CancellationToken) -> Vec<(String, String, String)> {
         let result: Result<Vec<(String, String, String)>, String> = async {
             let mut roots = Vec::new();
             for root in self.athena_roots(prefs) {
@@ -1205,6 +1205,9 @@ pub struct ChatRequest {
     /// Gerar de novo: id da pergunta que ganha outra resposta (o texto vem do banco).
     #[serde(default)]
     pub regenerate: Option<i64>,
+    /// Notas da Athena aceitas no cartão para irem junto à nuvem (caminhos da busca).
+    #[serde(default)]
+    pub notes: Vec<String>,
     /// Onde o turno entra; resolvido no início da resposta, nunca vindo da interface.
     #[serde(skip)]
     pub placement: store::Placement,
@@ -1214,6 +1217,48 @@ pub struct ChatRequest {
 }
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
+/// Pedido para a resposta virar nota: o modelo escreve a nota inteira, pronta para guardar.
+const NOTE_WRITING: &str = "\n\nA pessoa pediu que esta resposta vire uma nota na Athena; a Ayla guarda a nota sozinha depois. Escreva a nota completa em Markdown, começando por um título com \"# \", com o conteúdo pedido (crie o que ela pediu, usando as notas dela como base quando houver). Não diga que vai criar ou que criou a nota e não escreva frases de conversa antes ou depois. Escreva conteúdo novo, seguindo o que a pessoa pediu: não copie o texto de notas existentes nem de respostas anteriores (use-os só como base para continuar a história).";
+
+/// Guarda a resposta como nota: na pasta da nota em que se baseou (no cofre ou projeto dela) ou,
+/// sem base, nas notas da Athena (ou do projeto da conversa). Devolve a linha que avisa onde ficou.
+fn save_written_note(state: &Core, app: &tauri::AppHandle, request: &ChatRequest, based_on: Option<&str>, text: &str, siblings: &[Value]) -> Result<(String, String, String, i64), String> {
+    use tauri::Emitter;
+    let prefs = state.prefs()?;
+    let project = state.store.lock().map_err(|_| "Dados ocupados")?.conversation_project(&request.conversation).ok().flatten();
+    let content = format!("{}\n", athena::citations_as_links(&athena::without_chatter(text)).trim_end());
+    let modified_of = |file: &std::path::Path| fs::metadata(file).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
+    // Nova versão da mesma resposta: substitui a nota da anterior se ela continua como a Ayla deixou.
+    for sibling in siblings.iter().rev() {
+        let (Some(note), Some(stamp)) = (sibling["note"].as_str(), sibling["modified"].as_i64()) else { continue };
+        let Some((root_id, dir, relative)) = super::note_offer::place(state, &prefs, note, project.as_deref()) else { continue };
+        if modified_of(&dir.join(&relative)) != stamp { continue; }
+        athena::write(&dir, &relative, &content, None)?;
+        let _ = app.emit("notes-updated", json!({"root": root_id, "path": relative}));
+        let name = state.athena_roots(&prefs).into_iter().find(|r| r.id == root_id).map_or_else(|| "Athena".to_string(), |r| r.name);
+        let folder = relative.rsplit_once('/').map(|(f, _)| f.replace('/', " › "));
+        let place = folder.map_or(name.clone(), |f| format!("{name} › {f}"));
+        let title = relative.rsplit('/').next().unwrap_or(&relative).trim_end_matches(".md").to_string();
+        return Ok((format!("\n\n---\nAtualizei a nota **{title}** em {place} com esta versão."), title, note.to_string(), modified_of(&dir.join(&relative))));
+    }
+    let (root_id, dir, folder) = match based_on.and_then(|path| super::note_offer::place(state, &prefs, path, project.as_deref())) {
+        Some((id, dir, relative)) => (id, dir, relative.rsplit_once('/').map(|(folder, _)| folder.to_string()).unwrap_or_default()),
+        None => {
+            let id = project.as_ref().map_or_else(|| "ayla".to_string(), |p| project_root_id(p));
+            let dir = state.athena_path(&prefs, &id)?;
+            (id, dir, String::new())
+        }
+    };
+    let title = athena::heading_of(text).unwrap_or_else(|| quick_title(&request.message));
+    let path = athena::create_in(&dir, &folder, &title, &content)?;
+    let _ = app.emit("notes-updated", json!({"root": root_id, "path": path}));
+    let name = state.athena_roots(&prefs).into_iter().find(|r| r.id == root_id).map_or_else(|| "Athena".to_string(), |r| r.name);
+    let place = if folder.is_empty() { name } else { format!("{name} › {}", folder.replace('/', " › ")) };
+    let title = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".md").to_string();
+    let file = dir.join(&path);
+    Ok((format!("\n\n---\nSalvei como a nota **{title}** em {place}."), title, file.to_string_lossy().into_owned(), modified_of(&file)))
+}
+
 pub fn quick_title(message: &str) -> String {
     let words: Vec<&str> = message.split_whitespace().collect();
     let mut title = words.iter().take(6).copied().collect::<Vec<_>>().join(" ");
@@ -2699,6 +2744,12 @@ fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: V
             Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
             Some("designs") => kept["designs"] = event["items"].clone(),
             Some("ficha") => kept["ficha"] = event["item"].clone(),
+            // Nota criada pela resposta: botão para abri-la na Athena.
+            Some("note_created") => {
+                let mut list = kept["created"].as_array().cloned().unwrap_or_default();
+                list.push(event["item"].clone());
+                kept["created"] = json!(list);
+            }
             Some("sources") => {
                 let mut list = kept["sources"].as_array().cloned().unwrap_or_default();
                 for file in event["files"].as_array().into_iter().flatten() {
@@ -2807,7 +2858,10 @@ pub fn athena_open_external(state: tauri::State<'_, Core>, path: String) -> Resu
         return Err("A Athena abre arquivos .md e .txt".into());
     }
     let prefs = state.prefs()?;
-    for root in state.athena_roots(&prefs).into_iter().filter(|r| r.available) {
+    // A raiz mais funda primeiro: a pasta de um projeto fica dentro das notas da Athena.
+    let mut roots: Vec<_> = state.athena_roots(&prefs).into_iter().filter(|r| r.available).collect();
+    roots.sort_by_key(|r| std::cmp::Reverse(r.path.components().count()));
+    for root in roots {
         let Ok(dir) = root.path.canonicalize() else { continue };
         let Ok(relative) = file.strip_prefix(&dir) else { continue };
         let relative = relative.to_string_lossy().into_owned();
@@ -4582,6 +4636,13 @@ pub async fn chat(
     let mut metric_model = String::from("unresolved");
     let mut origin = None;
     let mut recalled = 0usize;
+    // "Cria uma nota com o próximo gancho…": a resposta é escrita como sempre (notas, nuvem se
+    // aceita) e guardada como nota ao lado da nota em que se baseou (`based_on`).
+    let writing_note = !project_context && athena::writes_note(&request.message) && request.attachments.is_empty();
+    let mut based_on: Option<String> = None;
+    // Gerar de novo/editar: a nota da versão anterior não conta como "o último" e é substituída.
+    let siblings: Vec<Value> = if writing_note { state.store.lock().ok().and_then(|db| db.sibling_notes(&request.conversation, &request.placement).ok()).unwrap_or_default() } else { Vec::new() };
+    let skip: Vec<String> = siblings.iter().filter_map(|n| n["note"].as_str().map(str::to_string)).collect();
     // Imagens e fontes da resposta: vão para a tela e ficam guardadas com ela (`extras`).
     let extras=std::sync::Mutex::new(json!({}));
     let mut result=async{
@@ -4682,7 +4743,7 @@ pub async fn chat(
         let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,request.placement.parent,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
         let referenced=request.references.iter().map(|r|r.content.as_str()).collect::<Vec<_>>().join("\n");
         // Athena: "cria uma nota…" e "salva isso como nota" gravam a nota neste computador.
-        if !project_context && athena::note_request(&request.message)&&request.attachments.is_empty(){
+        if !project_context && !writing_note && athena::note_request(&request.message)&&request.attachments.is_empty(){
             let note_root=match state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).ok().flatten(){Some(p)=>format!("project:{p}"),None=>"ayla".to_string()};
             let root=state.athena_path(&prefs,&note_root)?;
             let last_answer=context.iter().rev().find(|m|m["role"]=="assistant").and_then(|m|m["content"].as_str()).map(str::to_string);
@@ -4700,6 +4761,7 @@ pub async fn chat(
                 Some((title,content))=>{
                     let path=athena::create(&root,&title,&format!("{}\n",content.trim_end()))?;
                     use tauri::Emitter;let _=app.emit("notes-updated",json!({"root":note_root,"path":path}));
+                    send_kept(&events,&extras,json!({"type":"note_created","item":{"title":path.trim_end_matches(".md"),"note":root.join(&path).to_string_lossy()}}));
                     format!("Criei a nota **{}** na Athena.",path.trim_end_matches(".md"))
                 }
                 None if athena::save_last_request(&request.message)=>"Ainda não há uma resposta nesta conversa para salvar como nota.".to_string(),
@@ -4707,6 +4769,7 @@ pub async fn chat(
                     let title=athena::title_from(&request.message);
                     let path=athena::create(&root,&title,&format!("# {title}\n\n"))?;
                     use tauri::Emitter;let _=app.emit("notes-updated",json!({"root":note_root,"path":path}));
+                    send_kept(&events,&extras,json!({"type":"note_created","item":{"title":path.trim_end_matches(".md"),"note":root.join(&path).to_string_lossy()}}));
                     format!("Criei a nota **{}** na Athena, ainda vazia. Abra a Athena na lateral para escrever, ou me diga o conteúdo depois de dois pontos (\"cria uma nota sobre X: …\").",path.trim_end_matches(".md"))
                 }
             };
@@ -4721,6 +4784,8 @@ pub async fn chat(
             && request.attachments.is_empty() && request.references.is_empty() {
             match request.auto_route.as_deref() {
                 Some(choice) => super::research::confirmed_route(&request.message, choice),
+                // Nota escrita a partir das notas: sem a pergunta do cartão, fica neste computador.
+                None if writing_note => AutoRoute::Local,
                 None => super::research::automatic_route(&state,&prefs,&request.message,&token).await,
             }
         } else { AutoRoute::Local };
@@ -4842,7 +4907,8 @@ pub async fn chat(
         let content=with_images(&text,&images)?;
         // Memórias e o contexto do projeto só entram em respostas locais nesta etapa.
         let mut system=prefs.system_prompt().to_string();
-        system.push_str(OPTIONS_GUIDE);
+        // A nota é uma entrega só: sem o formato de opções ordenadas das respostas comuns.
+        system.push_str(if writing_note { NOTE_WRITING } else { OPTIONS_GUIDE });
         if !use_cloud{
             system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você vê a agenda da pessoa (calendário da Athena, com eventos, lembretes e avisos) quando ela pergunta, e cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
             let project = {
@@ -4857,6 +4923,16 @@ pub async fn chat(
             let found=if lookup{state.iris(&prefs,&request.conversation,&search_text,&request.attachments,&token).await}else{Vec::new()};
             if let Some(block)=iris::context_block(&found){system.push_str(&block);send_kept(&events,&extras,json!({"type":"sources","files":iris::sources(&found)}));}
             let notes=if !lookup{Vec::new()}else{state.notes_context(&prefs,&search_text,plan.collection,project.as_ref().map(|p|p.id.as_str()),&token).await};
+            // "O último gancho": a nota mais avançada da série vem primeiro, inteira.
+            let mut notes=notes;
+            let hits:Vec<String>=notes.iter().map(|(_,_,p)|p.clone()).collect();
+            notes.retain(|(_,_,p)|!skip.contains(p));
+            if let Some((path,next))=super::note_offer::series_note(&state,&prefs,&request.message,project.as_ref().map(|p|p.id.as_str()),&hits,&skip){
+                notes.retain(|(_,_,p)|*p!=path);
+                if let Ok(note)=super::note_offer::read(&state,&prefs,&path,project.as_ref().map(|p|p.id.as_str())){notes.insert(0,(note.title,note.text,path));}
+                if writing_note{system.push_str(&format!("\nTítulo da nova nota: {next}."));}
+            }
+            based_on=notes.first().map(|(_,_,path)|path.clone());
             if let Some(block)=athena::context_block(&notes){
                 system.push_str(&block);
                 let mut listed:Vec<Value>=Vec::new();
@@ -4900,13 +4976,25 @@ pub async fn chat(
         let mut report=|event:Value|{if event["type"]=="timings"{timings=event["timings"].clone();return;}if let Some(text)=event["text"].as_str(){if first.is_none(){first=Some(start.elapsed().as_millis() as u64);}partial.push_str(text);chunks+=1;}if events.send(event).is_err(){token.cancel();}};
         if use_cloud{
             metric_model = prefs.cloud_model.clone();
+            // Notas que a pessoa aceitou enviar: relidas e conferidas de novo agora.
+            let mut outgoing_message=request.message.clone();
+            if !request.notes.is_empty(){
+                let project=state.store.lock().map_err(|_|"Dados ocupados")?.conversation_project(&request.conversation).map_err(|_|"Conversa não encontrada")?;
+                let notes=super::note_offer::confirmed(&state,&prefs,&request.notes,project.as_deref())?;
+                based_on=request.notes.first().cloned();
+                if writing_note{if let Some((_,next))=super::note_offer::series_note(&state,&prefs,&request.message,project.as_deref(),&request.notes,&skip){outgoing_message.push_str(&format!("\n\nTítulo da nova nota: {next}."));}}
+                outgoing_message.push_str(&super::note_offer::block(&notes));
+                let listed:Vec<Value>=notes.iter().map(|n|json!({"id":format!("nota:{}",n.path),"name":format!("{} (nota enviada)",n.title),"pages":[],"note":n.path})).collect();
+                send_kept(&events,&extras,json!({"type":"sources","files":listed}));
+            }
+            // As notas aceitas já passaram pela conferência delas (formato + modelo local) acima.
             if !request.automatic {
                 let gate=policy::cloud_gate(prefs.usage_mode,request.sensitivity,request.reviewed,consent,request.request_cloud,&format!("{}\n{}\n{}",prefs.personality,request.message,referenced));
                 if !gate.allowed { return Err(gate.reason); }
                 if request.personality_preview.as_deref()!=Some(prefs.system_prompt()) { return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into()); }
             }
             let effort=match request.effort.as_deref(){None|Some("")=>None,Some(e@("low"|"medium"|"high"))=>Some(e),Some(_)=>return Err("Esforço inválido".into())};
-            // Nunca enviar histórico, memórias, anexos ou dados de órgãos.
+            // Nunca enviar histórico, anexos ou dados de órgãos; memórias e notas só as revistas ou aceitas acima.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
             // Modelo automático por padrão (decisão do usuário, 21/11/2026): o escolhido nos ajustes
@@ -4923,7 +5011,7 @@ pub async fn chat(
             metric_model = cloud_model.clone();
             // Referências: só memórias públicas, iguais ao revisado e do escopo desta conversa.
             let mut instructions=if request.automatic { include_str!("persona.txt").trim() } else { prefs.system_prompt() }.to_owned();
-            instructions.push_str(OPTIONS_GUIDE);
+            instructions.push_str(if writing_note { NOTE_WRITING } else { OPTIONS_GUIDE });
             if !request.references.is_empty(){
                 let db=state.store.lock().map_err(|_|"Dados ocupados")?;
                 let project=db.conversation_project(&request.conversation).map_err(|_|"Conversa não encontrada")?;
@@ -4935,10 +5023,10 @@ pub async fn chat(
             origin = Some(if web_search { "cloud_search" } else { "cloud" });
             if web_search {
                 let _ = events.send(json!({"type":"status","text":"Pesquisando fontes na web…"}));
-                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &request.message)?;
+                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &outgoing_message)?;
                 cloud::stream_search(outgoing, &token, super::research::wants_youtube(&request.message), &mut report).await?;
             } else {
-                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&request.message)?;
+                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&outgoing_message)?;
                 cloud::stream(outgoing,api,&token,&mut report).await?;
             }
         }else{
@@ -4956,6 +5044,20 @@ pub async fn chat(
         }
         Ok(())
     }.await;
+    // Cortada no limite de geração: o que já foi escrito vira nota, avisando do corte.
+    let cut_short = result.as_ref().is_err_and(|e| e.contains("limite de geração"));
+    if writing_note && (result.is_ok() || cut_short) && !token.is_cancelled() && !partial.trim().is_empty() {
+        let text = if cut_short { format!("{}\n\n> A resposta foi cortada no limite de geração; continue daqui.", partial.trim_end()) } else { partial.clone() };
+        let line = match save_written_note(&state, &app, &request, based_on.as_deref(), &text, &siblings) {
+            Ok((line, title, note, modified)) => {
+                send_kept(&events, &extras, json!({"type":"note_created","item":{"title":title,"note":note,"modified":modified}}));
+                line
+            }
+            Err(error) => format!("\n\n---\nNão consegui salvar a nota: {error}"),
+        };
+        partial.push_str(&line);
+        let _ = events.send(json!({"type":"token","text":line}));
+    }
     if !partial.is_empty() {
         match state.store.lock() {
             Ok(db) => {
@@ -6212,6 +6314,38 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap().unwrap().unwrap();
         drop(core);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn notas_para_a_nuvem_so_saem_de_raizes_visiveis_e_conferidas() {
+        use super::super::note_offer::{confirmed, read, MAX_CHARS};
+        let root = std::env::temp_dir().join(format!("ayla-notas-nuvem-{}", store::id()));
+        let core = Core::open(root.clone()).unwrap();
+        let project = core.store.lock().unwrap().create_project("Mesa", "").unwrap();
+        let vault = root.join("rpg");
+        let prefs = Preferences { athena_vaults: vec![vault.to_string_lossy().into_owned()], ..Preferences::default() };
+        let write = |file: std::path::PathBuf, content: &str| { fs::create_dir_all(file.parent().unwrap()).unwrap(); fs::write(&file, content).unwrap(); file.to_string_lossy().into_owned() };
+        let gancho = write(vault.join("Ganchos/Gancho 3.md"), "O navio fantasma aparece no porto.");
+        let longa = write(vault.join("Longa.md"), &"á".repeat(MAX_CHARS + 50));
+        let sensivel = write(vault.join("Contatos.md"), "Telefone do mestre: 11 98765-4321");
+        let fora = write(root.join("solta/Gancho.md"), "fora da Athena");
+        let dir = project_dir(&root, &core.store.lock().unwrap().project(&project.id).unwrap().unwrap());
+        let do_projeto = write(dir.join("Plano.md"), "nota do projeto");
+
+        let note = read(&core, &prefs, &gancho, None).unwrap();
+        assert_eq!((note.title.as_str(), note.cut), ("Gancho 3", false));
+        let note = read(&core, &prefs, &longa, None).unwrap();
+        assert!(note.cut && note.text.chars().filter(|c| *c == 'á').count() == MAX_CHARS && note.text.contains("o meio da nota"));
+        assert!(read(&core, &prefs, &fora, None).is_err(), "fora das raízes da Athena");
+        assert!(read(&core, &prefs, &do_projeto, None).is_err(), "nota de projeto fora da conversa dele");
+        assert!(read(&core, &prefs, &do_projeto, Some(&project.id)).is_ok());
+        assert!(read(&core, &prefs, &vault.join("../solta/Gancho.md").to_string_lossy(), None).is_err());
+
+        assert_eq!(confirmed(&core, &prefs, std::slice::from_ref(&gancho), None).unwrap().len(), 1);
+        assert!(confirmed(&core, &prefs, &[sensivel], None).unwrap_err().contains("número longo"));
+        assert!(confirmed(&core, &prefs, &[gancho.clone(), gancho.clone(), gancho], None).is_err(), "no máximo duas");
+        drop(core);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
