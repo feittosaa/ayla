@@ -2975,45 +2975,54 @@ pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Opt
 fn trash_image(path: &std::path::Path) -> Result<(), String> {
     use webkit2gtk::gio::{self, prelude::FileExt};
     gio::File::for_path(path).trash(gio::Cancellable::NONE)
-        .map_err(|_| "Não foi possível mover a imagem para a lixeira do sistema.".into())
+        .map_err(|_| "Não foi possível mover para a lixeira do sistema.".into())
 }
 
 #[tauri::command]
 pub async fn iris_trash_image(app: tauri::AppHandle, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<(), String> {
     use tauri::Manager;
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<Core>();
-        match (file, root, path) {
-            (Some(id), None, None) => {
-                let db = state.store.lock().map_err(|_| "Dados ocupados")?;
-                let file = db.file(&id).map_err(|_| "Falha ao localizar a imagem")?.ok_or("Imagem não encontrada")?;
-                if !matches!(file.kind, Kind::Image | Kind::Gif) {
-                    return Err("Selecione uma imagem".into());
-                }
-                trash_image(&state.root.join(file.path))?;
-                db.delete_file(&id).map_err(|_| "A imagem foi para a lixeira, mas a Ayla não conseguiu atualizar o registro.".to_string())?;
-                Ok(())
+    tauri::async_runtime::spawn_blocking(move || trash_media(&app.state::<Core>(), &file, &root, &path, true))
+        .await.map_err(|_| "Falha ao enviar a imagem para a lixeira")?
+}
+
+/// Manda uma mídia da Iris para a lixeira do sistema: arquivo guardado na Ayla (some também do
+/// registro) ou raiz + caminho. `images_only`: o visualizador só exclui imagens.
+fn trash_media(state: &Core, file: &Option<String>, root: &Option<String>, path: &Option<String>, images_only: bool) -> Result<(), String> {
+    let accepted = |mime: &str| if images_only { mime.starts_with("image/") } else { true };
+    let wrong = if images_only { "Selecione uma imagem" } else { "Selecione uma imagem, um vídeo ou um PDF" };
+    match (file, root, path) {
+        (Some(id), None, None) => {
+            let db = state.store.lock().map_err(|_| "Dados ocupados")?;
+            let file = db.file(id).map_err(|_| "Falha ao localizar o arquivo")?.ok_or("Arquivo não encontrado")?;
+            if !stored_mime(&file).is_some_and(accepted) {
+                return Err(wrong.into());
             }
-            (None, Some(root), Some(path)) => {
-                let target = if root.starts_with("iris:") {
-                    readable_media_path(&state, &root, &path)?
-                } else {
-                    let dir = state.athena_path(&state.prefs()?, &root)?.canonicalize().map_err(|_| "Pasta indisponível")?;
-                    let relative = athena::safe_folder(&path).ok_or("Caminho inválido")?;
-                    let target = dir.join(relative);
-                    if target.canonicalize().ok().as_ref() != Some(&target) || !target.is_file() {
-                        return Err("Imagem não encontrada".into());
-                    }
-                    target
-                };
-                if !athena::attachment_mime(&target).is_some_and(|mime| mime.starts_with("image/")) {
-                    return Err("Selecione uma imagem".into());
-                }
-                trash_image(&target)
-            }
-            _ => Err("Selecione uma imagem".into()),
+            trash_image(&state.root.join(&file.path))?;
+            db.delete_file(id).map_err(|_| "O arquivo foi para a lixeira, mas a Ayla não conseguiu atualizar o registro.".to_string())?;
+            Ok(())
         }
-    }).await.map_err(|_| "Falha ao enviar a imagem para a lixeira")?
+        (None, Some(root), Some(path)) => {
+            let target = if linked_root(root) {
+                readable_media_path(state, root, path)?
+            } else {
+                let dir = state.athena_path(&state.prefs()?, root)?.canonicalize().map_err(|_| "Pasta indisponível")?;
+                if protected(&dir, path).is_some() {
+                    return Err("Arquivos de pastas protegidas só saem pela Athena".into());
+                }
+                let relative = athena::safe_folder(path).ok_or("Caminho inválido")?;
+                let target = dir.join(relative);
+                if target.canonicalize().ok().as_ref() != Some(&target) || !target.is_file() {
+                    return Err("Arquivo não encontrado".into());
+                }
+                target
+            };
+            if !athena::attachment_mime(&target).is_some_and(accepted) {
+                return Err(wrong.into());
+            }
+            trash_image(&target)
+        }
+        _ => Err(wrong.into()),
+    }
 }
 
 /// Origem de uma ampliação ou edição na Iris: arquivo guardado na Ayla ou raiz + caminho. Arquivos
@@ -3322,74 +3331,29 @@ impl Drop for UpscaleTurn {
 #[tauri::command]
 pub async fn iris_upscale(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>,
     modelo: String, scale: u32, request_id: String, events: Channel<Value>) -> Result<Value, String> {
-    use super::upscale;
     let _turn = UpscaleTurn::take()?;
-    // Modelo do Upscayl já instalado ("upscayl:<nome>") ou do Real-ESRGAN baixado pela Ayla.
-    let (binary, models, model) = match modelo.strip_prefix("upscayl:") {
-        Some(name) => {
-            let found = upscale::find_upscayl().ok_or("O Upscayl não foi encontrado neste computador")?;
-            let model = upscale::upscayl_models(&found.models).into_iter().find(|m| m == name).ok_or("Modelo do Upscayl não encontrado")?;
-            (found.binary, found.models, model)
-        }
-        None => {
-            let binary = runtime::find_binary(&state.root.join("runtimes").join("upscale"), "realesrgan-ncnn-vulkan").ok_or("Baixe o upscale primeiro")?;
-            let models = binary.parent().map(|dir| dir.join("models")).ok_or("Upscale incompleto")?;
-            (binary, models, upscale::model_name(&modelo).ok_or("Modelo inválido")?.to_string())
-        }
-    };
+    let tool = upscaler(&state, &modelo)?;
     // Origem e pasta da cópia: ao lado do original; arquivo guardado na Ayla vira outro arquivo guardado.
     let (source, name, stored) = iris_source(&state, &file, &root, &path, "Imagens protegidas com senha não passam por upscale")?;
-    let mime = athena::attachment_mime(&source).unwrap_or("");
-    if !mime.starts_with("image/") || mime == "image/gif" {
-        return Err("Só imagens paradas passam por upscale (GIF fica de fora)".into());
-    }
-    let (width, height) = upscale::dimensions(&source).ok_or("Não foi possível ler a imagem")?;
-    upscale::check_size(width, height, scale)?;
-    let extension = match upscale::output_extension(&source) { "webp" if scale != upscale::NATIVE_SCALE && !upscale::writes_webp() => "png", other => other };
     let work_dir = if stored.is_some() { state.root.join("work") } else { source.parent().ok_or("Pasta inválida")?.to_path_buf() };
-    fs::create_dir_all(&work_dir).map_err(|_| "Não foi possível preparar a pasta")?;
-    let output = upscale::working_file(&work_dir, extension);
     let token = state.job(&request_id)?;
-    let (input, converted) = if upscale::reads_directly(&source) { (source.clone(), None) } else {
-        let temporary = upscale::working_file(&work_dir, "png");
-        (temporary.clone(), Some(temporary))
-    };
-    // 2x e 3x: amplia em 4x num PNG oculto e reduz depois (ver upscale::NATIVE_SCALE).
-    let native = (scale != upscale::NATIVE_SCALE).then(|| upscale::working_file(&work_dir, "png"));
     let job = {
-        let (input, output, converted, source, native) = (input.clone(), output.clone(), converted.clone(), source.clone(), native.clone());
+        let (source, work_dir) = (source.clone(), work_dir.clone());
         tauri::async_runtime::spawn_blocking(move || {
-            if let Some(temporary) = &converted { upscale::to_png(&source, temporary)?; }
             let mut last = -1.0;
-            let mut report = |percent: f64| {
+            upscale_into(&tool, &source, &work_dir, scale, &token, |percent| {
                 if percent - last >= 1.0 || percent >= 100.0 { last = percent; let _ = events.send(json!({"type": "progress", "percent": percent})); }
-            };
-            match &native {
-                None => upscale::run(&binary, &models, &input, &output, &model, &token, report),
-                Some(native) => {
-                    upscale::run(&binary, &models, &input, native, &model, &token, |p| report(p * 0.95))?;
-                    upscale::shrink(native, &output, width * scale, height * scale)?;
-                    report(100.0);
-                    Ok(())
-                }
-            }
+            })
         })
     };
     let result = job.await.map_err(|_| "O upscale parou".to_string()).and_then(|r| r);
     state.finish(&request_id);
-    if let Some(temporary) = &converted { let _ = fs::remove_file(temporary); }
-    if let Some(native) = &native { let _ = fs::remove_file(native); }
-    if let Err(error) = result { let _ = fs::remove_file(&output); return Err(error); }
+    let (output, extension) = result?;
     let finished = (|| -> Result<Value, String> {
         match stored {
-            Some(info) => {
-                let new_name = upscale::output_name(&info.name, scale, extension, |_| false);
-                let saved = state.store_file(&new_name, |dest| fs::rename(&output, dest).or_else(|_| fs::copy(&output, dest).map(|_| ()))
-                    .map_err(|_| "Não foi possível guardar a imagem".to_string()).and_then(|_| fs::metadata(dest).map(|m| m.len()).map_err(|_| "Imagem do upscale indisponível".to_string())), info.project_id.clone(), true)?;
-                Ok(json!({"file": saved.id, "name": saved.name}))
-            }
+            Some(info) => keep_stored_upscale(&state, &info, &output, scale, extension),
             None => {
-                let new_name = upscale::output_name(&name, scale, extension, |n| work_dir.join(n).exists());
+                let new_name = super::upscale::output_name(&name, scale, extension, |n| work_dir.join(n).exists());
                 fs::rename(&output, work_dir.join(&new_name)).map_err(|_| "Não foi possível salvar a imagem do upscale")?;
                 let relative = path.as_deref().map(|p| p.rsplit_once('/').map_or(new_name.clone(), |(dir, _)| format!("{dir}/{new_name}")));
                 Ok(json!({"root": root, "path": relative, "name": new_name}))
@@ -3398,6 +3362,410 @@ pub async fn iris_upscale(state: tauri::State<'_, Core>, file: Option<String>, r
     })();
     let _ = fs::remove_file(&output);
     finished
+}
+
+/// Programa, pasta dos modelos e modelo do upscale: do Upscayl já instalado ("upscayl:<nome>") ou
+/// do Real-ESRGAN baixado pela Ayla ("foto" ou "anime").
+type Upscaler = (PathBuf, PathBuf, String);
+fn upscaler(state: &Core, modelo: &str) -> Result<Upscaler, String> {
+    use super::upscale;
+    match modelo.strip_prefix("upscayl:") {
+        Some(name) => {
+            let found = upscale::find_upscayl().ok_or("O Upscayl não foi encontrado neste computador")?;
+            let model = upscale::upscayl_models(&found.models).into_iter().find(|m| m == name).ok_or("Modelo do Upscayl não encontrado")?;
+            Ok((found.binary, found.models, model))
+        }
+        None => {
+            let binary = runtime::find_binary(&state.root.join("runtimes").join("upscale"), "realesrgan-ncnn-vulkan").ok_or("Baixe o upscale primeiro")?;
+            let models = binary.parent().map(|dir| dir.join("models")).ok_or("Upscale incompleto")?;
+            Ok((binary, models, upscale::model_name(modelo).ok_or("Modelo inválido")?.to_string()))
+        }
+    }
+}
+
+/// Amplia `source` num arquivo oculto dentro de `work_dir` e devolve esse arquivo e a extensão
+/// final. Confere o tipo e o tamanho antes; limpa os temporários (e a saída, se falhar). Bloqueia:
+/// chamar fora do laço assíncrono.
+fn upscale_into(tool: &Upscaler, source: &std::path::Path, work_dir: &std::path::Path, scale: u32, token: &CancellationToken, mut report: impl FnMut(f64)) -> Result<(PathBuf, &'static str), String> {
+    use super::upscale;
+    let mime = athena::attachment_mime(source).unwrap_or("");
+    if !mime.starts_with("image/") || mime == "image/gif" {
+        return Err("Só imagens paradas passam por upscale (GIF fica de fora)".into());
+    }
+    let (width, height) = upscale::dimensions(source).ok_or("Não foi possível ler a imagem")?;
+    upscale::check_size(width, height, scale)?;
+    let extension = match upscale::output_extension(source) { "webp" if scale != upscale::NATIVE_SCALE && !upscale::writes_webp() => "png", other => other };
+    fs::create_dir_all(work_dir).map_err(|_| "Não foi possível preparar a pasta")?;
+    let output = upscale::working_file(work_dir, extension);
+    let converted = (!upscale::reads_directly(source)).then(|| upscale::working_file(work_dir, "png"));
+    let input = converted.clone().unwrap_or_else(|| source.to_path_buf());
+    // 2x e 3x: amplia em 4x num PNG oculto e reduz depois (ver upscale::NATIVE_SCALE).
+    let native = (scale != upscale::NATIVE_SCALE).then(|| upscale::working_file(work_dir, "png"));
+    let (binary, models, model) = tool;
+    let result = (|| {
+        if let Some(temporary) = &converted { upscale::to_png(source, temporary)?; }
+        match &native {
+            None => upscale::run(binary, models, &input, &output, model, token, &mut report),
+            Some(native) => {
+                upscale::run(binary, models, &input, native, model, token, |p| report(p * 0.95))?;
+                upscale::shrink(native, &output, width * scale, height * scale)?;
+                report(100.0);
+                Ok(())
+            }
+        }
+    })();
+    if let Some(temporary) = &converted { let _ = fs::remove_file(temporary); }
+    if let Some(native) = &native { let _ = fs::remove_file(native); }
+    if let Err(error) = result { let _ = fs::remove_file(&output); return Err(error); }
+    Ok((output, extension))
+}
+
+/// Upscale de um arquivo guardado na Ayla: vira outro arquivo guardado, no mesmo projeto.
+fn keep_stored_upscale(state: &Core, info: &FileInfo, output: &std::path::Path, scale: u32, extension: &str) -> Result<Value, String> {
+    let new_name = super::upscale::output_name(&info.name, scale, extension, |_| false);
+    let saved = state.store_file(&new_name, |dest| fs::rename(output, dest).or_else(|_| fs::copy(output, dest).map(|_| ()))
+        .map_err(|_| "Não foi possível guardar a imagem".to_string()).and_then(|_| fs::metadata(dest).map(|m| m.len()).map_err(|_| "Imagem do upscale indisponível".to_string())), info.project_id.clone(), true)?;
+    Ok(json!({"file": saved.id, "name": saved.name}))
+}
+
+/// Item escolhido na grade da Iris: arquivo guardado na Ayla ou raiz + caminho.
+#[derive(Deserialize)]
+pub struct IrisTarget { file: Option<String>, root: Option<String>, path: Option<String> }
+/// Pasta escolhida na lateral da Iris (`path` vazio = a raiz inteira).
+#[derive(Deserialize)]
+pub struct IrisFolder { root: String, path: String }
+
+/// Pasta de uma raiz da Iris (conectada no Sistema ou da Athena), conferida no disco.
+#[derive(Debug)]
+struct IrisPlace { root_dir: PathBuf, dir: PathBuf, internal: bool, athena: bool }
+
+/// `whole`: a pasta inteira vai mudar de lugar ou para a lixeira, então nada dentro dela pode estar
+/// protegido. Sem `whole`, basta ela não estar dentro de uma pasta protegida.
+fn iris_place(state: &Core, prefs: &Preferences, root: &str, path: &str, whole: bool) -> Result<IrisPlace, String> {
+    let (root_dir, internal, athena) = if root.starts_with("iris:") {
+        let dir = prefs.system_folders().into_iter().find(|d| iris_root_id(d) == root && !has_hidden_component(d)).ok_or("Pasta conectada indisponível")?;
+        (dir, false, false)
+    } else {
+        let kind = state.athena_roots(prefs).into_iter().find(|r| r.id == root).map(|r| r.kind).ok_or("Esta pasta não está mais na Ayla")?;
+        (state.athena_path(prefs, root)?, kind != "vault", true)
+    };
+    let root_dir = root_dir.canonicalize().map_err(|_| "Pasta indisponível")?;
+    let relative = athena::safe_folder(path).filter(|r| !has_hidden_component(r)).ok_or("Pasta inválida")?;
+    let dir = root_dir.join(&relative);
+    if dir.canonicalize().ok().as_ref() != Some(&dir) || !dir.is_dir() {
+        return Err("Pasta não encontrada".into());
+    }
+    if athena {
+        if athena_lock::protected_folder_of(&root_dir, path).is_some() {
+            return Err("Pastas protegidas ficam de fora; use a Athena".into());
+        }
+        if whole && athena_lock::protected_folders(&root_dir).into_iter().chain(athena_lock::protected_files(&root_dir))
+            .any(|f| super::iris_batch::covered(&[path], &f)) {
+            return Err("Esta pasta tem arquivos protegidos; mova ou exclua pela Athena".into());
+        }
+    }
+    Ok(IrisPlace { root_dir, dir, internal, athena })
+}
+
+impl IrisPlace {
+    /// Pasta das cópias de um upscale de `dir` (esta pasta ou uma de dentro): ao lado dela. Na
+    /// pasta principal da Athena da Ayla ou de um projeto, que ficam nos dados da Ayla, vai dentro.
+    fn upscale_dir(&self, dir: &std::path::Path, scale: u32) -> Result<PathBuf, String> {
+        if self.internal && dir == self.root_dir {
+            return Ok(dir.join(super::iris_batch::upscale_folder_name("Imagens", scale)));
+        }
+        super::iris_batch::upscale_dir(dir, scale)
+    }
+    /// A pasta das cópias de `dir` fica fora desta raiz (upscale da pasta principal)?
+    fn upscale_outside(&self, dir: &std::path::Path) -> bool {
+        !self.internal && dir == self.root_dir
+    }
+}
+
+/// Conecta na Iris a pasta das cópias de um upscale da pasta principal (que fica fora dela), para
+/// o resultado aparecer direto na Iris. Não conecta se ela já estiver dentro de uma pasta conectada
+/// ou de uma raiz da Athena (as imagens apareceriam duas vezes). Devolve se conectou.
+fn iris_connect_output(state: &Core, dir: &std::path::Path) -> Result<bool, String> {
+    let dir = dir.canonicalize().map_err(|_| "Pasta indisponível")?;
+    if has_hidden_component(&dir) {
+        return Ok(false);
+    }
+    let store = state.preferences.lock().map_err(|_| "Configuração ocupada")?;
+    let mut prefs = store.load().map_err(|_| "Não foi possível ler a configuração")?;
+    let mut folders = prefs.system_folders();
+    let inside = |root: &std::path::Path| root.canonicalize().is_ok_and(|root| dir.starts_with(root));
+    if folders.iter().any(|f| inside(f)) || state.athena_roots(&prefs).iter().any(|r| r.available && inside(&r.path)) {
+        return Ok(false);
+    }
+    folders.push(dir);
+    prefs.iris_folder = None;
+    prefs.iris_folders = folders;
+    store.save(&prefs).map_err(|_| "Não foi possível conectar a pasta".to_string())?;
+    Ok(true)
+}
+
+fn last_part(path: &str) -> String {
+    path.trim_end_matches('/').rsplit('/').next().filter(|p| !p.is_empty()).unwrap_or(path).to_string()
+}
+
+/// Rótulo de um item no relatório do lote.
+fn target_label(state: &Core, target: &IrisTarget) -> String {
+    match (&target.file, &target.path) {
+        (Some(id), _) => state.store.lock().ok().and_then(|db| db.file(id).ok().flatten()).map_or_else(|| "arquivo".into(), |f| f.name),
+        (None, Some(path)) => last_part(path),
+        _ => "arquivo".into(),
+    }
+}
+
+/// O item está dentro de uma das pastas também escolhidas (já entra com a pasta)?
+fn inside_chosen(folders: &[IrisFolder], target: &IrisTarget) -> bool {
+    let (Some(root), Some(path), None) = (&target.root, &target.path, &target.file) else { return false };
+    let chosen: Vec<&str> = folders.iter().filter(|f| &f.root == root).map(|f| f.path.as_str()).collect();
+    super::iris_batch::covered(&chosen, path)
+}
+
+/// Pastas escolhidas sem as que já estão dentro de outra escolhida.
+fn outer_folders(folders: &[IrisFolder]) -> Vec<&IrisFolder> {
+    folders.iter().filter(|f| !folders.iter().any(|o| !std::ptr::eq(*f, o) && o.root == f.root && o.path != f.path
+        && super::iris_batch::covered(&[o.path.as_str()], &f.path))).collect()
+}
+
+/// Upscale em lote: imagens soltas e pastas inteiras (com as subpastas). As cópias vão para uma
+/// pasta nova ao lado da pasta de origem ("Fotos (upscale 4x)", com a mesma estrutura de
+/// subpastas); arquivos guardados na Ayla viram outros arquivos guardados. Uma imagem por vez;
+/// as que não passam ficam no relatório. Progresso: {type: "progress", done, total, name, percent}.
+#[tauri::command]
+pub async fn iris_upscale_batch(state: tauri::State<'_, Core>, items: Vec<IrisTarget>, folders: Vec<IrisFolder>,
+    modelo: String, scale: u32, request_id: String, events: Channel<Value>) -> Result<Value, String> {
+    use super::iris_batch;
+    // Pasta do arquivo, pasta-base "… (upscale 4x)" e se a base fica fora da raiz (conectar ao terminar).
+    enum Out { Dir(PathBuf, PathBuf, bool), Stored(Box<FileInfo>) }
+    let _turn = UpscaleTurn::take()?;
+    if !(2..=4).contains(&scale) {
+        return Err("Escolha 2x, 3x ou 4x".into());
+    }
+    let tool = upscaler(&state, &modelo)?;
+    let prefs = state.prefs()?;
+    let mut skipped: Vec<Value> = Vec::new();
+    // (origem, rótulo, saída). Saída em pasta: (pasta do arquivo, pasta-base "… (upscale 4x)").
+    let mut jobs: Vec<(PathBuf, String, Out)> = Vec::new();
+    for folder in outer_folders(&folders) {
+        let label = if folder.path.is_empty() { "pasta principal".to_string() } else { last_part(&folder.path) };
+        let place = match iris_place(&state, &prefs, &folder.root, &folder.path, false) {
+            Ok(place) => place,
+            Err(reason) => { skipped.push(json!({"name": label, "reason": reason})); continue; }
+        };
+        let base = place.upscale_dir(&place.dir, scale)?;
+        let outside = place.upscale_outside(&place.dir);
+        let found = iris_batch::images_in(&place.dir,
+            |p| athena::attachment_mime(p).is_some_and(|m| m.starts_with("image/") && m != "image/gif" && m != "image/svg+xml"),
+            athena_lock::is_protected);
+        if found.is_empty() {
+            skipped.push(json!({"name": label, "reason": "Nenhuma imagem para upscale nesta pasta"}));
+        }
+        for (source, relative) in found {
+            let dir = relative.parent().map_or(base.clone(), |p| base.join(p));
+            jobs.push((source, relative.to_string_lossy().into_owned(), Out::Dir(dir, base.clone(), outside)));
+        }
+    }
+    for item in items.iter().filter(|item| !inside_chosen(&folders, item)) {
+        let label = target_label(&state, item);
+        let found = iris_source(&state, &item.file, &item.root, &item.path, "Imagens protegidas com senha não passam por upscale").and_then(|(source, _, stored)| {
+            let out = match (stored, &item.root) {
+                (Some(info), _) => Out::Stored(Box::new(info)),
+                (None, Some(root)) => {
+                    let place = iris_place(&state, &prefs, root, "", false)?;
+                    let parent = source.parent().ok_or("Pasta inválida")?;
+                    let base = place.upscale_dir(parent, scale)?;
+                    Out::Dir(base.clone(), base, place.upscale_outside(parent))
+                }
+                _ => return Err("Arquivo não informado".to_string()),
+            };
+            Ok((source, out))
+        });
+        match found {
+            Ok((source, out)) => jobs.push((source, label, out)),
+            Err(reason) => skipped.push(json!({"name": label, "reason": reason})),
+        }
+    }
+    if jobs.len() > iris_batch::MAX_IMAGES {
+        return Err(format!("São mais de {} imagens; escolha menos de uma vez", iris_batch::MAX_IMAGES));
+    }
+    let total = jobs.len();
+    let token = state.job(&request_id)?;
+    let (mut done, mut interrupted) = (0, false);
+    let mut created: Vec<PathBuf> = Vec::new();
+    let mut saved_in: Vec<String> = Vec::new();
+    let mut to_connect: Vec<PathBuf> = Vec::new();
+    for (index, (source, label, out)) in jobs.into_iter().enumerate() {
+        if token.is_cancelled() { interrupted = true; break; }
+        let _ = events.send(json!({"type": "progress", "done": index, "total": total, "name": label, "percent": 0}));
+        let work_dir = match &out {
+            Out::Dir(dir, _, _) => {
+                // Lembra as pastas criadas agora, para apagar as que ficarem vazias.
+                let mut missing: Vec<PathBuf> = dir.ancestors().take_while(|d| !d.exists()).map(|d| d.to_path_buf()).collect();
+                missing.reverse();
+                created.extend(missing);
+                dir.clone()
+            }
+            Out::Stored(_) => state.root.join("work"),
+        };
+        let job = {
+            let (tool, source, work_dir, token, events, label) = (tool.clone(), source.clone(), work_dir.clone(), token.clone(), events.clone(), label.clone());
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut last = -1.0;
+                upscale_into(&tool, &source, &work_dir, scale, &token, |percent| {
+                    if percent - last >= 1.0 || percent >= 100.0 {
+                        last = percent;
+                        let _ = events.send(json!({"type": "progress", "done": index, "total": total, "name": label, "percent": percent}));
+                    }
+                })
+            })
+        };
+        let result = job.await.map_err(|_| "O upscale parou".to_string()).and_then(|r| r).and_then(|(output, extension)| {
+            let kept = match &out {
+                Out::Stored(info) => keep_stored_upscale(&state, info, &output, scale, extension).map(|_| ()),
+                Out::Dir(dir, base, outside) => {
+                    if *outside && !to_connect.contains(base) { to_connect.push(base.clone()); }
+                    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "imagem".into());
+                    let name = iris_batch::free_name(dir, &stem, extension);
+                    fs::rename(&output, dir.join(name)).map_err(|_| "Não foi possível salvar a imagem do upscale".to_string()).map(|_| {
+                        let folder = base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        if !saved_in.contains(&folder) { saved_in.push(folder); }
+                    })
+                }
+            };
+            let _ = fs::remove_file(&output);
+            kept
+        });
+        match result {
+            Ok(()) => done += 1,
+            Err(_) if token.is_cancelled() => { interrupted = true; break; }
+            Err(reason) => skipped.push(json!({"name": label, "reason": reason})),
+        }
+    }
+    state.finish(&request_id);
+    for dir in created.iter().rev() {
+        let _ = fs::remove_dir(dir);
+    }
+    let connected: Vec<String> = to_connect.iter().filter(|dir| dir.is_dir() && iris_connect_output(&state, dir).unwrap_or(false))
+        .filter_map(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+    Ok(json!({"done": done, "total": total, "skipped": skipped, "interrupted": interrupted, "folders": saved_in, "connected": connected}))
+}
+
+/// Lixeira em lote: itens (imagens, vídeos e PDFs) e pastas inteiras, com tudo dentro. A pasta
+/// conectada em si não vai para a lixeira (para isso há o Desconectar).
+#[tauri::command]
+pub async fn iris_trash_batch(app: tauri::AppHandle, items: Vec<IrisTarget>, folders: Vec<IrisFolder>) -> Result<Value, String> {
+    use tauri::{Emitter, Manager};
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Core>();
+        let prefs = state.prefs()?;
+        let (mut done, mut skipped, mut athena_changed) = (0, Vec::<Value>::new(), false);
+        for folder in outer_folders(&folders) {
+            let label = last_part(&folder.path);
+            let result = if folder.path.is_empty() {
+                Err("A pasta principal não vai para a lixeira; para tirar da Iris, use Desconectar".to_string())
+            } else {
+                iris_place(&state, &prefs, &folder.root, &folder.path, true).and_then(|place| {
+                    athena_changed |= place.athena;
+                    trash_image(&place.dir)
+                })
+            };
+            match result { Ok(()) => done += 1, Err(reason) => skipped.push(json!({"name": label, "reason": reason})) }
+        }
+        for item in items.iter().filter(|item| !inside_chosen(&folders, item)) {
+            match trash_media(&state, &item.file, &item.root, &item.path, false) {
+                Ok(()) => { done += 1; athena_changed |= item.root.as_deref().is_some_and(|r| !linked_root(r)); }
+                Err(reason) => skipped.push(json!({"name": target_label(&state, item), "reason": reason})),
+            }
+        }
+        if athena_changed { let _ = app.emit("notes-updated", json!({})); }
+        Ok(json!({"done": done, "skipped": skipped}))
+    }).await.map_err(|_| "Falha ao mover para a lixeira")?
+}
+
+/// Mover em lote para uma pasta (`root` + `path`) das conectadas no Sistema ou dos cofres. Dentro do
+/// mesmo cofre, usa o mover da Athena (os links das notas para as notas de uma pasta movida são
+/// atualizados; anexos são achados pelo nome). Arquivos guardados na Ayla não se movem.
+#[tauri::command]
+pub async fn iris_move_batch(app: tauri::AppHandle, items: Vec<IrisTarget>, folders: Vec<IrisFolder>, root: String, path: String) -> Result<Value, String> {
+    use tauri::{Emitter, Manager};
+    tauri::async_runtime::spawn_blocking(move || {
+        let (report, athena_changed) = move_batch(&app.state::<Core>(), &items, &folders, &root, &path)?;
+        if athena_changed { let _ = app.emit("notes-updated", json!({})); }
+        Ok(report)
+    }).await.map_err(|_| "Falha ao mover")?
+}
+
+/// Corpo do [`iris_move_batch`]: o relatório e se algum cofre ou nota da Athena mudou.
+fn move_batch(state: &Core, items: &[IrisTarget], folders: &[IrisFolder], root: &str, path: &str) -> Result<(Value, bool), String> {
+        let prefs = state.prefs()?;
+        let dest = iris_place(&state, &prefs, &root, &path, false)?;
+        let same_vault = |other: &str| dest.athena && other == root;
+        let (mut done, mut skipped, mut athena_changed) = (0, Vec::<Value>::new(), dest.athena);
+        for folder in outer_folders(&folders) {
+            let label = last_part(&folder.path);
+            let result = if folder.path.is_empty() {
+                Err("A pasta principal não muda de lugar".to_string())
+            } else {
+                iris_place(&state, &prefs, &folder.root, &folder.path, true).and_then(|place| {
+                    athena_changed |= place.athena;
+                    if same_vault(&folder.root) {
+                        let to = if path.is_empty() { label.clone() } else { format!("{path}/{label}") };
+                        if to == folder.path { return Err("Já está nessa pasta".into()); }
+                        athena::rename_folder(&place.root_dir, &folder.path, &to).map(|_| ())
+                    } else {
+                        super::iris_batch::move_entry(&place.dir, &dest.dir).map(|_| ())
+                    }
+                })
+            };
+            match result { Ok(()) => done += 1, Err(reason) => skipped.push(json!({"name": label, "reason": reason})) }
+        }
+        for item in items.iter().filter(|item| !inside_chosen(&folders, item)) {
+            let label = target_label(&state, item);
+            let result = match (&item.file, &item.root, &item.path) {
+                (Some(_), _, _) => Err("Anexos do chat e imagens da Ayla ficam guardados na Ayla".to_string()),
+                (None, Some(from), Some(from_path)) => {
+                    let source_place = iris_place(&state, &prefs, from, "", false);
+                    source_place.and_then(|place| {
+                        athena_changed |= place.athena;
+                        if place.athena && protected(&place.root_dir, from_path).is_some() {
+                            return Err("Arquivos de pastas protegidas só saem pela Athena".into());
+                        }
+                        if same_vault(from) {
+                            if from_path.rsplit_once('/').map_or("", |(dir, _)| dir) == path { return Err("Já está nessa pasta".into()); }
+                            athena::move_attachment(&place.root_dir, from_path, &path).map(|_| ())
+                        } else {
+                            super::iris_batch::move_entry(&readable_media_path(&state, from, from_path)?, &dest.dir).map(|_| ())
+                        }
+                    })
+                }
+                _ => Err("Arquivo não informado".into()),
+            };
+            match result { Ok(()) => done += 1, Err(reason) => skipped.push(json!({"name": label, "reason": reason})) }
+        }
+        Ok((json!({"done": done, "skipped": skipped}), athena_changed))
+}
+
+/// Destinos do "Mover" da Iris: as pastas conectadas no Sistema e os cofres e notas da Athena, com
+/// as subpastas (sem ocultas nem protegidas).
+#[tauri::command]
+pub async fn iris_destinations(state: tauri::State<'_, Core>) -> Result<Value, String> {
+    let prefs = state.prefs()?;
+    let mut roots: Vec<(String, String, &'static str, PathBuf)> = prefs.system_folders().into_iter()
+        .filter(|d| !has_hidden_component(d) && d.is_dir())
+        .map(|d| (iris_root_id(&d), d.file_name().unwrap_or(d.as_os_str()).to_string_lossy().into_owned(), "computer", d)).collect();
+    roots.extend(state.athena_roots(&prefs).into_iter().filter(|r| r.available && r.path.is_dir()).map(|r| (r.id, r.name, "athena", r.path)));
+    tauri::async_runtime::spawn_blocking(move || {
+        let out: Vec<Value> = roots.into_iter().map(|(id, name, kind, dir)| {
+            let athena_root = kind == "athena";
+            let folders: Vec<String> = athena::folders(&dir).into_iter()
+                .filter(|f| !athena_root || athena_lock::protected_folder_of(&dir, f).is_none()).collect();
+            json!({"id": id, "name": name, "kind": kind, "path": dir, "folders": folders})
+        }).collect();
+        json!(out)
+    }).await.map_err(|_| "Falha ao listar as pastas".into())
 }
 
 /// Abre a nota no Obsidian (onde os plugins do cofre rodam).
@@ -5324,6 +5692,129 @@ mod tests {
         assert!(core.iris_stored().unwrap().is_empty());
         drop(core);
         fs::remove_dir_all(tmp).unwrap();
+    }
+
+    fn iris_batch_setup(name: &str) -> (PathBuf, Core, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("ayla-iris-lote-{name}-{}", store::id()));
+        let core = Core::open(tmp.join("ayla")).unwrap();
+        let (system, vault) = (tmp.join("Imagens"), tmp.join("Cofre"));
+        for (dir, files) in [(&system, &["Fotos/a.jpg", "Fotos/sub/b.png", "solta.jpg", "Destino/ja.jpg", "Fotos/ja.jpg"][..]),
+            (&vault, &["Album/c.png", "Album/Nota.md", "Indice.md", "Arquivo/.keep", "d.png"][..])] {
+            for file in files {
+                fs::create_dir_all(dir.join(file).parent().unwrap()).unwrap();
+                fs::write(dir.join(file), if file.ends_with(".md") { "[[Album/Nota]]".as_bytes() } else { file.as_bytes() }).unwrap();
+            }
+        }
+        let mut prefs = core.prefs().unwrap();
+        prefs.iris_folders = vec![system.clone()];
+        prefs.athena_vaults = vec![vault.to_string_lossy().into_owned()];
+        core.preferences.lock().unwrap().save(&prefs).unwrap();
+        (tmp, core, system, vault)
+    }
+
+    fn folder(root: &str, path: &str) -> IrisFolder { IrisFolder { root: root.into(), path: path.into() } }
+    fn item(root: &str, path: &str) -> IrisTarget { IrisTarget { file: None, root: Some(root.into()), path: Some(path.into()) } }
+
+    #[test]
+    fn iris_batch_move_across_folders_and_inside_a_vault() {
+        let (tmp, core, system, vault) = iris_batch_setup("mover");
+        let sys = iris_root_id(&system);
+        let cofre = format!("vault:{}", vault.to_string_lossy());
+        // Pasta e itens do Sistema para uma subpasta; o item dentro da pasta escolhida vai junto
+        // com ela, e o que já existe no destino não é sobrescrito.
+        let (report, athena) = move_batch(&core, &[item(&sys, "solta.jpg"), item(&sys, "Fotos/a.jpg"), item(&sys, "Fotos/ja.jpg")],
+            &[folder(&sys, "Fotos/sub")], &sys, "Destino").unwrap();
+        assert!(!athena);
+        assert_eq!(report["done"], 3, "{report}");
+        assert_eq!(report["skipped"][0]["name"], "ja.jpg");
+        assert!(system.join("Destino/solta.jpg").is_file() && system.join("Destino/a.jpg").is_file() && system.join("Destino/sub/b.png").is_file());
+        assert_eq!(fs::read(system.join("Destino/ja.jpg")).unwrap(), b"Destino/ja.jpg");
+        // Dentro do cofre: a pasta muda pelo mover da Athena e o link da nota acompanha.
+        let (report, athena) = move_batch(&core, &[item(&cofre, "d.png")], &[folder(&cofre, "Album")], &cofre, "Arquivo").unwrap();
+        assert!(athena);
+        assert_eq!(report["done"], 2, "{report}");
+        assert!(vault.join("Arquivo/Album/c.png").is_file() && vault.join("Arquivo/d.png").is_file());
+        assert!(!fs::read_to_string(vault.join("Indice.md")).unwrap().contains("[[Album/Nota]]"));
+        // Do cofre para o Sistema; a raiz e os anexos guardados na Ayla não se movem.
+        let stored = IrisTarget { file: Some("x".into()), root: None, path: None };
+        let (report, _) = move_batch(&core, &[item(&cofre, "Arquivo/d.png"), stored], &[folder(&sys, "")], &sys, "").unwrap();
+        assert_eq!(report["done"], 1, "{report}");
+        assert_eq!(report["skipped"].as_array().unwrap().len(), 2);
+        assert!(system.join("d.png").is_file() && !vault.join("Arquivo/d.png").exists());
+        // Destino fora das pastas conhecidas ou escondido é recusado.
+        assert!(move_batch(&core, &[], &[], &sys, "../fora").is_err());
+        assert!(move_batch(&core, &[], &[], "iris:desconhecida", "").is_err());
+        drop(core);
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn iris_batch_places_protected_folders_and_upscale_output() {
+        let (tmp, core, system, vault) = iris_batch_setup("lugar");
+        let prefs = core.prefs().unwrap();
+        let cofre = format!("vault:{}", vault.to_string_lossy());
+        fs::create_dir_all(vault.join("Album/Segredo")).unwrap();
+        fs::write(vault.join("Album/Segredo").join(athena_lock::LOCK_FILE), b"").unwrap();
+        assert!(iris_place(&core, &prefs, &cofre, "Album", false).is_ok());
+        assert!(iris_place(&core, &prefs, &cofre, "Album", true).unwrap_err().contains("protegidos"));
+        assert!(iris_place(&core, &prefs, &cofre, "Album/Segredo", false).unwrap_err().contains("protegidas"));
+        let place = iris_place(&core, &prefs, &iris_root_id(&system), "Fotos", false).unwrap();
+        assert_eq!(place.upscale_dir(&place.dir, 3).unwrap(), system.join("Fotos (upscale 3x)"));
+        assert_eq!(place.upscale_dir(&place.root_dir, 2).unwrap(), tmp.join("Imagens (upscale 2x)"));
+        assert!(place.upscale_outside(&place.root_dir) && !place.upscale_outside(&place.dir));
+        // A pasta das cópias da pasta principal é conectada na Iris, uma vez só; dentro de uma pasta
+        // conectada, não (as imagens apareceriam duas vezes).
+        let output = tmp.join("Imagens (upscale 2x)");
+        fs::create_dir_all(&output).unwrap();
+        fs::create_dir_all(system.join("Fotos (upscale 3x)")).unwrap();
+        assert!(iris_connect_output(&core, &output).unwrap());
+        assert!(!iris_connect_output(&core, &output).unwrap());
+        assert!(!iris_connect_output(&core, &system.join("Fotos (upscale 3x)")).unwrap());
+        assert_eq!(core.prefs().unwrap().system_folders(), [system.clone(), output.clone()]);
+        // A Athena da Ayla fica nos dados da Ayla: a pasta das cópias da raiz vai dentro dela.
+        let ayla = iris_place(&core, &prefs, "ayla", "", false).unwrap();
+        assert_eq!(ayla.upscale_dir(&ayla.root_dir, 4).unwrap(), ayla.root_dir.join("Imagens (upscale 4x)"));
+        // Pastas escolhidas dentro de outras escolhidas não contam duas vezes.
+        let chosen = [folder("r", "A"), folder("r", "A/B"), folder("s", "A/B"), folder("r", "AB")];
+        let outer: Vec<_> = outer_folders(&chosen).into_iter().map(|f| format!("{}:{}", f.root, f.path)).collect();
+        assert_eq!(outer, ["r:A", "s:A/B", "r:AB"]);
+        assert!(inside_chosen(&chosen, &item("r", "A/B/x.jpg")) && !inside_chosen(&chosen, &item("s", "A/x.jpg")));
+        drop(core);
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    #[ignore = "precisa do Upscayl e de Vulkan"]
+    fn iris_batch_upscale_of_a_folder_with_upscayl() {
+        let found = super::super::upscale::find_upscayl().expect("Upscayl instalado");
+        let model = super::super::upscale::upscayl_models(&found.models).into_iter().find(|m| m == "upscayl-standard-4x").expect("modelo padrão");
+        let tool: Upscaler = (found.binary, found.models, model);
+        let dir = std::env::temp_dir().join(format!("ayla-iris-lote-real-{}", store::id()));
+        let fotos = dir.join("Fotos");
+        for (i, name) in ["a.png", "sub/b.jpg", "sub/c.bmp"].iter().enumerate() {
+            fs::create_dir_all(fotos.join(name).parent().unwrap()).unwrap();
+            let image = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, 96 + i as i32 * 8, 64).unwrap();
+            image.fill(0x3366aaff + i as u32 * 0x110000);
+            let format = match name.rsplit('.').next().unwrap() { "jpg" => "jpeg", other => other };
+            image.savev(fotos.join(name), format, &[]).unwrap();
+        }
+        let base = super::super::iris_batch::upscale_dir(&fotos, 2).unwrap();
+        let token = CancellationToken::new();
+        let images = super::super::iris_batch::images_in(&fotos, |p| athena::attachment_mime(p).is_some_and(|m| m.starts_with("image/")), |_| false);
+        assert_eq!(images.len(), 3);
+        for (source, relative) in images {
+            let out = relative.parent().map_or(base.clone(), |p| base.join(p));
+            let (output, extension) = upscale_into(&tool, &source, &out, 2, &token, |_| {}).unwrap();
+            let name = super::super::iris_batch::free_name(&out, &source.file_stem().unwrap().to_string_lossy(), extension);
+            fs::rename(&output, out.join(name)).unwrap();
+        }
+        for (name, width) in [("a.png", 192), ("sub/b.jpg", 208), ("sub/c.png", 224)] {
+            let (w, h) = super::super::upscale::dimensions(&base.join(name)).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!((w, h), (width, 128), "{name}");
+        }
+        // Só as cópias: nenhum temporário oculto sobra.
+        assert!(fs::read_dir(&base).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

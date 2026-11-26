@@ -10,6 +10,7 @@ pub mod files;
 pub mod hardware;
 pub mod images;
 pub mod iris;
+pub mod iris_batch;
 pub mod library;
 pub mod media;
 pub mod upscale;

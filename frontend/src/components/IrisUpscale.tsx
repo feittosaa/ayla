@@ -4,9 +4,15 @@ import { errorText, formatBytes, native, nativeTask, taskId } from '../services/
 export type UpscaleTarget = { file?: string; root?: string | null; path?: string; name: string; src: string };
 type Status = { installed: boolean; bytes: number; upscayl?: { id: string; label: string }[] };
 export type UpscaleResult = { file?: string; root?: string; path?: string; name: string };
+/** Lote: itens soltos (guardados na Ayla ou raiz + caminho) e pastas inteiras. */
+export type BatchTarget = { file?: string; root?: string | null; path?: string };
+export type UpscaleBatch = { items: BatchTarget[]; folders: { root: string; path: string }[]; label: string };
+export type BatchReport = { done: number; total: number; skipped: { name: string; reason: string }[]; interrupted: boolean; folders: string[]; connected: string[] };
 
 /** Ampliar a imagem aberta (Upscayl já instalado ou Real-ESRGAN, download opcional). O original não muda: sai uma cópia ao lado. */
-export default function IrisUpscale({ target, onDone, onClose }: { target: UpscaleTarget; onDone: (result: UpscaleResult) => void; onClose: () => void }) {
+export default function IrisUpscale({ target, batch, onDone, onBatchDone, onClose }: {
+  target?: UpscaleTarget; batch?: UpscaleBatch; onDone?: (result: UpscaleResult) => void; onBatchDone?: (report: BatchReport) => void; onClose: () => void;
+}) {
   const [status, setStatus] = useState<Status | null>(null);
   const [model, setModel] = useState('foto');
   const [scale, setScale] = useState(4);
@@ -16,11 +22,12 @@ export default function IrisUpscale({ target, onDone, onClose }: { target: Upsca
   // Tamanho original (lido da própria imagem; o WebKit já aplica a orientação da foto).
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   useEffect(() => {
+    if (!target) return;
     const image = new Image();
     image.onload = () => setSize({ width: image.naturalWidth, height: image.naturalHeight });
     image.src = target.src;
     return () => { image.onload = null; };
-  }, [target.src]);
+  }, [target]);
   // O núcleo amplia sempre em 4x antes de reduzir: o lado maior vai até 4096 px.
   const tooBig = size !== null && Math.max(size.width, size.height) > 4096;
   useEffect(() => {
@@ -42,15 +49,25 @@ export default function IrisUpscale({ target, onDone, onClose }: { target: Upsca
   }
   async function run() {
     setError(''); const requestId = taskId(); job.current = requestId; setProgress('Fazendo upscale… 0%');
+    if (batch) {
+      try {
+        const report = await nativeTask<BatchReport>('iris_upscale_batch', { items: batch.items, folders: batch.folders, modelo: model, scale, requestId }, event => {
+          if (event.type === 'progress') setProgress(`Imagem ${(event.done ?? 0) + 1} de ${event.total} · ${event.name} · ${Math.floor(event.percent ?? 0)}%`);
+        });
+        job.current = null; onBatchDone?.(report);
+      } catch (e) { setError(errorText(e)); } finally { job.current = null; setProgress(null); }
+      return;
+    }
+    if (!target) return;
     try {
       const result = await nativeTask<UpscaleResult>('iris_upscale', { file: target.file ?? null, root: target.file ? null : target.root ?? null, path: target.file ? null : target.path ?? null, modelo: model, scale, requestId },
         event => { if (event.type === 'progress') setProgress(`Fazendo upscale… ${Math.floor(event.percent ?? 0)}%`); });
-      job.current = null; onDone(result);
+      job.current = null; onDone?.(result);
     } catch (e) { setError(errorText(e)); } finally { job.current = null; setProgress(null); }
   }
   const busy = progress !== null;
   return <div className="iris-upscale" role="dialog" aria-label="Upscale de imagem" onClick={e => e.stopPropagation()}>
-    <b>Upscale de “{target.name}”</b>
+    <b>Upscale de {batch ? batch.label : `“${target?.name}”`}</b>
     {!status ? <span>Verificando o upscale…</span>
       : !status.installed && !status.upscayl?.length ? <>
           <span>O upscale é um download opcional de {formatBytes(status.bytes)} (Real-ESRGAN, roda na placa de vídeo). Baixa uma vez e fica pronto.</span>
@@ -70,7 +87,9 @@ export default function IrisUpscale({ target, onDone, onClose }: { target: Upsca
           </div>
           {size && <span className="iris-upscale-size">{size.width}×{size.height} px → <b>{size.width * scale}×{size.height * scale} px</b></span>}
           {tooBig && <span className="iris-upscale-error">O upscale aceita imagens de até 4096 px de lado.</span>}
-          <span className="iris-upscale-note">Salva uma cópia ao lado ({target.name.replace(/\.[^.]+$/, '')}-ampliada-{scale}x); o original não muda.</span>
+          <span className="iris-upscale-note">{batch
+            ? `As cópias vão para uma pasta nova ao lado da pasta de origem (ex.: “Fotos (upscale ${scale}x)”, com as mesmas subpastas; se a origem for uma pasta principal, a nova é conectada na Iris); anexos do chat e imagens da Ayla viram cópias guardadas na Ayla. Os originais não mudam.`
+            : `Salva uma cópia ao lado (${target?.name.replace(/\.[^.]+$/, '')}-ampliada-${scale}x); o original não muda.`}</span>
           <div className="row-actions">
             {busy ? <button className="ghost-button" onClick={() => { if (job.current) void native('cancel_job', { requestId: job.current }); }}>Interromper</button>
               : <button className="primary-action" disabled={tooBig} onClick={() => void run()}>Fazer upscale</button>}

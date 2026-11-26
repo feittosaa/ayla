@@ -9,6 +9,7 @@ import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
 import IrisEditor, { type EditResult } from './IrisEditor';
 import IrisDesigns from './IrisDesigns';
+import IrisBatch, { type PickedFolder } from './IrisBatch';
 import { OPEN_DESIGN_EVENT, hasPendingDesign } from '../services/Design';
 
 type Kind = 'image' | 'video' | 'pdf';
@@ -96,10 +97,18 @@ function Thumb({ item }: { item: Item }) {
   return <img src={url(item, true) + '&v=' + item.date + '-' + item.bytes} alt="" decoding="async" onError={() => setFailed(true)} />;
 }
 
-function LibraryFolder({ root, selected, selectFolder, actions, drop }: {
+/** Seleção para as ações em lote: no modo Selecionar (ou com Ctrl), clicar numa pasta marca a pasta. */
+type FolderPick = { picking: boolean; picked: (root: string, path: string) => boolean; pick: (root: string, path: string, name: string) => void };
+
+function LibraryFolder({ root, selected, selectFolder, actions, drop, pick }: {
   root: LibraryRoot; selected: FolderSelection | null; selectFolder: (selection: FolderSelection) => void;
-  actions?: React.ReactNode; drop?: FolderDrop;
+  actions?: React.ReactNode; drop?: FolderDrop; pick: FolderPick;
 }) {
+  const choose = (event: React.MouseEvent, path: string, name: string) => {
+    if (pick.picking || event.ctrlKey || event.metaKey) pick.pick(root.id, path, name);
+    else selectFolder({ root: root.id, path });
+  };
+  const pressed = (path: string) => pick.picking ? pick.picked(root.id, path) : selected?.root === root.id && selected.path === path;
   const [expanded, setExpanded] = useState(false);
   const directories = useMemo(() => {
     const byParent = new Map<string, string[]>();
@@ -116,7 +125,7 @@ function LibraryFolder({ root, selected, selectFolder, actions, drop }: {
   function directoryTree(parent: string): React.ReactNode {
     return directories.get(parent)?.map(path => {
       const name = path.split('/').pop();
-      const button = <button className="iris-dir" title={path} aria-pressed={selected?.root === root.id && selected.path === path} onClick={() => selectFolder({ root: root.id, path })}>{name}</button>;
+      const button = <button className={pick.picking ? 'iris-dir picking' : 'iris-dir'} title={path} aria-pressed={pressed(path)} onClick={event => choose(event, path, name ?? path)}>{name}</button>;
       return directories.has(path) ? <div key={path} className="iris-dir-group">
         <details><summary aria-label={`Subpastas de ${name}`}>▸</summary><div className="iris-dir-children">{directoryTree(path)}</div></details>{button}
       </div> : <div key={path}>{button}</div>;
@@ -127,7 +136,7 @@ function LibraryFolder({ root, selected, selectFolder, actions, drop }: {
     <div className="iris-action-row iris-root-row" data-root-id={actions ? root.id : undefined} data-drop={drop && (drop.after ? 'after' : 'before')}>
       {root.available && directories.has('') && <button type="button" className="iris-caret" aria-expanded={expanded}
         aria-label={`Subpastas de ${root.name}`} onClick={() => setExpanded(value => !value)}>▸</button>}
-      <button className="iris-dir" title={root.path} aria-pressed={selected?.root === root.id && !selected.path} onClick={() => selectFolder({ root: root.id, path: '' })}>{root.name}</button>
+      <button className={pick.picking ? 'iris-dir picking' : 'iris-dir'} title={root.path} aria-pressed={pressed('')} onClick={event => choose(event, '', root.name)}>{root.name}</button>
       {actions && <div className="iris-row-actions">{actions}</div>}
     </div>
     {root.available ? <div className="iris-dir-children" hidden={!expanded}>{directoryTree('')}</div> : <p role="status">Pasta indisponível</p>}
@@ -168,6 +177,11 @@ export default function Iris({ active, external }: { active: boolean; external?:
   const [trashError, setTrashError] = useState('');
   const [loading, setLoading] = useState(false);
   const [sidebar, setSidebar] = useState(() => localStorage.getItem(SIDE) !== '0');
+  // Seleção para as ações em lote (upscale, mover, lixeira): cartões pela chave, pastas por raiz|caminho.
+  const [picking, setPicking] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [pickedFolders, setPickedFolders] = useState<Map<string, PickedFolder>>(() => new Map());
+  const anchor = useRef<string | null>(null);
   const more = useRef<HTMLDivElement | null>(null);
 
   const grid = useRef<HTMLElement>(null);
@@ -252,6 +266,55 @@ export default function Iris({ active, external }: { active: boolean; external?:
     return scopedItems.filter(item => item.kind === kind
       && (!words || `${item.name} ${item.place}`.toLowerCase().includes(words))).sort((a, b) => compareItems(a, b, order));
   }, [scopedItems, kind, query, order]);
+  const pickedItems = useMemo(() => (items ?? []).filter(item => picked.has(item.key)), [items, picked]);
+  const clearPicks = useCallback(() => {
+    setPicking(false); setPicked(new Set()); setPickedFolders(new Map()); anchor.current = null;
+  }, []);
+  function clickCard(item: Item, event: React.MouseEvent) {
+    const start = event.shiftKey ? anchor.current : null;
+    if (!picking && !event.ctrlKey && !event.metaKey && !event.shiftKey) { setOpen(item.key); return; }
+    setPicking(true);
+    // O intervalo é calculado agora: a função de atualização roda depois, com a âncora já trocada.
+    const from = start === null ? -1 : visible.findIndex(i => i.key === start);
+    const to = visible.findIndex(i => i.key === item.key);
+    setPicked(previous => {
+      const next = new Set(previous);
+      if (from >= 0 && to >= 0) for (const i of visible.slice(Math.min(from, to), Math.max(from, to) + 1)) next.add(i.key);
+      else if (next.has(item.key)) next.delete(item.key);
+      else next.add(item.key);
+      return next;
+    });
+    anchor.current = item.key;
+  }
+  const folderPick: FolderPick = {
+    picking,
+    picked: (root, path) => pickedFolders.has(`${root}|${path}`),
+    pick: (root, path, name) => {
+      setPicking(true);
+      setPickedFolders(previous => {
+        const next = new Map(previous);
+        const key = `${root}|${path}`;
+        if (next.has(key)) next.delete(key);
+        else next.set(key, { root, path, name, athena: !root.startsWith('iris:') });
+        return next;
+      });
+    },
+  };
+  // Esc sai da seleção; Ctrl+A pega tudo o que está na tela (com o filtro atual).
+  useEffect(() => {
+    if (!active || !picking || open || designing) return;
+    const key = (event: KeyboardEvent) => {
+      if (document.querySelector('.dialog-backdrop')) return;
+      const typing = event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable]');
+      if (event.key === 'Escape') clearPicks();
+      else if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        setPicked(previous => new Set([...previous, ...visible.map(i => i.key)]));
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [active, picking, open, designing, visible, clearPicks]);
   const perSource = useMemo(() => {
     const out: Record<string, number> = { all: 0 };
     for (const item of items ?? []) if (item.kind === kind) { out.all++; out[item.source] = (out[item.source] ?? 0) + 1; }
@@ -380,7 +443,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
           return <section key={s.id} className="iris-folder" aria-label={s.label}>
             {button}
             {active && library?.athenaRoots.map(root => <LibraryFolder key={root.id} root={root} selected={selection}
-              selectFolder={folder => selectFolder('athena', folder)} />)}
+              selectFolder={folder => selectFolder('athena', folder)} pick={folderPick} />)}
           </section>;
         })}
         <section className="iris-folder" aria-label="Sistema">
@@ -394,7 +457,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
             <small id="iris-system-count">{perSource.computer ?? 0}</small>
           </div>
           {active && systemRoots.map((root, index, roots) => <LibraryFolder key={root.id} root={root} selected={selection}
-            selectFolder={folder => selectFolder('computer', folder)} drop={drop?.target === root.id ? drop : undefined}
+            selectFolder={folder => selectFolder('computer', folder)} drop={drop?.target === root.id ? drop : undefined} pick={folderPick}
             actions={<>
               {roots.length > 1 && <button type="button" className="icon-button iris-grip tip-end"
                 aria-label={`Reordenar ${root.name}`} data-tip="Arraste ou use as setas ↑ ↓" disabled={changing}
@@ -443,7 +506,10 @@ export default function Iris({ active, external }: { active: boolean; external?:
       {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
     {designing && <main className="iris-grid-area"><IrisDesigns active={active && designing} onCount={setDesignCount} onExported={() => void load()} /></main>}
     <main className="iris-grid-area" ref={grid} hidden={designing}>
-      <div className="iris-controls"><label className="iris-order">Ordenar por <select aria-label="Ordenar por" value={order} onChange={event => {
+      <div className="iris-controls">
+      <button className={picking ? 'ghost-button iris-pick-toggle active' : 'ghost-button iris-pick-toggle'} aria-pressed={picking}
+        onClick={() => { if (picking) clearPicks(); else setPicking(true); }}>{picking ? 'Cancelar seleção' : 'Selecionar'}</button>
+      <label className="iris-order">Ordenar por <select aria-label="Ordenar por" value={order} onChange={event => {
         const value = event.target.value as Order;
         setOrder(value); setShown(PAGE); localStorage.setItem('ayla-iris-ordem', value);
       }}>{Object.entries(orders).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -454,8 +520,9 @@ export default function Iris({ active, external }: { active: boolean; external?:
             {groups.map(group => <section key={group.label} className="iris-month" aria-label={group.label}>
               {group.label && <h2>{group.label}</h2>}
               <div className="iris-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${tileSize}px), 1fr))` }}>
-                {group.items.map(item => <button key={item.key} className={`iris-card ${item.kind}`} title={`${item.name}\n${itemLocation(item)}`} onClick={() => setOpen(item.key)}>
-                  <span className="iris-thumb"><Thumb key={`${item.date}-${item.bytes}`} item={item} /></span>
+                {group.items.map(item => <button key={item.key} className={`iris-card ${item.kind}${picked.has(item.key) ? ' picked' : ''}`} title={`${item.name}\n${itemLocation(item)}`}
+                  aria-pressed={picking ? picked.has(item.key) : undefined} onClick={event => clickCard(item, event)}>
+                  <span className="iris-thumb"><Thumb key={`${item.date}-${item.bytes}`} item={item} />{picking && <span className="iris-check" aria-hidden="true" />}</span>
                   <span className="iris-caption"><b>{item.name}</b><small>{itemLocation(item)}</small></span>
                 </button>)}
               </div>
@@ -463,6 +530,8 @@ export default function Iris({ active, external }: { active: boolean; external?:
             {shown < visible.length && <div ref={more} className="iris-more" aria-hidden="true" />}
           </>}
     </main>
+    {picking && !designing && <IrisBatch items={pickedItems} folders={[...pickedFolders.values()]} onClear={clearPicks}
+      onChanged={() => { setPicked(new Set()); setPickedFolders(new Map()); anchor.current = null; void load(); }} />}
     </section>
     {current && <div className="iris-viewer" role="dialog" aria-modal="true" aria-label={current.name} onClick={() => { if (!confirmTrash) closeViewer(); }}>
       <header className="iris-viewer-bar" onClick={e => e.stopPropagation()}>
