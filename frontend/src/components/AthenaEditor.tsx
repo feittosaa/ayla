@@ -3,7 +3,7 @@ import { closeBrackets, closeBracketsKeymap, insertBracket } from '@codemirror/a
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { syntaxTree } from '@codemirror/language';
-import { Annotation, Compartment, EditorState, Prec, StateField, Transaction, type Range } from '@codemirror/state';
+import { Annotation, Compartment, EditorState, Prec, StateEffect, StateField, Transaction, type Range } from '@codemirror/state';
 import type { SyntaxNodeRef } from '@lezer/common';
 import { createRoot, type Root } from 'react-dom/client';
 import Markdown from './Markdown';
@@ -31,6 +31,8 @@ type Props = {
 };
 
 const external = Annotation.define<boolean>();
+/** Soltou o mouse: as marcas voltam a seguir o cursor. */
+const pointerUp = StateEffect.define<null>();
 const wikiPattern = /^(!?)\[\[([^\]\n|]+)(?:\|([^\]\n]+))?\]\]/;
 // Pares fechados sozinhos, como no Obsidian: digitar o fechamento ou dar Enter logo antes dele
 // sai do par; Backspace no par vazio apaga os dois.
@@ -177,7 +179,9 @@ function diagramCode(state: EditorState, node: SyntaxNodeRef) {
   const text = node.node.getChild('CodeText');
   return text ? state.sliceDoc(text.from, text.to) : '';
 }
-const touches = (state: EditorState, from: number, to: number) => state.selection.ranges.some(r => r.from <= to && r.to >= from);
+// Tabela e diagrama só voltam ao texto com o cursor parado dentro: uma seleção que passa por eles
+// (arrastando o mouse) não os desmonta, senão o texto pula debaixo do ponteiro e a seleção se perde.
+const touches = (state: EditorState, from: number, to: number) => state.selection.ranges.some(r => r.empty && r.head >= from && r.head <= to);
 /** Tabela ou diagrama que aparece desenhado: o cursor não está nele (como no Obsidian). */
 function drawnBlock(state: EditorState, node: SyntaxNodeRef) {
   if (node.name !== 'Table' && diagramCode(state, node) === null) return null;
@@ -240,7 +244,9 @@ function decorations(view: EditorView, options: { current: Props }) {
   // chegam à borda, o link abre e o cursor entra nos colchetes. Imagens só abrem com o cursor dentro.
   const editing = (from: number, to: number, edge = true) => view.state.selection.ranges.some(r => edge ? r.head >= from && r.head <= to : r.head > from && r.head < to);
   // Marcas de formatação (#, *, ~~, `, >) aparecem enquanto o cursor toca o trecho, como no Obsidian.
-  const touched = (from: number, to: number) => view.state.selection.ranges.some(r => r.from <= to && r.to >= from);
+  // Só a ponta da seleção (onde está o cursor) conta, como no Obsidian: ao arrastar o mouse por
+  // vários trechos, eles não abrem todos ao mesmo tempo empurrando o texto.
+  const touched = (from: number, to: number) => view.state.selection.ranges.some(r => r.head >= from && r.head <= to);
   const styles: Record<string, string> = {
     StrongEmphasis: 'athena-strong', Emphasis: 'athena-emphasis', Strikethrough: 'athena-strike',
     InlineCode: 'athena-code', CodeText: 'athena-code', Blockquote: 'athena-quote',
@@ -310,11 +316,17 @@ export default function AthenaEditor(props: Props) {
   useLayoutEffect(() => { options.current = props; });
   useLayoutEffect(() => {
     const initial = options.current;
+    // Enquanto o mouse seleciona, as marcas não abrem nem fecham: o texto pularia debaixo do
+    // ponteiro e a seleção piscaria. Ao soltar, voltam a seguir o cursor.
+    let selecting = false;
     const plugin = ViewPlugin.fromClass(class {
       decorations: ReturnType<typeof decorations>;
       constructor(view: EditorView) { this.decorations = decorations(view, options); }
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet || syntaxTree(update.state) !== syntaxTree(update.startState)) {
+        const released = update.transactions.some(t => t.effects.some(e => e.is(pointerUp)));
+        const onlySelection = !update.docChanged && !update.viewportChanged && syntaxTree(update.state) === syntaxTree(update.startState);
+        if (selecting && onlySelection && !released) return;
+        if (released || update.docChanged || update.viewportChanged || update.selectionSet || syntaxTree(update.state) !== syntaxTree(update.startState)) {
           this.decorations = decorations(update.view, options);
         }
       }
@@ -350,6 +362,7 @@ export default function AthenaEditor(props: Props) {
         }),
         readOnly.current.of(EditorState.readOnly.of(initial.readOnly)),
         EditorView.domEventHandlers({
+          mousedown: event => { if (event.button === 0) selecting = true; return false; },
           paste: (event, view) => options.current.onPaste(event, view),
           blur: () => options.current.onBlur(),
           keydown: event => { if (event.key === 'Escape') options.current.onEscape(); },
@@ -363,7 +376,9 @@ export default function AthenaEditor(props: Props) {
     });
     initial.editor.current = view;
     if (initial.autoFocus) view.focus();
-    return () => { initial.editor.current = null; view.destroy(); };
+    const release = () => { if (selecting) { selecting = false; view.dispatch({ effects: pointerUp.of(null) }); } };
+    window.addEventListener('mouseup', release);
+    return () => { window.removeEventListener('mouseup', release); initial.editor.current = null; view.destroy(); };
   }, []);
   useLayoutEffect(() => {
     const view = props.editor.current;
