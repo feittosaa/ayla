@@ -7,6 +7,7 @@ pub mod athena_lock;
 pub mod cloud;
 pub mod external;
 pub mod files;
+pub mod fichas;
 pub mod hardware;
 pub mod images;
 pub mod iris;

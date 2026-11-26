@@ -44,18 +44,44 @@ export function applyAppearance(a: Appearance, mode: Mode) {
 
 /** Ícone do sistema: a marca (da Ayla, da Athena ou da Iris) no destaque, sobre um quadrado com
  * o fundo escolhido. */
-export async function drawSystemIcon(a: Appearance, mode: Mode, name: 'ayla' | 'athena' | 'iris' = 'ayla'): Promise<string> {
+export async function drawSystemIcon(a: Appearance, mode: Mode, name: 'ayla' | 'athena' | 'iris' | 'notification' = 'ayla'): Promise<string> {
   const side = 512; const canvas = document.createElement('canvas'); canvas.width = canvas.height = side;
   const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Canvas indisponível');
-  const bg = safeBackground(mode === 'escuro' ? a.dark_background : a.light_background, mode);
-  ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(16, 16, side - 32, side - 32, 112); ctx.fill();
-  const marks: readonly string[] = MARKS[name];
-  const variant = name === 'ayla' ? a.icon_ayla : name === 'athena' ? a.icon_athena : 1;
-  const mark = marks[variant - (FIRST_VARIANT[name] ?? 1)] ?? marks[0];
-  const svg = mark.replaceAll('currentColor', isHex(a.accent) ? a.accent : DEFAULT_APPEARANCE.accent);
+  if (name !== 'notification') {
+    const bg = safeBackground(mode === 'escuro' ? a.dark_background : a.light_background, mode);
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(16, 16, side - 32, side - 32, 112); ctx.fill();
+  }
+  const brand = name === 'notification' ? 'ayla' : name;
+  const marks: readonly string[] = MARKS[brand];
+  const variant = brand === 'ayla' ? a.icon_ayla : name === 'athena' ? a.icon_athena : 1;
+  const mark = marks[variant - (FIRST_VARIANT[brand] ?? 1)] ?? marks[0];
+  const accent = isHex(a.accent) ? a.accent : DEFAULT_APPEARANCE.accent;
+  const svg = mark.replaceAll('currentColor', name === 'notification' ? '#fff' : accent);
   const image = new Image(); image.src = markUrl(svg); await image.decode();
-  ctx.drawImage(image, 104, 104, side - 208, side - 208);
+  if (name === 'notification') drawCentered(ctx, image, side, NOTIFICATION_FILL);
+  else ctx.drawImage(image, 104, 104, side - 208, side - 208);
   return canvas.toDataURL('image/png').split(',')[1];
+}
+
+/** Quanto do quadrado a marca ocupa na notificação: os painéis costumam mostrar o ícone num
+ * círculo, e a marca larga encostava na borda. */
+const NOTIFICATION_FILL = 0.7;
+
+/** Desenha a marca centrada pelo que ela tem de visível (não pela caixa do SVG), com o lado maior
+ * ocupando `fill` do quadrado. */
+function drawCentered(ctx: CanvasRenderingContext2D, image: HTMLImageElement, side: number, fill: number) {
+  const probe = document.createElement('canvas'); probe.width = probe.height = side;
+  const pctx = probe.getContext('2d'); if (!pctx) { ctx.drawImage(image, 0, 0, side, side); return; }
+  pctx.drawImage(image, 0, 0, side, side);
+  const alpha = pctx.getImageData(0, 0, side, side).data;
+  let left = side, top = side, right = -1, bottom = -1;
+  for (let y = 0; y < side; y++) for (let x = 0; x < side; x++) {
+    if (alpha[(y * side + x) * 4 + 3] > 8) { if (x < left) left = x; if (x > right) right = x; if (y < top) top = y; if (y > bottom) bottom = y; }
+  }
+  if (right < 0) return;
+  const w = right - left + 1, h = bottom - top + 1, scale = side * fill / Math.max(w, h);
+  // Redesenha o vetor (e não o recorte) para continuar nítido em qualquer escala.
+  ctx.drawImage(image, (side - w * scale) / 2 - left * scale, (side - h * scale) / 2 - top * scale, side * scale, side * scale);
 }
 
 /** Mantém o ícone da janela, do menu e do "Abrir com" (Ayla, Athena e Iris) igual ao escolhido
@@ -65,8 +91,8 @@ export function useSystemIcon(a: Appearance, mode: Mode, ready: boolean) {
   useEffect(() => {
     if (!ready) return;
     const timer = setTimeout(() => {
-      void Promise.all((['ayla', 'athena', 'iris'] as const).map(name => drawSystemIcon(a, mode, name)))
-        .then(([png, athena, iris]) => native('appearance_icon', { png, athena, iris }))
+      void Promise.all((['ayla', 'athena', 'iris', 'notification'] as const).map(name => drawSystemIcon(a, mode, name)))
+        .then(([png, athena, iris, notification]) => native('appearance_icon', { png, athena, iris, notification }))
         .catch(e => console.warn('Ícone da Ayla:', e));
     }, 600);
     return () => clearTimeout(timer);

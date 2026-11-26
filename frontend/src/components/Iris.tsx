@@ -1,3 +1,4 @@
+import type { ProjectSource } from './ProjectSources';
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import MediaView from './MediaView';
@@ -9,6 +10,7 @@ import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
 import IrisEditor, { type EditResult } from './IrisEditor';
 import IrisDesigns from './IrisDesigns';
+import IrisFicha from './IrisFicha';
 import IrisBatch, { type PickedFolder } from './IrisBatch';
 import { OPEN_DESIGN_EVENT, hasPendingDesign } from '../services/Design';
 
@@ -71,6 +73,9 @@ const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString('pt
 
 /** Ampliar: quadrado com setas para fora. */
 const UpscaleIcon = () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" /><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" /></svg>;
+
+/** Ficha de RPG: folha com linhas e um dado. */
+const FichaIcon = () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" /><path d="M14 3v5h5M9 9h2M9 13h4" /><rect x="14" y="13" width="7" height="7" rx="1.5" /><path d="M16.5 15.5h.01M18.5 17.5h.01" /></svg>;
 
 /** Aguarda o cartão ficar visível antes de pedir uma miniatura. */
 function Thumb({ item }: { item: Item }) {
@@ -145,7 +150,7 @@ function LibraryFolder({ root, selected, selectFolder, actions, drop, pick }: {
 
 /** Iris: as imagens, vídeos e PDFs da Ayla num lugar só — dos cofres e notas da Athena, os
  * anexos enviados no chat, as imagens que a Ayla gerou e os arquivos adicionados direto. */
-export default function Iris({ active, external }: { active: boolean; external?: { id: number; paths: string[] } }) {
+export default function Iris({ active, external, projectTarget }: { projectTarget?: { item: ProjectSource; id: number }; active: boolean; external?: { id: number; paths: string[] } }) {
   const [library, setLibrary] = useState<{ items: Item[]; roots: LibraryRoot[]; athenaRoots: LibraryRoot[] } | null>(null);
   const items = library?.items ?? null;
   const [tileSize, setTileSize] = useState(() => {
@@ -340,6 +345,23 @@ export default function Iris({ active, external }: { active: boolean; external?:
 
   // "Abrir com Iris": a mídia e as vizinhas da mesma pasta, só para ver (nada é conectado).
   const [outside, setOutside] = useState<Item[] | null>(null);
+  const handledProject = useRef(0);
+  useEffect(() => {
+    if (!projectTarget || !library || handledProject.current === projectTarget.id) return;
+    handledProject.current = projectTarget.id;
+    const { item } = projectTarget;
+    setDesigning(false); setKind('image'); setQuery(''); setOutside(null); setOpen(null);
+    if (item.kind === 'image') {
+      const image = library.items.find(i => i.key === item.path);
+      if (!image) { setError('Esta imagem está indisponível.'); return; }
+      setSource('all'); setSelection(null); setOpen(image.key);
+    } else {
+      const system = library.roots.find(r => r.id === item.root);
+      const root = system ?? library.athenaRoots.find(r => r.id === item.root);
+      if (!root?.available || (item.path && !root.folders.includes(item.path))) { setError('Esta pasta está indisponível.'); return; }
+      setSelection({root:item.root,path:item.path}); setSource(system ? 'computer' : 'athena'); setShown(PAGE);
+    }
+  }, [projectTarget, library]);
   const handled = useRef(0);
   useEffect(() => {
     if (!external || external.id === handled.current || !external.paths.length) return;
@@ -363,6 +385,8 @@ export default function Iris({ active, external }: { active: boolean; external?:
   }
   // Editor: a cópia abre no visualizador; ao substituir, fica no mesmo item (já atualizado).
   const [editing, setEditing] = useState(false);
+  // Ficha de RPG (PDF de um cofre da Athena): valores na nota e camada no PDF.
+  const [sheet, setSheet] = useState(false);
   async function afterEdit(result: EditResult) {
     setEditing(false);
     setUpscaled(result.replaced ? `Original substituído: ${result.name}.` : `Salva como ${result.name}.`);
@@ -370,7 +394,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
     if (!outside && !result.replaced) setOpen(result.file ? `arquivo:${result.file}` : `${result.root}|${result.path}`);
   }
   function closeViewer() {
-    setEditing(false);
+    setEditing(false); setSheet(false);
     setUpscaling(false); setUpscaled('');
     setConfirmTrash(false);
     setTrashError('');
@@ -398,7 +422,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
   useEffect(() => {
     if (!current) return;
     const key = (event: KeyboardEvent) => {
-      if (trashing || editing) return;
+      if (trashing || editing || sheet) return;
       if (confirmTrash) {
         if (event.key === 'Escape') { setConfirmTrash(false); setTrashError(''); }
         return;
@@ -409,7 +433,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [current, step, confirmTrash, trashing, editing]);
+  }, [current, step, confirmTrash, trashing, editing, sheet]);
 
   function system(item: Item) {
     void openInSystem(mediaOf(item)).catch(e => setError(errorText(e)));
@@ -542,12 +566,16 @@ export default function Iris({ active, external }: { active: boolean; external?:
           onClick={() => { setUpscaled(''); setUpscaling(v => !v); }}><UpscaleIcon /></button>}
         {(current.kind === 'video' || (current.kind === 'image' && !/\.gif$/i.test(current.name))) && <button className="icon-button" data-tip="Editar" aria-label="Editar"
           onClick={() => { setUpscaled(''); setUpscaling(false); setEditing(true); }}><PencilIcon size={17} /></button>}
+        {current.kind === 'pdf' && current.source === 'athena' && !outside && current.root && current.path && <button className="icon-button" data-tip="Ficha de RPG" aria-label="Ficha de RPG"
+          onClick={() => { setUpscaled(''); setUpscaling(false); setSheet(true); }}><FichaIcon /></button>}
         {current.kind === 'image' && !outside && <button className="icon-button tip-end" data-tip="Excluir imagem" aria-label="Excluir imagem"
           disabled={confirmTrash} onClick={() => setConfirmTrash(true)}><TrashIcon size={17} /></button>}
         <button className="icon-button tip-end" data-tip="Fechar (Esc)" aria-label="Fechar" disabled={trashing} onClick={closeViewer}><CloseIcon size={18} /></button>
       </header>
       {editing && <IrisEditor key={current.key} target={{ file: current.file, root: current.root, path: current.path, name: current.name, kind: current.kind === 'video' ? 'video' : 'image', src: `${url(current)}?v=${current.date}-${current.bytes}` }}
         onDone={result => void afterEdit(result)} onClose={() => setEditing(false)} />}
+      {sheet && current.root && current.path && <IrisFicha key={current.key} target={{ root: current.root, path: current.path, name: current.name }}
+        onChanged={() => void load()} onClose={() => setSheet(false)} />}
       {upscaling && <IrisUpscale key={current.key} target={{ file: current.file, root: current.root, path: current.path, name: current.name, src: `${url(current)}?v=${current.date}-${current.bytes}` }} onDone={result => void afterUpscale(result)} onClose={() => setUpscaling(false)} />}
       {upscaled && !upscaling && <div className="iris-upscale" role="status" onClick={e => e.stopPropagation()}><span>{upscaled}</span><button className="ghost-button" onClick={() => setUpscaled('')}>OK</button></div>}
       {confirmTrash && <div className="iris-trash-confirm" role="group" aria-label="Confirmar exclusão" onClick={e => e.stopPropagation()}>
@@ -560,7 +588,7 @@ export default function Iris({ active, external }: { active: boolean; external?:
         {/* Com o editor aberto, o vídeo do visualizador sai (um player a menos aberto). */}
         {!editing && <MediaView key={current.key + current.date + current.bytes} media={mediaOf(current)} name={current.name} kind={current.kind} version={`${current.date}-${current.bytes}`} autoPlay onError={setError} />}
       </div>
-      {list.length > 1 && !confirmTrash && !editing && <>
+      {list.length > 1 && !confirmTrash && !editing && !sheet && <>
         <button className="iris-nav prev" aria-label="Anterior" onClick={e => { e.stopPropagation(); step(-1); }}><ChevronLeftIcon size={26} /></button>
         <button className="iris-nav next" aria-label="Próximo" onClick={e => { e.stopPropagation(); step(1); }}><ChevronRightIcon size={26} /></button>
       </>}

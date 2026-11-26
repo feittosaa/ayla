@@ -25,7 +25,7 @@ fn words(message: &str) -> String {
 pub fn private_or_local(message: &str) -> bool {
     let text = words(message);
     let any = |terms: &[&str]| terms.iter().any(|term| text.contains(term));
-    policy::suspect_content(message) || organs::finance_question(message)
+    policy::suspect_content(message) || organs::finance_question(message) || super::fichas::pedido(message)
         || athena::note_request(message) || reminders::is_request(message)
         || iris::comparison_question(message)
         || any(&[" que criei ", " eu criei ", " que escrevi ", " que conversamos ", " nas notas ",
@@ -50,9 +50,19 @@ fn own_data(text: &str) -> bool {
         .any(|after| after.split_whitespace().take(3).any(|word| DATA.iter().any(|d| word.starts_with(d))))
 }
 
+/// Link de site no pedido ("https://…", "www.…"): ler a página exige a pesquisa na web.
+pub fn has_link(message: &str) -> bool {
+    message.split(|c: char| c.is_whitespace() || "()<>[]\"'".contains(c)).any(|word| {
+        let lower = word.to_lowercase();
+        let rest = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://")).or_else(|| lower.strip_prefix("www."));
+        rest.is_some_and(|r| r.split(['/', '?', '#']).next().is_some_and(|host| host.contains('.') && host.len() > 3))
+    })
+}
+
 #[tauri::command]
 pub fn suggests_web_search(message: &str) -> bool {
     if private_or_local(message) { return false; }
+    if has_link(message) { return true; }
     let text = words(message);
     let any = |terms: &[&str]| terms.iter().any(|term| text.contains(term));
     let search = any(&[" pesquise ", " pesquisa na ", " pesquisa sobre ", " pesquisar ", " procura ",
@@ -90,6 +100,8 @@ pub async fn automatic_route(state: &super::services::Core, prefs: &super::prefe
     // modelo local e guardados na Iris.
     let route = if found.offline || found.agenda || found.design { AutoRoute::Local } else { match found.privacy {
         Privacy::Search => AutoRoute::Search,
+        // Pedido público com link: só a pesquisa na web abre a página.
+        Privacy::Public if has_link(message) => AutoRoute::Search,
         Privacy::Public => AutoRoute::Cloud,
         Privacy::Local => AutoRoute::Local,
         Privacy::Doubt => AutoRoute::Ask,
@@ -211,6 +223,15 @@ mod tests {
             "Quero links para aprender aquarela", "Qual a versão mais recente do Blender?", "Pesquise horários de trem"] {
             assert!(suggests_web_search(message), "{message}");
         }
+        // Links colados: ler a página pede a pesquisa na web.
+        let marmitas = "https://www.dataninha.com.br/online-ordering\nhttps://nordelli.com.br/\n\nbaseado nesses sites de marmita, queria saber uma estimativa de 60 marmitas por mês";
+        assert!(has_link(marmitas) && suggests_web_search(marmitas));
+        assert!(suggests_web_search("o que diz www.exemplo.com.br sobre frete?"));
+        for message in ["vale a pena o plano?", "versão 1.2.3 do app", "http:// sozinho", "meu email é a@b.com"] {
+            assert!(!has_link(message), "{message}");
+        }
+        // Dado pessoal continua local, mesmo com link.
+        assert!(!suggests_web_search("https://banco.com.br meu saldo está certo?"));
         for message in ["Me ajuda a escrever uma história", "Pesquise na minha pasta de NPCs", "Me indica algo com base no meu saldo",
             "Pesquise meu CPF", "Qual NPC que eu criei é o melhor?", "Sem internet, me indica um livro",
             "Me lembra de pesquisar vídeos amanhã", "Pesquise na Athena", "Não me mande vídeos do YouTube"] {

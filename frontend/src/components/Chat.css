@@ -24,6 +24,10 @@
 .conversation-row:hover .row-tools, .conversation-row:focus-within .row-tools { opacity: 1; pointer-events: auto; }
 .conversation-row:has(.conversation-item[aria-current=page]) .row-tools { background: linear-gradient(90deg, transparent, var(--ayla-selected) 30%); }
 .app-shell .icon-button.tiny { width: 30px; height: 30px; min-height: 30px; border-radius: calc(8px * var(--ayla-round, 1)); }
+.app-shell .conversation-pin[aria-pressed=true] { color: var(--ayla-accent); }
+.conversation-row:has(.conversation-pin[aria-pressed=true]) .conversation-item { padding-right: 38px; }
+.conversation-row:not(:hover):not(:focus-within):has(.conversation-pin[aria-pressed=true]) .row-tools { opacity: 1; pointer-events: auto; }
+.conversation-row:not(:hover):not(:focus-within) .conversation-pin[aria-pressed=true] ~ button { display: none; }
 .conversation-edit input, .title-edit input { width: 100%; min-height: 38px; padding: 6px 10px; font-size: 14px; }
 .conversation-confirm { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); font-size: 13px; flex-shrink: 0; }
 .conversation-confirm span { overflow-wrap: anywhere; }
@@ -94,6 +98,13 @@
 .thinking { margin: 0; color: var(--ayla-text-faint); }
 .incomplete { display: block; margin-top: 6px; font-size: 12px; color: var(--ayla-text-faint); }
 .message-actions { display: flex; gap: 4px; margin: 4px 0 0 -10px; }
+.message-actions.user-actions { align-self: flex-end; margin: -6px 0 0; opacity: 0; transition: opacity .15s; }
+.message.user:hover + .user-actions, .user-actions:hover, .user-actions:focus-within, .user-actions:has(.message-versions) { opacity: 1; }
+.message-versions { display: inline-flex; align-items: center; gap: 2px; color: var(--ayla-text-soft); font-size: 13px; font-variant-numeric: tabular-nums; }
+.message-versions .icon-button { width: 30px; height: 30px; }
+.message.user.editing { display: flex; flex-direction: column; gap: 8px; width: min(80%, 640px); max-width: none; white-space: normal; }
+.message.user.editing textarea { width: 100%; min-height: 60px; resize: vertical; border: 0; background: transparent; color: inherit; font: inherit; line-height: 1.6; outline: none; }
+.message.user.editing .row-actions { justify-content: flex-end; }
 .memory-note { align-self: center; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: 100%; padding: 2px 4px 2px 14px; border: 1px solid var(--ayla-border); border-radius: calc(999px * var(--ayla-round, 1)); color: var(--ayla-text-soft); font-size: 13px; }
 .memory-note span { overflow-wrap: anywhere; }
 .memory-note .link-button { min-height: 34px; padding: 0 10px; }
@@ -238,3 +249,4 @@
 .chat-design-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 .chat-design-actions .ghost-button { min-height: 26px; padding: 0 8px; font-size: 12px; }
 .chat-design-note { grid-column: 1 / -1; margin: 0; color: var(--ayla-text-faint); font-size: 12px; }
+.project-source-options { max-height: 20rem; overflow-y: auto; }

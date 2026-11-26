@@ -6,6 +6,7 @@ function Icon({ size = 20, children }: { size?: number; children: ReactNode }) {
 }
 type Props = { size?: number };
 
+export const PushIcon = ({ size }: Props) => <Icon size={size}><path d="M12 16V4M6.5 9.5 12 4l5.5 5.5M5 20h14" /></Icon>;
 export const PlusIcon = ({ size }: Props) => <Icon size={size}><path d="M12 5v14M5 12h14" /></Icon>;
 export const SidebarIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></Icon>;
 export const ComputerIcon = ({ size }: Props) => <Icon size={size}><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M2 20h20" /></Icon>;

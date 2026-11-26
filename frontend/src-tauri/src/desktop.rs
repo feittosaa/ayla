@@ -134,6 +134,31 @@ fn system_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((data.join("icons/hicolor/512x512/apps"), data.join("applications"), xdg("XDG_CONFIG_HOME", ".config").join("autostart")))
 }
 
+fn notification_icon_dir() -> PathBuf {
+    std::env::var_os("AYLA_DATA_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| xdg("XDG_CACHE_HOME", ".cache").join(ICON_BASE))
+        .join("notification-icons-white")
+}
+
+pub(crate) fn notification_icon() -> String {
+    let dir = notification_icon_dir();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "png") {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // A primeira notificação pode chegar antes de a interface desenhar a variante escolhida.
+    let fallback = notification_icon_dir().join("ayla.svg");
+    let mark = include_str!("../../src/assets/marcas/ayla_1.svg").replace("currentColor", "#fff");
+    if fs::create_dir_all(notification_icon_dir()).and_then(|()| fs::write(&fallback, mark)).is_ok() {
+        return fallback.to_string_lossy().into_owned();
+    }
+    ICON_BASE.to_owned()
+}
+
 /// Valida o PNG do ícone (base64, até 2 MB, 512×512) e devolve os bytes e os pixels RGBA.
 fn decode_icon(png: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
     use base64::Engine;
@@ -158,10 +183,14 @@ const ICON_SIDE: i32 = 512;
 /// Ícones escolhidos em Aparência: PNGs 512×512 desenhados pela interface. O da Ayla vira o
 /// ícone da janela; os três vão para o menu e o "Abrir com" (Ayla, Athena e Iris).
 #[tauri::command]
-pub fn appearance_icon(window: WebviewWindow, png: String, athena: Option<String>, iris: Option<String>) -> Result<(), String> {
+pub fn appearance_icon(window: WebviewWindow, png: String, athena: Option<String>, iris: Option<String>, notification: Option<String>) -> Result<(), String> {
     let (bytes, rgba) = decode_icon(&png)?;
     let side = ICON_SIDE as u32;
     window.set_icon(tauri::image::Image::new_owned(rgba, side, side)).map_err(|_| "Não foi possível trocar o ícone da janela")?;
+    if let Some(png) = notification {
+        let (bytes, _) = decode_icon(&png)?;
+        install_icon(&notification_icon_dir(), ICON_BASE, &bytes)?;
+    }
     let Some((icons, applications, autostart)) = system_dirs() else { return Ok(()) };
     let mut changed = false;
     let mut install = |base: &str, bytes: &[u8], entries: &[PathBuf]| -> Result<(), String> {

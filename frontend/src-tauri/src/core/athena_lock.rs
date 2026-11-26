@@ -150,7 +150,7 @@ pub fn protected_folders(root: &Path) -> Vec<String> {
         let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if super::athena::skipped(root, &dir, &name) || !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             let relative = dir.join(&name);
@@ -615,7 +615,7 @@ pub fn protected_files(root: &Path) -> Vec<String> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             let Ok(kind) = entry.file_type() else { continue };
-            if name.starts_with('.') || kind.is_symlink() {
+            if super::athena::skipped(root, &dir, &name) || kind.is_symlink() {
                 continue;
             }
             let relative = dir.join(&name);

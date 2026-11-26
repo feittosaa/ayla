@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent } from 'react';
 import Confirm from './Confirm';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -7,7 +7,9 @@ import { base64, recordWav, type Recording } from '../services/Audio';
 import { asksForImage, asksAboutScreen } from '../services/Intent';
 import ImageResults from './ImageResults';
 import ChatDesigns from './ChatDesigns';
-import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, LayoutIcon, MicIcon, PaperclipIcon, PencilIcon, ScreenIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
+import ChatFicha from './ChatFicha';
+import type { FichaCard } from '../services/Ficha';
+import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, LayoutIcon, MicIcon, ChevronLeftIcon, ChevronRightIcon, PaperclipIcon, PencilIcon, RefreshIcon, ScreenIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import Markdown from './Markdown';
 import FilePreview from './FilePreview';
 import './Chat.css';
@@ -42,8 +44,28 @@ type Props = {
 type ResponseSource = 'local' | 'auto' | 'cloud';
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
+/** Editar uma pergunta (nova versão dela) ou gerar outra resposta: `id` da pergunta; `cut`, a
+ * posição a partir da qual a tela troca; `files`, os anexos da pergunta original. */
+type Branch = { kind: 'edit' | 'regenerate'; id: number; text: string; cut: number; files: FileInfo[] };
+const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha } : m;
+
+/** Setas para alternar entre as versões de uma mensagem (‹ 2/3 ›). */
+function Versions({ message, disabled, onPick }: { message: Message; disabled: boolean; onPick: (id: number) => void }) {
+  const versions = message.versions ?? [];
+  const at = message.id ? versions.indexOf(message.id) : -1;
+  if (versions.length < 2 || at < 0) return null;
+  return <span className="message-versions" role="group" aria-label="Versões">
+    <button type="button" className="icon-button" aria-label="Versão anterior" disabled={disabled || at === 0} onClick={() => onPick(versions[at - 1])}><ChevronLeftIcon size={15} /></button>
+    <span>{at + 1}/{versions.length}</span>
+    <button type="button" className="icon-button" aria-label="Próxima versão" disabled={disabled || at === versions.length - 1} onClick={() => onPick(versions[at + 1])}><ChevronRightIcon size={15} /></button>
+  </span>;
+}
+
 export default function Chat({ snapshot, refresh, project, conversation, onConversation, onBusy, onShowSidebar, active: visible, focusComposer, onOpenSettings, onOpenNote, attach, bases = [], onBasesUsed, onRemoveBase, onDiscarded }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [editing, setEditing] = useState<{ index: number; text: string } | null>(null);
+  // Editar ou gerar de novo à espera da escolha "nuvem ou local" do Automático.
+  const askBranch = useRef<Branch | null>(null);
   const shownMessages = useRef(0);
   shownMessages.current = messages.length;
   const discarded = useRef(onDiscarded);
@@ -86,9 +108,10 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   // Pedidos sobre finanças usam a Moneta e respondem neste computador em qualquer modo (mesma lista do núcleo).
   const [localWords, setLocalWords] = useState<string[]>([]);
   useEffect(() => { void native<string[]>('organ_local_words').then(setLocalWords).catch(() => setLocalWords([])); }, [snapshot]);
-  const organLocal = localWords.some(word => input.toLowerCase().includes(word));
+  const projectContext = bases.some(b => b.id.startsWith('project-source:'));
+  const organLocal = projectContext || localWords.some(word => input.toLowerCase().includes(word));
   const provider = snapshot.preferences.cloud_provider;
-  const destination = mode === 'local_only' ? 'local' : mode === 'cloud_only' ? 'cloud' : source;
+  const destination = projectContext || mode === 'local_only' ? 'local' : mode === 'cloud_only' ? 'cloud' : source;
   const canResearch = destination === 'cloud' && !organLocal && !attachments.length && sensitivity !== 'sensitive' && Boolean(input.trim());
   const [decision, setDecision] = useState<{ draft: string; search: boolean } | null>(null);
   const pendingRoute = canResearch && decision?.draft !== input;
@@ -122,7 +145,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     .reduce((sum, entry) => sum + (entry && !entry.installed ? entry.download_bytes : 0), 0);
   // Criar imagem só quando a pessoa pede: botão ou frase explícita ("gere uma imagem de…").
   const asksImage = asksForImage(input);
-  const image = !designing && (imageChoice ?? asksImage) && mode !== 'local_only';
+  const image = !projectContext && !designing && (imageChoice ?? asksImage) && mode !== 'local_only';
   // Referências: memórias públicas relevantes, listadas na revisão; só as marcadas vão junto.
   const [references, setReferences] = useState<Reference[]>([]); const [dropped, setDropped] = useState<string[]>([]);
   const reviewing = cloud && !pendingRoute && !research && !image && input.trim().length >= 3;
@@ -170,7 +193,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     setError(''); setReviewed(false); setRouting(''); follow.current = true;
     if (!conversationId) { setMessages([]); return; }
     let current = true;
-    native<Message[]>('conversation_messages', { id: conversationId }).then(items => { if (current) setMessages(items.map(m => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs } : m)); }).catch(e => { if (current) setError(errorText(e)); });
+    native<Message[]>('conversation_messages', { id: conversationId }).then(items => { if (current) setMessages(items.map(withExtras)); }).catch(e => { if (current) setError(errorText(e)); });
     return () => { current = false; };
   }, [conversationId]);
 
@@ -278,14 +301,41 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       setError(errorText(e)); setMessages(prev => prev.slice(0, -2)); setInput(prompt); setImageChoice(true);
     } finally { active.current = null; setBusy(false); setReviewed(false); setStatus(''); await refresh(); }
   }
-  async function send(spokenText?: string, choice?: 'cloud' | 'local') {
-    if (image && spokenText === undefined) { await createImage(); return; }
-    const typed = (spokenText ?? input).trim();
-    const text = typed || (attachments.length ? (attachments.length === 1 ? 'Veja o arquivo anexado.' : 'Veja os arquivos anexados.') : '');
+  /** Caminho da conversa como o núcleo guarda (com ids e versões), depois de enviar ou alternar. */
+  async function reload(id: string, keepNotice = false) {
+    try {
+      const items = (await native<Message[]>('conversation_messages', { id })).map(withExtras);
+      // O aviso de rota da resposta que acabou de chegar não fica guardado: continua na tela.
+      setMessages(prev => {
+        const notice = keepNotice ? prev[prev.length - 1]?.notice : undefined;
+        return notice && items.length ? items.map((m, i) => i === items.length - 1 ? { ...m, notice } : m) : items;
+      });
+    } catch (e) { setError(errorText(e)); }
+  }
+  /** Mostra outra versão de uma mensagem (‹ 2/3 ›). */
+  async function pickVersion(message: number) {
+    if (!conversation || active.current) return;
+    try { setMessages((await native<Message[]>('conversation_select', { id: conversation.id, message })).map(withExtras)); } catch (e) { setError(errorText(e)); }
+  }
+  function submitEdit(event: FormEvent) {
+    event.preventDefault();
+    const target = editing && messages[editing.index];
+    if (!editing || !target?.id || !editing.text.trim()) return;
+    setEditing(null);
+    void send(undefined, undefined, { kind: 'edit', id: target.id, text: editing.text, cut: editing.index, files: target.attachments ?? [] });
+  }
+  /** `branch`: nova versão de uma pergunta (editar) ou outra resposta para ela (gerar de novo); as
+   * mensagens a partir de `cut` saem da tela e a resposta nova entra no lugar. */
+  async function send(spokenText?: string, choice?: 'cloud' | 'local', branchArg?: Branch) {
+    const branch = branchArg ?? (choice ? askBranch.current : null) ?? null;
+    askBranch.current = null;
+    if (image && spokenText === undefined && !branch) { await createImage(); return; }
+    const typed = branch ? branch.text.trim() : (spokenText ?? input).trim();
+    const text = typed || (!branch && attachments.length ? (attachments.length === 1 ? 'Veja o arquivo anexado.' : 'Veja os arquivos anexados.') : '');
     if (!text || active.current || adding) return;
     // "O que é isso na tela?": a Ayla pede a região da tela antes de responder.
     let shot: FileInfo | null = null;
-    if (spokenText === undefined && asksAboutScreen(text) && !attachments.some(file => file.kind === 'image')) {
+    if (!branch && spokenText === undefined && asksAboutScreen(text) && !attachments.some(file => file.kind === 'image')) {
       shot = await captureScreen();
       if (!shot) return;
     }
@@ -295,9 +345,11 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       try { current = await native<Conversation>('create_conversation', { project: project?.id ?? null }); created.current = current.id; onConversation(current); }
       catch (e) { setError(errorText(e)); active.current = null; setBusy(false); return; }
     }
-    const message = text; if (spokenText === undefined) setInput('');
-    const sent = shot ? [...attachments, shot] : attachments; setAttachments([]); setAsk(null);
-    setMessages(prev => [...prev, { role: 'user', content: message, complete: true, attachments: sent }, { role: 'assistant', content: '', complete: false }]);
+    const message = text; if (spokenText === undefined && !branch) setInput('');
+    const sent = branch ? branch.files : shot ? [...attachments, shot] : attachments; if (!branch) setAttachments([]); setAsk(null);
+    const question: Message = { role: 'user', content: message, complete: true, attachments: sent };
+    const pending: Message = { role: 'assistant', content: '', complete: false };
+    setMessages(prev => branch ? [...prev.slice(0, branch.cut), ...(branch.kind === 'edit' ? [question] : []), pending] : [...prev, question, pending]);
     // Automático: a Ayla classifica neste computador antes do envio e pergunta quando houver dúvida.
     let autoRoute: ChatRequest['auto_route'] = null;
     const automaticCloud = destination === 'auto' && !designing && Boolean(provider) && !sent.length && !organLocal && sensitivity !== 'sensitive'
@@ -308,7 +360,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       try {
         const check = await native<{ route: 'local' | 'cloud' | 'search' | 'ask'; search: boolean }>('automatic_check', { message });
         if (check.route === 'ask') {
-          setMessages(prev => prev.slice(0, -2)); setAttachments(sent); setInput(message);
+          if (branch) { askBranch.current = branch; await reload(current.id); } else { setMessages(prev => prev.slice(0, -2)); setAttachments(sent); setInput(message); }
           setAsk({ message, search: check.search });
           active.current = null; setBusy(false); setStatus('');
           return;
@@ -316,7 +368,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         autoRoute = check.route;
       } catch { autoRoute = 'local'; }
     }
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: sent.map(file => file.id), sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: branch ? [] : sent.map(file => file.id), edit_of: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null, sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing };
     if (designing) setDesigning(false);
     if (bases.length) onBasesUsed?.();
     let receivedText = false;
@@ -325,6 +377,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'origin') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, origin: event.origin } : m));
         if (event.type === 'routing') { setRouting(event.text || ''); setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, notice: event.text || '' } : m)); }
         if (event.type === 'images') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, images: { query: event.query ?? '', items: event.items ?? [], links: event.links ?? [] } } : m));
+        if (event.type === 'ficha') { const item = (event as unknown as { item?: FichaCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, ficha: item } : m)); }
         if (event.type === 'designs') { const items = (event as unknown as { items?: DesignCard[] }).items ?? []; setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, designs: items } : m)); }
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
         if (event.type === 'memory' && event.facts?.length) setLearned(prev => [...prev.filter(f => !event.facts!.some(n => n.id === f.id)), ...event.facts!]);
@@ -335,9 +388,12 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'token' && event.text) setMessages(prev => { const next = [...prev]; const last = next[next.length - 1]; next[next.length - 1] = { ...last, content: last.content + event.text }; return next; });
       });
       setMessages(prev => prev.map((m, index) => index === prev.length - 1 ? { ...m, complete: true } : m));
+      // Ids e versões vêm do núcleo (para editar e gerar de novo).
+      await reload(current.id, true);
     } catch (e) {
       setError(errorText(e));
-      if (!receivedText && (research || destination === 'auto')) {
+      if (branch) await reload(current.id);
+      else if (!receivedText && (research || destination === 'auto')) {
         setMessages(prev => prev.slice(0, -2));
         setAttachments(sent);
         setInput(message);
@@ -449,13 +505,27 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
           {!messages.length && offerMemory && <section className="setup-card" aria-label="Ativar memória"><h2>Quer que a Ayla lembre de você?</h2><p>Com a memória ativada, a Ayla guarda neste computador o que for importante nas conversas, como preferências, pessoas e projetos. Você vê e apaga tudo em Configurações.</p><button className="primary-action" onClick={start}>Ativar memória · {formatBytes(memoryEntry.download_bytes)}</button></section>}
 
           {messages.map((m, i) => m.role === 'user'
-            ? <div key={i} className="message user">{m.attachments?.length ? <span className="message-files">{m.attachments.map(file => file.kind === 'image' || file.kind === 'gif' ? <FilePreview key={file.id} file={file} /> : <span key={file.id} className="file-chip"><FileIcon size={14} />{file.name}</span>)}</span> : null}{m.content}</div>
+            ? editing?.index === i
+              ? <form key={i} className="message user editing" onSubmit={submitEdit}>
+                  <textarea aria-label="Editar a mensagem" autoFocus value={editing.text} rows={Math.min(12, editing.text.split('\n').length + 1)}
+                    onChange={e => setEditing({ index: i, text: e.target.value })}
+                    onKeyDown={e => { if (e.key === 'Escape') setEditing(null); if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) submitEdit(e); }} />
+                  <div className="row-actions"><button type="button" className="ghost-button" onClick={() => setEditing(null)}>Cancelar</button><button className="primary-action" disabled={!editing.text.trim() || busy}>Enviar</button></div>
+                </form>
+              : <Fragment key={i}>
+                  <div className="message user">{m.attachments?.length ? <span className="message-files">{m.attachments.map(file => file.kind === 'image' || file.kind === 'gif' ? <FilePreview key={file.id} file={file} /> : <span key={file.id} className="file-chip"><FileIcon size={14} />{file.name}</span>)}</span> : null}{m.content}</div>
+                  {m.id && <div className="message-actions user-actions">
+                    <Versions message={m} disabled={busy} onPick={id => void pickVersion(id)} />
+                    <button className="ghost-button" disabled={busy} title="Editar e enviar de novo a partir daqui" onClick={() => setEditing({ index: i, text: m.content })}><PencilIcon size={15} />Editar</button>
+                  </div>}
+                </Fragment>
             : <div key={i} className="message assistant">
                 <span className="orb small" aria-hidden="true" />
                 <div className="assistant-body">
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
                   {m.designs?.length ? <ChatDesigns items={m.designs} /> : null}
+                  {m.ficha ? <ChatFicha item={m.ficha} /> : null}
                   {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
                   {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => {
                     const label = <><FileIcon size={14} />{source.name}{source.date ? ` · ${source.date}` : ''}{source.pages.length ? ` · p. ${source.pages.join(', ')}` : ''}</>;
@@ -467,7 +537,12 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.notice && m.complete && <p className="message-notice">{m.notice}</p>}
                   {!m.complete && m.content && !busy && <small className="incomplete">Resposta incompleta</small>}
                   {m.origin && m.content && <small className="reply-origin">{m.origin === 'cloud_search' ? 'Busca na nuvem' : 'Resposta na nuvem'}</small>}
-                  {m.complete && m.content && <div className="message-actions"><button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button></div>}
+                  {(m.id || (m.complete && m.content)) && <div className="message-actions">
+                    <Versions message={m} disabled={busy} onPick={id => void pickVersion(id)} />
+                    {m.id && messages[i - 1]?.role === 'user' && messages[i - 1].id && <button className="ghost-button" disabled={busy} title="Gerar outra resposta para esta pergunta"
+                      onClick={() => { const q = messages[i - 1]; void send(undefined, undefined, { kind: 'regenerate', id: q.id!, text: q.content, cut: i, files: q.attachments ?? [] }); }}><RefreshIcon size={15} />Gerar de novo</button>}
+                    {m.complete && m.content && <button className="ghost-button" onClick={() => void copy(m.content, i)}><CopyIcon size={16} />{copied === i ? 'Copiado' : 'Copiar'}</button>}
+                  </div>}
                 </div>
               </div>)}
           {learned.map(fact => <div key={fact.id} className="memory-note"><span>Ayla lembrou: {fact.content}</span><Confirm className="link-button" question="Apagar esta memória?" confirm="Apagar" onConfirm={() => void forget(fact)}>Desfazer</Confirm></div>)}
@@ -522,7 +597,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
             {adding && <li className="file-chip" role="status">Guardando…</li>}
           </ul>}
           {bases.length > 0 && <ul className="composer-files" aria-label="Bases nesta mensagem">
-            {bases.map(base => <li key={base.id} className="file-chip base-chip"><DatabaseIcon size={14} /><span className="file-name">{base.id.startsWith('imagens:') || base.id.startsWith('academico:') ? 'Fonte' : 'Base'}: {base.name}</span>
+            {bases.map(base => <li key={base.id} className="file-chip base-chip"><DatabaseIcon size={14} /><span className="file-name">{base.id.startsWith('project-source:') || base.id.startsWith('imagens:') || base.id.startsWith('academico:') ? 'Fonte' : 'Base'}: {base.name}</span>
               <button type="button" className="chip-remove" aria-label={`Tirar a base ${base.name}`} disabled={busy} onClick={() => onRemoveBase?.(base.id)}><CloseIcon size={14} /></button></li>)}
           </ul>}
           <textarea ref={field} rows={1} aria-label="Mensagem" value={input} readOnly={listening !== 'idle'} disabled={busy}

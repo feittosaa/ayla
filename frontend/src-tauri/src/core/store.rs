@@ -25,6 +25,16 @@ pub fn id() -> String {
     )
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ProjectSource {
+    #[serde(default)]
+    pub id: String,
+    pub kind: String,
+    pub root: String,
+    pub path: String,
+    pub name: String,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -47,6 +57,12 @@ pub struct Project {
     pub updated_at: i64,
     pub conversations: i64,
     pub memories: i64,
+    /// Pasta do projeto em `athena/Projetos/` (no repositório da Athena).
+    pub folder: Option<String>,
+    /// Ícone do Lucide (nome), do pacote de recursos da Iris.
+    pub icon: Option<String>,
+    /// Cor de fundo: `None` automática, "none" sem cor, ou "#rrggbb".
+    pub color: Option<String>,
 }
 /// Quais memórias uma operação enxerga: as do projeto e, opcionalmente, as gerais.
 /// Na conversa geral (`project: None`), só as gerais.
@@ -97,7 +113,7 @@ pub struct Chunk {
 fn in_list(count: usize, first: usize) -> String {
     (first..first + count).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",")
 }
-const SCHEMA: u32 = 12;
+const SCHEMA: u32 = 15;
 const FACT_COLUMNS: &str = "id,content,kind,privacy,origin,conversation_id,created_at,updated_at,project_id";
 const SCOPE_FILTER: &str = "(project_id IS ?S1 OR (?S2 AND project_id IS NULL))";
 fn scoped(sql: &str) -> String {
@@ -114,7 +130,22 @@ pub struct Message {
     pub extras: Option<serde_json::Value>,
     /// Arquivos enviados com esta mensagem.
     pub attachments: Vec<FileInfo>,
+    /// Versões desta mensagem (ela e as irmãs, em ordem), para alternar entre elas.
+    pub versions: Vec<i64>,
 }
+
+/// Onde entra o próximo turno: depois de `parent` (o pai da pergunta). `user`: pergunta já
+/// gravada que ganha outra resposta (gerar de novo). `files_from`: mensagem cujos anexos a
+/// pergunta nova reaproveita (editar).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Placement {
+    pub parent: Option<i64>,
+    pub user: Option<i64>,
+    pub files_from: Option<i64>,
+}
+
+/// Caminho de uma mensagem até a primeira da conversa (recursivo pelo `parent_id`).
+const PATH_CTE: &str = "WITH RECURSIVE path(id) AS (SELECT ?2 UNION ALL SELECT m.parent_id FROM messages m JOIN path ON m.id=path.id WHERE m.parent_id IS NOT NULL)";
 /// Arquivo guardado pela Ayla (cópia em `files/<id>/`).
 #[derive(Clone, Debug, Serialize)]
 pub struct FileInfo {
@@ -225,6 +256,38 @@ impl Store {
             let tx = conn.transaction()?;
             tx.execute_batch("ALTER TABLE reminders ADD COLUMN alerts TEXT;
                 UPDATE reminders SET alerts=CASE notify WHEN 1 THEN '[0]' ELSE '[]' END; PRAGMA user_version=12;")?;
+            tx.commit()?;
+        }
+        // v13: versões de mensagens (editar e gerar de novo). Cada mensagem aponta para a anterior
+        // do caminho (`parent_id`) e a conversa guarda a última do caminho mostrado (`leaf_id`; sem
+        // ela, a mais recente). `files_from`: mensagem cujos anexos a versão editada reaproveita.
+        // As conversas antigas viram um caminho só, na ordem em que foram gravadas.
+        if version <= 12 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN parent_id INTEGER;
+                ALTER TABLE messages ADD COLUMN files_from INTEGER;
+                ALTER TABLE conversations ADD COLUMN leaf_id INTEGER;
+                UPDATE messages SET parent_id=(SELECT MAX(p.id) FROM messages p WHERE p.conversation_id=messages.conversation_id AND p.id<messages.id);
+                CREATE INDEX messages_parent ON messages(conversation_id,parent_id);
+                PRAGMA user_version=13;")?;
+            tx.commit()?;
+        }
+        if version < 14 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS project_sources(
+                id TEXT PRIMARY KEY, project TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL, root TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+                UNIQUE(project,kind,root,path)); PRAGMA user_version=14;")?;
+            tx.commit()?;
+        }
+        // v15: projeto como pasta no repositório da Athena (`folder`, em `athena/Projetos/`), com
+        // ícone do Lucide (`icon`, pelo nome) e cor de fundo (`color`: NULL automática, "none" ou #rrggbb).
+        if version < 15 {
+            let tx = conn.transaction()?;
+            tx.execute_batch("ALTER TABLE projects ADD COLUMN folder TEXT;
+                ALTER TABLE projects ADD COLUMN icon TEXT;
+                ALTER TABLE projects ADD COLUMN color TEXT;
+                PRAGMA user_version=15;")?;
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -386,7 +449,7 @@ impl Store {
     pub fn create_project(&self, name: &str, description: &str) -> rusqlite::Result<Project> {
         let (id, now) = (id(), now());
         self.conn.execute(
-            "INSERT INTO projects VALUES(?1,?2,?3,?4,?4)",
+            "INSERT INTO projects(id,name,description,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)",
             params![id, name.trim().chars().take(80).collect::<String>(), description.trim().chars().take(2000).collect::<String>(), now],
         )?;
         self.project(&id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -396,6 +459,14 @@ impl Store {
             "UPDATE projects SET name=?2, description=?3, updated_at=?4 WHERE id=?1",
             params![id, name.trim().chars().take(80).collect::<String>(), description.trim().chars().take(2000).collect::<String>(), now()],
         )?;
+        if changed == 0 { Err(rusqlite::Error::QueryReturnedNoRows) } else { Ok(()) }
+    }
+    pub fn set_project_folder(&self, id: &str, folder: &str) -> rusqlite::Result<()> {
+        self.conn.execute("UPDATE projects SET folder=?2 WHERE id=?1", params![id, folder])?;
+        Ok(())
+    }
+    pub fn set_project_look(&self, id: &str, icon: Option<&str>, color: Option<&str>) -> rusqlite::Result<()> {
+        let changed = self.conn.execute("UPDATE projects SET icon=?2, color=?3, updated_at=?4 WHERE id=?1", params![id, icon, color, now()])?;
         if changed == 0 { Err(rusqlite::Error::QueryReturnedNoRows) } else { Ok(()) }
     }
     /// Apaga o projeto com suas conversas, mensagens e memórias.
@@ -408,9 +479,21 @@ impl Store {
         Ok(deleted)
     }
     fn project_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
-        Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, conversations: r.get(5)?, memories: r.get(6)? })
+        Ok(Project { id: r.get(0)?, name: r.get(1)?, description: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)?, conversations: r.get(5)?, memories: r.get(6)?, folder: r.get(7)?, icon: r.get(8)?, color: r.get(9)? })
     }
-    const PROJECT_SELECT: &'static str = "SELECT p.id,p.name,p.description,p.created_at,p.updated_at,(SELECT count(*) FROM conversations WHERE project_id=p.id),(SELECT count(*) FROM facts WHERE project_id=p.id) FROM projects p";
+    const PROJECT_SELECT: &'static str = "SELECT p.id,p.name,p.description,p.created_at,p.updated_at,(SELECT count(*) FROM conversations WHERE project_id=p.id),(SELECT count(*) FROM facts WHERE project_id=p.id),p.folder,p.icon,p.color FROM projects p";
+    pub fn project_sources(&self, project: &str) -> rusqlite::Result<Vec<ProjectSource>> {
+        self.conn.prepare("SELECT id,kind,root,path,name FROM project_sources WHERE project=? ORDER BY rowid")?
+            .query_map([project], |r| Ok(ProjectSource { id:r.get(0)?, kind:r.get(1)?, root:r.get(2)?, path:r.get(3)?, name:r.get(4)? }))?.collect()
+    }
+    pub fn link_source(&self, project: &str, s: &ProjectSource) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT INTO project_sources(id,project,kind,root,path,name) VALUES(?,?,?,?,?,?) ON CONFLICT(project,kind,root,path) DO NOTHING",
+            params![s.id,project,s.kind,s.root,s.path,s.name])?;
+        Ok(())
+    }
+    pub fn unlink_source(&self, project: &str, id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute("DELETE FROM project_sources WHERE project=? AND id=?", params![project,id])
+    }
     pub fn project(&self, id: &str) -> rusqlite::Result<Option<Project>> {
         let mut rows = self.conn.prepare(&format!("{} WHERE p.id=?1", Self::PROJECT_SELECT))?.query_map([id], Self::project_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows.pop())
@@ -435,26 +518,45 @@ impl Store {
         }
         Ok(())
     }
+    /// Última mensagem do caminho mostrado (a escolhida nas versões, ou a mais recente).
+    pub fn leaf(&self, conversation: &str) -> rusqlite::Result<Option<i64>> {
+        match self.conn.query_row("SELECT COALESCE(c.leaf_id,(SELECT MAX(id) FROM messages WHERE conversation_id=c.id)) FROM conversations c WHERE c.id=?1", [conversation], |r| r.get(0)) {
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            other => other,
+        }
+    }
+    /// Mensagens do caminho mostrado, com as versões de cada uma (as 200 últimas).
     pub fn messages(&self, id: &str) -> rusqlite::Result<Vec<Message>> {
-        let mut rows:Vec<Message> = self.conn.prepare("SELECT id,role,content,complete,origin,extras FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT 200")?
-            .query_map([id], |r| Ok(Message { id:r.get(0)?, role:r.get(1)?, content:r.get(2)?, complete:r.get(3)?, origin:r.get(4)?,
-                extras: r.get::<_, Option<String>>(5)?.and_then(|e| serde_json::from_str(&e).ok()), attachments: Vec::new() }))?.collect::<rusqlite::Result<_>>()?;
+        let Some(leaf) = self.leaf(id)? else { return Ok(Vec::new()) };
+        let mut rows: Vec<(Message, Option<i64>, Option<i64>)> = self.conn.prepare(&format!("{PATH_CTE} SELECT m.id,m.role,m.content,m.complete,m.origin,m.extras,m.parent_id,m.files_from FROM messages m JOIN path ON m.id=path.id WHERE m.conversation_id=?1 ORDER BY m.id DESC LIMIT 200"))?
+            .query_map(params![id, leaf], |r| Ok((Message { id: r.get(0)?, role: r.get(1)?, content: r.get(2)?, complete: r.get(3)?, origin: r.get(4)?,
+                extras: r.get::<_, Option<String>>(5)?.and_then(|e| serde_json::from_str(&e).ok()), attachments: Vec::new(), versions: Vec::new() }, r.get(6)?, r.get(7)?)))?
+            .collect::<rusqlite::Result<_>>()?;
         rows.reverse();
         let attached = self.conversation_files(id)?;
-        for message in &mut rows {
-            message.attachments = attached.iter().filter(|f| f.message_id == Some(message.id)).cloned().collect();
+        let mut siblings = self.conn.prepare("SELECT id FROM messages WHERE conversation_id=?1 AND role=?2 AND parent_id IS ?3 ORDER BY id")?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (mut message, parent, files_from) in rows {
+            let owner = files_from.unwrap_or(message.id);
+            message.attachments = attached.iter().filter(|f| f.message_id == Some(owner)).cloned().collect();
+            message.versions = siblings.query_map(params![id, message.role, parent], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            out.push(message);
         }
-        Ok(rows)
+        Ok(out)
     }
+    /// Mensagens anteriores, para o modelo: o caminho até `upto` (inclusive), só as completas,
+    /// dentro dos limites. Sem `upto`, nada (começo da conversa). Versões fora do caminho não entram.
     pub fn context(
         &self,
         id: &str,
+        upto: Option<i64>,
         limit: usize,
         chars: usize,
     ) -> rusqlite::Result<Vec<serde_json::Value>> {
+        let Some(upto) = upto else { return Ok(Vec::new()) };
         // Limitar no SQL antes de alocar; nunca misturar conversas ou respostas parciais.
-        let mut rows: Vec<(String,String)> = self.conn.prepare("SELECT role,content FROM messages WHERE conversation_id=?1 AND complete=1 ORDER BY id DESC LIMIT ?2")?
-            .query_map(params![id, limit as i64], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut rows: Vec<(String,String)> = self.conn.prepare(&format!("{PATH_CTE} SELECT m.role,m.content FROM messages m JOIN path ON m.id=path.id WHERE m.conversation_id=?1 AND m.complete=1 ORDER BY m.id DESC LIMIT ?3"))?
+            .query_map(params![id, upto, limit as i64], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
         let mut remaining = chars;
         rows.retain(|(_, content)| {
             let count = content.chars().count();
@@ -472,11 +574,38 @@ impl Store {
             .map(|(role, content)| serde_json::json!({"role":role,"content":content}))
             .collect())
     }
+    /// Onde entra o próximo turno. Sem `edit_of` nem `regenerate`: depois do caminho mostrado.
+    /// `edit_of`: nova versão dessa pergunta (irmã dela). `regenerate`: outra resposta para essa
+    /// pergunta (devolve também o texto dela). Só perguntas desta conversa.
+    pub fn placement(&self, conversation: &str, edit_of: Option<i64>, regenerate: Option<i64>) -> rusqlite::Result<(Placement, Option<String>)> {
+        let question = |id: i64| self.conn.query_row("SELECT parent_id,files_from,content FROM messages WHERE id=?1 AND conversation_id=?2 AND role='user'",
+            params![id, conversation], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, String>(2)?)));
+        match (edit_of, regenerate) {
+            (Some(_), Some(_)) => Err(rusqlite::Error::InvalidQuery),
+            (Some(id), None) => { let (parent, files_from, _) = question(id)?; Ok((Placement { parent, user: None, files_from: Some(files_from.unwrap_or(id)) }, None)) }
+            (None, Some(id)) => { let (parent, _, content) = question(id)?; Ok((Placement { parent, user: Some(id), files_from: None }, Some(content))) }
+            (None, None) => Ok((Placement { parent: self.leaf(conversation)?, user: None, files_from: None }, None)),
+        }
+    }
+    /// Arquivos de uma pergunta (os da versão original, quando ela os reaproveita).
+    pub fn message_files(&self, conversation: &str, message: i64) -> rusqlite::Result<Vec<FileInfo>> {
+        let owner: i64 = self.conn.query_row("SELECT COALESCE(files_from,id) FROM messages WHERE id=?1 AND conversation_id=?2", params![message, conversation], |r| r.get(0))?;
+        Ok(self.conversation_files(conversation)?.into_iter().filter(|f| f.message_id == Some(owner)).collect())
+    }
+    /// Mostra esta versão: o caminho passa por ela e segue pelas respostas mais recentes abaixo.
+    pub fn select_version(&self, conversation: &str, message: i64) -> rusqlite::Result<()> {
+        let mut leaf: i64 = self.conn.query_row("SELECT id FROM messages WHERE id=?1 AND conversation_id=?2", params![message, conversation], |r| r.get(0))?;
+        let mut child = self.conn.prepare("SELECT MAX(id) FROM messages WHERE conversation_id=?1 AND parent_id=?2")?;
+        while let Some(next) = child.query_row(params![conversation, leaf], |r| r.get::<_, Option<i64>>(0))? { leaf = next; }
+        self.conn.execute("UPDATE conversations SET leaf_id=?2 WHERE id=?1", params![conversation, leaf])?;
+        Ok(())
+    }
     /// Grava a pergunta e a resposta; os anexos passam a pertencer à pergunta e os
     /// arquivos criados (ex.: imagens geradas), à resposta.
     pub fn save_turn(
         &self,
         id: &str,
+        placement: Placement,
         user: &str,
         assistant: &str,
         complete: bool,
@@ -485,19 +614,29 @@ impl Store {
         origin: Option<&str>,
     ) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO messages(conversation_id,role,content,complete) VALUES(?1,'user',?2,1)",
-            params![id, user],
-        )?;
-        let message = tx.last_insert_rowid();
-        for file in attachments {
-            tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, message])?;
-        }
-        tx.execute("INSERT INTO messages(conversation_id,role,content,complete,origin) VALUES(?1,'assistant',?2,?3,?4)",params![id,assistant,complete,origin])?;
+        let message = match placement.user {
+            Some(existing) => existing,
+            None => {
+                tx.execute(
+                    "INSERT INTO messages(conversation_id,role,content,complete,parent_id,files_from) VALUES(?1,'user',?2,1,?3,?4)",
+                    params![id, user, placement.parent, placement.files_from],
+                )?;
+                let message = tx.last_insert_rowid();
+                // Anexos reaproveitados continuam da pergunta original.
+                if placement.files_from.is_none() {
+                    for file in attachments {
+                        tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, message])?;
+                    }
+                }
+                message
+            }
+        };
+        tx.execute("INSERT INTO messages(conversation_id,role,content,complete,origin,parent_id) VALUES(?1,'assistant',?2,?3,?4,?5)",params![id,assistant,complete,origin,message])?;
         let reply = tx.last_insert_rowid();
         for file in created {
             tx.execute("UPDATE files SET conversation_id=?2, message_id=?3, kept=1 WHERE id=?1", params![file, id, reply])?;
         }
+        tx.execute("UPDATE conversations SET leaf_id=?2 WHERE id=?1", params![id, reply])?;
         tx.commit()
     }
     /// Guarda imagens e fontes na última resposta da conversa (a que `save_turn` acabou de gravar).
@@ -781,10 +920,12 @@ impl Store {
         content: &str,
         complete: bool,
     ) -> rusqlite::Result<()> {
+        let parent = self.leaf(id)?;
         self.conn.execute(
-            "INSERT INTO messages(conversation_id,role,content,complete) VALUES(?1,?2,?3,?4)",
-            params![id, role, content, complete],
+            "INSERT INTO messages(conversation_id,role,content,complete,parent_id) VALUES(?1,?2,?3,?4,?5)",
+            params![id, role, content, complete, parent],
         )?;
+        self.conn.execute("UPDATE conversations SET leaf_id=?2 WHERE id=?1", params![id, self.conn.last_insert_rowid()])?;
         Ok(())
     }
     pub fn save_model(&self, id: &str, definition: &str) -> rusqlite::Result<()> {
@@ -1066,11 +1207,11 @@ mod tests {
         db.add_message(&a.id, "assistant", "parcial", false)
             .unwrap();
         db.add_message(&b.id, "user", "apenas B", true).unwrap();
-        assert_eq!(db.context(&a.id, 10, 100).unwrap().len(), 1);
-        assert!(!serde_json::to_string(&db.context(&a.id, 10, 100).unwrap())
+        assert_eq!(db.context(&a.id, db.leaf(&a.id).unwrap(), 10, 100).unwrap().len(), 1);
+        assert!(!serde_json::to_string(&db.context(&a.id, db.leaf(&a.id).unwrap(), 10, 100).unwrap())
             .unwrap()
             .contains("B"));
-        assert!(db.context(&a.id, 10, 1).unwrap().is_empty());
+        assert!(db.context(&a.id, db.leaf(&a.id).unwrap(), 10, 1).unwrap().is_empty());
         assert!(!db.consent(&a.id).unwrap());
         drop(db);
         assert_eq!(Store::open(&path).unwrap().version().unwrap(), SCHEMA);
@@ -1200,14 +1341,14 @@ mod tests {
         let path = root.join("ayla.db");
         {
             let db = Store::open(&path).unwrap();
-            db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired;
+            db.conn.execute_batch("ALTER TABLE projects DROP COLUMN folder; ALTER TABLE projects DROP COLUMN icon; ALTER TABLE projects DROP COLUMN color; DROP INDEX messages_parent; ALTER TABLE messages DROP COLUMN parent_id; ALTER TABLE messages DROP COLUMN files_from; ALTER TABLE conversations DROP COLUMN leaf_id; ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired;
                 INSERT INTO reminders VALUES('r1','regar as plantas',5000,'daily',1,NULL); PRAGMA user_version=10;").unwrap();
         }
         let db = Store::open(&path).unwrap();
         assert_eq!(db.version().unwrap(), SCHEMA);
         let item = db.reminders(None).unwrap().pop().unwrap();
         assert_eq!((item.start, item.due, item.notify, item.fired, item.all_day, item.alerts), (5000, 5000, true, false, false, vec![0]), "início = próximo aviso; aviso na hora");
-        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v12-")));
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v15-")));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1218,12 +1359,12 @@ mod tests {
         let path = root.join("ayla.db");
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
-        db.save_turn(&chat.id, "antes", "resposta antiga", true, &[], &[], None).unwrap();
-        db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0, "antes", "resposta antiga", true, &[], &[], None).unwrap();
+        db.conn.execute_batch("ALTER TABLE projects DROP COLUMN folder; ALTER TABLE projects DROP COLUMN icon; ALTER TABLE projects DROP COLUMN color; DROP INDEX messages_parent; ALTER TABLE messages DROP COLUMN parent_id; ALTER TABLE messages DROP COLUMN files_from; ALTER TABLE conversations DROP COLUMN leaf_id; ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; PRAGMA user_version=8;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
-        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v12-")), "backup antes da migração");
-        db.save_turn(&chat.id, "busca imagens de gato", "Encontrei 1 imagem", true, &[], &[], None).unwrap();
+        assert!(std::fs::read_dir(root.join("backups")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("ayla-antes-v15-")), "backup antes da migração");
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0, "busca imagens de gato", "Encontrei 1 imagem", true, &[], &[], None).unwrap();
         db.set_last_reply_extras(&chat.id, r#"{"images":{"query":"gato","items":[{"id":"1"}],"links":[]},"sources":[{"id":"artigo:0","name":"[1] X","pages":[],"url":"https://doi.org/1"}]}"#).unwrap();
         drop(db);
         let messages = Store::open(&path).unwrap().messages(&chat.id).unwrap();
@@ -1241,11 +1382,11 @@ mod tests {
         let path = root.join("ayla.db");
         let db = Store::open(&path).unwrap();
         let chat = db.create_conversation("teste", None).unwrap();
-        db.save_turn(&chat.id,"a","b",true,&[],&[],None).unwrap();
-        db.conn.execute_batch("ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0,"a","b",true,&[],&[],None).unwrap();
+        db.conn.execute_batch("ALTER TABLE projects DROP COLUMN folder; ALTER TABLE projects DROP COLUMN icon; ALTER TABLE projects DROP COLUMN color; DROP INDEX messages_parent; ALTER TABLE messages DROP COLUMN parent_id; ALTER TABLE messages DROP COLUMN files_from; ALTER TABLE conversations DROP COLUMN leaf_id; ALTER TABLE reminders DROP COLUMN alerts; ALTER TABLE reminders DROP COLUMN start; ALTER TABLE reminders DROP COLUMN all_day; ALTER TABLE reminders DROP COLUMN notify; ALTER TABLE reminders DROP COLUMN fired; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; PRAGMA user_version=7;").unwrap();
         drop(db);
         let db = Store::open(&path).unwrap();
-        db.save_turn(&chat.id,"c","d",true,&[],&[],Some("cloud_search")).unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0,"c","d",true,&[],&[],Some("cloud_search")).unwrap();
         drop(db);
         let rows = Store::open(&path).unwrap().messages(&chat.id).unwrap();
         assert!(rows[..3].iter().all(|row| row.origin.is_none()));
@@ -1290,7 +1431,7 @@ mod tests {
             let db = Store::open(&path).unwrap();
             let general = db.create_conversation("geral", None).unwrap();
             db.insert_fact("O usuário mora em Recife.", "fato", Privacy::Uncertain, "manual", None, None).unwrap();
-            db.conn.execute_batch("ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
+            db.conn.execute_batch("ALTER TABLE projects DROP COLUMN folder; ALTER TABLE projects DROP COLUMN icon; ALTER TABLE projects DROP COLUMN color; DROP INDEX messages_parent; ALTER TABLE messages DROP COLUMN parent_id; ALTER TABLE messages DROP COLUMN files_from; ALTER TABLE conversations DROP COLUMN leaf_id; ALTER TABLE metrics DROP COLUMN prompt_tokens; ALTER TABLE metrics DROP COLUMN cache_tokens; ALTER TABLE metrics DROP COLUMN prompt_ms; ALTER TABLE metrics DROP COLUMN decode_tokens; ALTER TABLE metrics DROP COLUMN decode_ms; ALTER TABLE messages DROP COLUMN extras; ALTER TABLE messages DROP COLUMN origin; DROP TABLE note_vectors; DROP TABLE note_chunks_fts; DROP TABLE note_chunks; DROP TABLE note_index; DROP TABLE reminders; DROP TABLE file_index; DROP TABLE chunk_vectors; DROP TABLE file_chunks_fts; DROP TABLE file_chunks; DROP TABLE files; DROP INDEX conversations_project; DROP INDEX facts_project; ALTER TABLE conversations DROP COLUMN project_id; ALTER TABLE facts DROP COLUMN project_id; DROP TABLE projects; PRAGMA user_version=2;").unwrap();
             drop(general);
         }
         let db = Store::open(&path).unwrap();
@@ -1381,7 +1522,7 @@ mod tests {
         assert!(!db.rename_conversation("inexistente", "x").unwrap());
         let file = FileInfo { id: "f1".into(), name: "nota.md".into(), kind: Kind::Text, bytes: 1, created_at: 0, conversation_id: None, project_id: None, message_id: None, path: "files/f1/nota.md".into(), extracted: None };
         db.insert_file(&file, "sha", false).unwrap();
-        db.save_turn(&a.id, "oi", "olá", true, &[file.id.clone()], &[], None).unwrap();
+        db.save_turn(&a.id, db.placement(&a.id, None, None).unwrap().0, "oi", "olá", true, &[file.id.clone()], &[], None).unwrap();
         db.add_message(&b.id, "user", "fica", true).unwrap();
         let fact = db.insert_fact("O usuário vai viajar em julho.", "fato", Privacy::Uncertain, "auto", Some(&a.id), None).unwrap();
         assert_eq!(db.delete_conversation(&a.id).unwrap(), Some(vec!["files/f1/nota.md".to_string()]));
@@ -1393,5 +1534,50 @@ mod tests {
         assert_eq!(db.delete_conversation(&a.id).unwrap(), None);
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn versoes_de_mensagens_editar_gerar_de_novo_e_alternar() {
+        let root = std::env::temp_dir().join(format!("ayla-versoes-{}", id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Store::open(&root.join("ayla.db")).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        let shown = |db: &Store| db.messages(&chat.id).unwrap().into_iter().map(|m| m.content).collect::<Vec<_>>();
+        let turn = |db: &Store, placement: Placement, q: &str, a: &str| db.save_turn(&chat.id, placement, q, a, true, &[], &[], None).unwrap();
+        turn(&db, db.placement(&chat.id, None, None).unwrap().0, "pergunta", "resposta 1");
+        let q1 = db.messages(&chat.id).unwrap()[0].id;
+        // Gerar de novo: outra resposta para a mesma pergunta, com o texto vindo do banco.
+        let (again, text) = db.placement(&chat.id, None, Some(q1)).unwrap();
+        assert_eq!((again.user, text.as_deref()), (Some(q1), Some("pergunta")));
+        turn(&db, again, "ignorado", "resposta 2");
+        let msgs = db.messages(&chat.id).unwrap();
+        assert_eq!(shown(&db), ["pergunta", "resposta 2"]);
+        assert_eq!(msgs[1].versions.len(), 2);
+        assert_eq!(msgs[0].versions, vec![q1]);
+        // O contexto da próxima pergunta segue só o caminho mostrado.
+        let next = db.placement(&chat.id, None, None).unwrap().0;
+        assert_eq!(db.context(&chat.id, next.parent, 10, 1000).unwrap().iter().map(|m| m["content"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["pergunta", "resposta 2"]);
+        // Alternar para a primeira resposta e continuar dela.
+        db.select_version(&chat.id, msgs[1].versions[0]).unwrap();
+        assert_eq!(shown(&db), ["pergunta", "resposta 1"]);
+        turn(&db, db.placement(&chat.id, None, None).unwrap().0, "seguinte", "resposta 3");
+        assert_eq!(shown(&db), ["pergunta", "resposta 1", "seguinte", "resposta 3"]);
+        // Editar a primeira pergunta: nova versão irmã, sem o que vinha depois.
+        let (edit, _) = db.placement(&chat.id, Some(q1), None).unwrap();
+        assert_eq!((edit.parent, edit.user, edit.files_from), (None, None, Some(q1)));
+        turn(&db, edit, "pergunta editada", "resposta 4");
+        let msgs = db.messages(&chat.id).unwrap();
+        assert_eq!(shown(&db), ["pergunta editada", "resposta 4"]);
+        assert_eq!(msgs[0].versions.len(), 2);
+        // Voltar à pergunta original traz a conversa mais recente abaixo dela.
+        db.select_version(&chat.id, q1).unwrap();
+        assert_eq!(shown(&db).first().map(String::as_str), Some("pergunta"));
+        // Só perguntas desta conversa podem ser editadas ou geradas de novo.
+        let other = db.create_conversation("outra", None).unwrap();
+        assert!(db.placement(&other.id, Some(q1), None).is_err());
+        assert!(db.placement(&chat.id, None, Some(msgs[1].id)).is_err(), "resposta não é pergunta");
+        assert!(db.select_version(&other.id, q1).is_err());
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

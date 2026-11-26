@@ -62,7 +62,7 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
     if (d.getMonth() !== month.getMonth() || d.getFullYear() !== month.getFullYear()) setMonth(new Date(d.getFullYear(), d.getMonth(), 1));
   };
 
-  const newDraft = (reminder: boolean): Draft => ({ id: null, text: '', date: showDate(selected), allDay: !reminder, time: reminder ? '09:00' : '', repeat: 'none', alerts: reminder ? [{ unit: 'na-hora', amount: 1 }] : [] });
+  const newDraft = (reminder: boolean, date = selected): Draft => ({ id: null, text: '', date: showDate(date), allDay: !reminder, time: reminder ? '09:00' : '', repeat: 'none', alerts: reminder ? [{ unit: 'na-hora', amount: 1 }] : [] });
   const edit = (item: Item) => setDraft({ id: item.id, text: item.text, date: showDate(item.start_date), allDay: !item.time, time: item.time ?? '', repeat: item.repeat, alerts: [...item.alerts].sort((a, b) => b - a).map(alertFrom) });
   const setAlert = (index: number, change: Partial<Alert>) => draft && setDraft({ ...draft, alerts: draft.alerts.map((a, k) => k === index ? { ...a, ...change } : a) });
   async function save(event: FormEvent) {
@@ -104,7 +104,7 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
           return <button key={date} role="gridcell" aria-selected={date === selected} aria-current={date === today ? 'date' : undefined}
             className={['calendar-day', outside ? 'outside' : '', date === selected ? 'selected' : '', date === today ? 'today' : ''].join(' ')}
             aria-label={`${longDay(date)}${notes.has(date) ? ', com nota do dia' : ''}${items.length ? `, ${items.length} ${items.length === 1 ? 'item' : 'itens'}` : ''}`}
-            onClick={() => pick(date)} onDoubleClick={() => onOpenDay(date)}>
+            onClick={() => pick(date)} onDoubleClick={() => { pick(date); setDraft(newDraft(false, date)); }}>
             <span className="calendar-number">{parse(date).getDate()}{notes.has(date) && <FileIcon size={11} />}</span>
             {items.slice(0, 3).map((item, k) => <span key={`${item.id}-${k}`} className={['calendar-chip', item.notify ? 'reminder' : '', item.past ? 'past' : ''].join(' ')}>{item.time && <b>{item.time}</b>}{item.text}</span>)}
             {items.length > 3 && <span className="calendar-more">+{items.length - 3}</span>}

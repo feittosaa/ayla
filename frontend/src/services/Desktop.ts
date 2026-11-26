@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
+import type { FichaCard } from './Ficha';
 
 export type Profile = 'light' | 'moderate' | 'maximum';
 export type Capability = 'text' | 'reasoning' | 'vision' | 'transcription' | 'speech' | 'embedding';
@@ -34,14 +35,14 @@ export type SetupState = { active: boolean; label?: string; received?: number; t
 export type CloudProvider = { id: string; name: string; summary: string; login: 'key' | 'open_router' | 'chat_gpt'; keys_url: string | null; default_model: string | null; images: 'generations' | 'open_router_chat' | null; connected: boolean; account: string | null };
 export type Privacy = 'sensitive' | 'uncertain' | 'public';
 export type Fact = { id: string; content: string; kind: string; privacy: Privacy; origin: string; conversation_id: string | null; created_at: number; updated_at: number; project_id: string | null };
-export type Project = { id: string; name: string; description: string; created_at: number; updated_at: number; conversations: number; memories: number };
+export type Project = { id: string; name: string; description: string; created_at: number; updated_at: number; conversations: number; memories: number; folder?: string | null; icon?: string | null; icon_svg?: string | null; color?: string | null };
 export type MemoryList = { facts: Fact[]; enabled: boolean; ready: boolean };
 export type Conversation = { id: string; title: string; cloud_consent: boolean; project_id: string | null };
 export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
 export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
 export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
 export type ReplyOrigin = 'cloud' | 'cloud_search';
-export type Message = { origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[] } | null };
+export type Message = { id?: number; versions?: number[]; origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; ficha?: FichaCard; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[]; ficha?: FichaCard } | null };
 /** Design criado pela Ayla na resposta (guardado na Iris › Designs). */
 export type DesignCard = { id: string; name: string; width: number; height: number };
 /** Imagem encontrada numa busca: fonte, autor e licença ("livre" ou só "referencia"). */
@@ -49,13 +50,13 @@ export type ImageItem = { provider: string; id: string; thumb: string; full: str
 export type ImageResults = { query: string; items: ImageItem[]; links: { name: string; url: string }[] };
 /** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
 export type Source = { id: string; name: string; pages: number[]; date?: string; url?: string; note?: string };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'ficha' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
 export type Effort = '' | 'low' | 'medium' | 'high';
 /** Memória pública que pode acompanhar um envio à nuvem, se continuar marcada na revisão. */
 export type Reference = { id: string; content: string };
-export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean };
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; edit_of?: number | null; regenerate?: number | null; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean };
 export const labels: Record<Capability, string> = { text: 'Conversa', reasoning: 'Raciocínio', vision: 'Visão', transcription: 'Transcrição', speech: 'Voz de saída (sem uso)', embedding: 'Memória semântica' };
 export const modeLabels: Record<UsageMode, string> = { local_only: 'Somente local', cloud_only: 'Somente nuvem', hybrid: 'Local + nuvem', per_conversation: 'Autorizar por conversa', explicit_request: 'Nuvem quando solicitada', suggest: 'Ayla sugere; eu decido' };
 
