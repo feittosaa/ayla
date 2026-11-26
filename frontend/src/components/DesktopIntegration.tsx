@@ -11,7 +11,7 @@ export function DesktopSettings({value, saving, save, run}: {
   if (synced !== style) { setSynced(style); setCustom(value); }
   return <section id="desktop" className="settings-group"><h2>Integração com o sistema</h2><div className="group-card">
     {([['autostart','Iniciar com a sessão'],['background','Continuar em segundo plano ao fechar'],['system_theme','Usar a aparência do sistema na visão rápida']] as const).map(([key,label]) =>
-      <label key={key} className="group-row"><span className="row-text">{label}</span><input className="switch" role="switch" type="checkbox" checked={value[key]} disabled={saving} onChange={e => save({...value,[key]:e.target.checked})} /></label>)}
+      <label key={key} className="group-row" data-search={key === 'system_theme' && value.system_theme ? 'Cor de fundo cor de destaque fonte cantos' : undefined}><span className="row-text">{label}</span><input className="switch" role="switch" type="checkbox" checked={value[key]} disabled={saving} onChange={e => save({...value,[key]:e.target.checked})} /></label>)}
     {!value.system_theme && <div className="group-row stacked panel-editor">
       <label>Cor de fundo<input type="color" value={custom.panel_color} onChange={e=>setCustom({...custom,panel_color:e.target.value})} /></label>
       <label>Cor de destaque<input type="color" value={custom.panel_accent} onChange={e=>setCustom({...custom,panel_accent:e.target.value})} /></label>

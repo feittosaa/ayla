@@ -3,7 +3,7 @@ import { RefreshIcon } from './Icons';
 import { NoteGraphSimulation, type Point } from '../services/NoteGraphLayout';
 
 export type NoteGraph = {
-  nodes: { root: string; rootName: string; path: string; title: string }[];
+  nodes: { root: string; rootName: string; path: string; title: string; aliases?: string[] }[];
   edges: [number, number][];
 };
 

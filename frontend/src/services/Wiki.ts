@@ -50,10 +50,18 @@ export type Frontmatter = { properties: Property[]; banner: Banner | null; body:
 
 const unquote = (value: string) => value.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
 const frontmatterBlock = /^(---[ \t]*(\r?\n))([\s\S]*?)(^---[ \t]*(?:\r?\n|$))/m;
+/** Linha que cabe em propriedades YAML: `chave: valor`, item de lista, continuação recuada,
+ * comentário ou vazia. Um texto que só começa com `---` (um separador) não vira propriedades. */
+const yamlLine = (line: string) => !line.trim() || /^\s*#/.test(line) || /^[^\s:#-][^:]*:(\s|$)/.test(line) || /^\s+\S/.test(line) || /^-(\s|$)/.test(line);
+/** O bloco `---` do início da nota, se for mesmo de propriedades. */
+function propertiesBlock(text: string) {
+  const block = frontmatterBlock.exec(text);
+  return block && block.index === 0 && block[3].split(/\r?\n/).every(yamlLine) ? block : null;
+}
 
 export function changeBanner(text: string, key: 'banner_height' | 'banner_y', value: number) {
-  const block = frontmatterBlock.exec(text);
-  if (!block || block.index !== 0) return text;
+  const block = propertiesBlock(text);
+  if (!block) return text;
   const [, opening, newline, properties, closing] = block;
   const field = new RegExp(`^${key}:[^\\r\\n]*`, 'm');
   // Como o make-md: posição em porcentagem (0–100), gravada entre aspas.
@@ -66,12 +74,12 @@ export function changeBanner(text: string, key: 'banner_height' | 'banner_y', va
  * (`- item` ou `[a, b]`). O banner segue o make-md: `banner` (caminho na raiz; também [[imagem]] ou
  * ![[imagem]]) e `banner_y` (porcentagem, 0–100). Endereços da web não viram banner. */
 export function frontmatter(text: string): Frontmatter {
-  const match = frontmatterBlock.exec(text);
-  if (!match || match.index !== 0) return { properties: [], banner: null, body: text };
+  const match = propertiesBlock(text);
+  if (!match) return { properties: [], banner: null, body: text };
   const properties: Property[] = [];
   for (const line of match[3].split(/\r?\n/)) {
-    const item = /^\s+-\s*(.*)$/.exec(line);
-    if (item && properties.length) { const value = unquote(item[1]); if (value) properties[properties.length - 1].values.push(value); continue; }
+    const item = /^\s*-(?:\s+(.*))?$/.exec(line);
+    if (item && properties.length) { const value = unquote(item[1] ?? ''); if (value) properties[properties.length - 1].values.push(value); continue; }
     const pair = /^([^\s:#][^:]*):\s*(.*)$/.exec(line);
     if (!pair) continue;
     const raw = pair[2].trim();

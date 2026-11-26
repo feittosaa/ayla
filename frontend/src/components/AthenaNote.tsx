@@ -99,6 +99,8 @@ type Props = {
   tab: Tab;
   /** Notas da mesma raiz, para sugerir links ao digitar [[. */
   notes: Note[];
+  /** Apelidos das notas da mesma raiz, por caminho (`aliases` nas propriedades, como no Obsidian). */
+  aliases?: Record<string, string[]>;
   /** Imagens da mesma raiz (cofre, projeto ou Athena): as únicas que podem virar banner. */
   images: Note[];
   rootName: string;
@@ -133,6 +135,8 @@ export default function AthenaNote(props: Props) {
   /** Evita gravar o nome duas vezes (Enter seguido do blur do campo). */
   const renamingNow = useRef(false);
   const [suggest, setSuggest] = useState<{ query: string; start: number } | null>(null);
+  /** Sugestão destacada: Enter ou Tab a escolhe; as setas mudam o destaque (como no Obsidian). */
+  const [highlight, setHighlight] = useState(0);
   const editor = useRef<EditorView | null>(null);
   const stamp = useRef<number | null>(null); const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dirty = useRef(false); const latest = useRef('');
@@ -278,17 +282,27 @@ export default function AthenaNote(props: Props) {
     const open = prefix.lastIndexOf('[[');
     if (open >= 0 && !prefix.slice(open).includes(']]') && !prefix.slice(open).includes('\n') && caret - open <= 80) setSuggest({ query: prefix.slice(open + 2), start: open + 2 });
     else setSuggest(null);
+    setHighlight(0);
   }
 
-  function pick(title: string) {
+  function pick(title: string, alias?: string) {
     const view = editor.current;
     if (!view || !suggest || pasteJob.current) return;
     const caret = view.state.selection.main.head;
     const closing = view.state.doc.sliceString(caret, caret + 2) === ']]' ? 2 : 0;
-    const insert = title + ']]';
+    const insert = `${title}${alias ? `|${alias}` : ''}]]`;
     view.dispatch({ changes: { from: suggest.start, to: caret + closing, insert }, selection: { anchor: suggest.start + insert.length } });
     setSuggest(null);
     view.focus();
+  }
+
+  function suggestKey(key: 'Enter' | 'Tab' | 'ArrowUp' | 'ArrowDown') {
+    if (!suggestions.length) return false;
+    if (key === 'ArrowUp' || key === 'ArrowDown') {
+      const step = key === 'ArrowDown' ? 1 : -1;
+      setHighlight(h => (Math.min(h, suggestions.length - 1) + step + suggestions.length) % suggestions.length);
+    } else { const chosen = suggestions[Math.min(highlight, suggestions.length - 1)]; pick(chosen.title, chosen.alias); }
+    return true;
   }
 
   function follow(target: string) {
@@ -302,6 +316,21 @@ export default function AthenaNote(props: Props) {
   }
 
   const note = useMemo(() => frontmatter(content ?? ''), [content]);
+  // Pelo título ou por um apelido (sem diferenciar acentos); o apelido vira o texto do link.
+  const suggestions = useMemo(() => {
+    if (!suggest) return [];
+    const plain = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+    const q = plain(suggest.query);
+    const rank = (text: string) => { const t = plain(text); return t === q ? 0 : t.startsWith(q) ? 1 : t.includes(q) ? 2 : -1; };
+    const out: { path: string; title: string; alias?: string; rank: number }[] = [];
+    for (const n of notes) {
+      if (n.path === tab.path) continue;
+      const own = rank(n.title);
+      if (own >= 0) out.push({ path: n.path, title: n.title, rank: own });
+      for (const alias of props.aliases?.[n.path] ?? []) { const r = rank(alias); if (r >= 0) out.push({ path: n.path, title: n.title, alias, rank: r }); }
+    }
+    return out.sort((a, b) => a.rank - b.rank).slice(0, 8);
+  }, [suggest, notes, tab.path, props.aliases]);
   const fileMedia = useCallback((target: string) => ({ root: tab.root, path: target }), [tab.root]);
 
   const title = titleOf(tab.path);
@@ -336,16 +365,12 @@ export default function AthenaNote(props: Props) {
               <button type="button" title="Tarefa" onClick={() => format('- [ ] ', '', true)}>☐</button>
               <button type="button" title="Link para nota" onClick={() => format('[[', ']]')}>[[ ]]</button>
               <button type="button" title="Tag" onClick={() => format('#')}>#</button>
-              {suggest && (() => {
-                const q = suggest.query.toLowerCase();
-                const options = notes.filter(n => n.title.toLowerCase().includes(q) && n.path !== tab.path).slice(0, 8);
-                return options.length ? <ul className="link-suggest" role="listbox" aria-label="Notas para o link">{options.map(n => <li key={n.path}><button type="button" onMouseDown={e => { e.preventDefault(); pick(n.title); }}>{n.title}<small>{folderOf(n.path)}</small></button></li>)}</ul> : null;
-              })()}
+              {suggestions.length > 0 && <ul className="link-suggest" role="listbox" aria-label="Notas para o link">{suggestions.map((n, k) => <li key={`${n.path}|${n.alias ?? ''}`} role="option" aria-selected={k === Math.min(highlight, suggestions.length - 1)}><button type="button" tabIndex={-1} onMouseDown={e => { e.preventDefault(); pick(n.title, n.alias); }}>{n.alias ?? n.title}<small>{n.alias ? `↳ ${n.title}` : folderOf(n.path)}</small></button></li>)}</ul>}
             </div>
             <Suspense fallback={<div className="athena-visual-editor" aria-busy="true" />}>
               <AthenaEditor editor={editor} root={tab.root} value={note.body} readOnly={pasting}
               autoFocus={renaming === null && !note.body.trim()} onChange={typed} onPaste={pasteImage}
-              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onLink={follow} />
+              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} />
             </Suspense>
           </div>
         : <>

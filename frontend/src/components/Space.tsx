@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import ProjectSources, { type ProjectSource } from './ProjectSources';
+import ProjectLook, { IconMask } from './ProjectLook';
+import { PROJECT_COLORS } from '../services/ProjectLook';
 import Chat from './Chat';
 import MemoryPanel from './MemoryPanel';
 import AppVersion from './AppVersion';
 import { native, errorText, fileLabels, formatBytes, type Conversation, type FileInfo, type Project, type Snapshot } from '../services/Desktop';
-import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, DatabaseIcon, WarningIcon, ImageIcon, ComputerIcon, FileIcon, PencilIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloudIcon, DatabaseIcon, WarningIcon, ImageIcon, ComputerIcon, FileIcon, PencilIcon, PinIcon, PlusIcon, SidebarIcon, TrashIcon } from './Icons';
 import BrandMark from './BrandMark';
 import BasesDialog from './BasesDialog';
 import { listBases, onBasesChanged, basesChanged, type Base } from '../services/Bases';
@@ -23,6 +26,7 @@ type Props = {
   active: boolean;
   compact?: boolean;
   quickOpening?: number | null;
+  onOpenSource?: (source: ProjectSource) => void;
   onDeleted?: () => void;
   onOpenSettings?: (section: string) => void;
   /** Na barra da Ayla: lista de projetos, abrir e criar. */
@@ -35,16 +39,27 @@ type Props = {
   incoming?: Incoming | null;
 };
 
-/** Iniciais e cor estável de um projeto, usadas no trilho e no cabeçalho. */
-export function ProjectAvatar({ project, size = 36 }: { project: Project; size?: number }) {
-  const palette = ['#7d9bff', '#4fc79b', '#e8ad5a', '#e07fb0', '#a294f5', '#5cc2d6'];
+/** Avatar do projeto: o ícone escolhido (Lucide) ou as iniciais, sobre a cor de fundo (automática pelo id, escolhida ou sem cor). */
+export function ProjectAvatar({ project, size = 36 }: { project: Pick<Project, 'id' | 'name' | 'icon_svg' | 'color'>; size?: number }) {
+  const palette = PROJECT_COLORS.slice(0, 6);
   const hash = [...project.id].reduce((sum, c) => sum + c.charCodeAt(0), 0);
   const initials = project.name.trim().split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase() || '?';
-  return <span className="avatar" style={{ width: size, height: size, background: palette[hash % palette.length] }} aria-hidden="true">{initials}</span>;
+  const plain = project.color === 'none';
+  const background = plain ? 'transparent' : project.color || palette[hash % palette.length];
+  return <span className={plain ? 'avatar plain' : 'avatar'} style={{ width: size, height: size, background, fontSize: Math.max(10, Math.round(size * 0.38)) }} aria-hidden="true">
+    {project.icon_svg ? <IconMask svg={project.icon_svg} size={Math.round(size * 0.7)} /> : initials}
+  </span>;
 }
 
 /** Um espaço: a conversa geral da Ayla ou um projeto, com barra própria. */
-export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, onOpenNote, projects = [], onOpenProject, onNewProject, onBack, incoming }: Props) {
+function readPinnedConversations(key: string): string[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : [];
+  } catch { return []; }
+}
+
+export default function Space({ snapshot, refresh, project, active, compact = false, quickOpening, onDeleted, onOpenSettings, onOpenNote, onOpenSource, projects = [], onOpenProject, onNewProject, onBack, incoming }: Props) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // Cada conversa respondendo fica montada (oculta) para a resposta seguir enquanto outra é aberta.
   const [slots, setSlots] = useState<Slot[]>([{ key: 'c0', conversation: null, busy: false }]);
@@ -76,6 +91,26 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
   const [error, setError] = useState('');
   const [editing, setEditing] = useState<string | null>(null); const [draftTitle, setDraftTitle] = useState(''); const [confirming, setConfirming] = useState<string | null>(null);
   const projectId = project?.id ?? null;
+  const pinKey = `ayla-conversation-pins:${projectId ?? 'general'}`;
+  const [pins, setPins] = useState(() => readPinnedConversations(pinKey));
+  useEffect(() => {
+    const sync = (event: StorageEvent) => {
+      if (event.key === pinKey || event.key === null) setPins(readPinnedConversations(pinKey));
+    };
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, [pinKey]);
+  function pinConversation(id: string, pinned: boolean) {
+    const next = readPinnedConversations(pinKey).filter(item => item !== id);
+    if (pinned) next.push(id);
+    try {
+      localStorage.setItem(pinKey, JSON.stringify(next));
+      setPins(next);
+    } catch { setError('Não foi possível guardar as conversas fixadas.'); }
+  }
+  const byId = new Map(conversations.map(item => [item.id, item]));
+  const pinnedIds = new Set(pins);
+  const orderedConversations = [...pins.flatMap(id => byId.get(id) ?? []), ...conversations.filter(item => !pinnedIds.has(item.id))];
   const mode = snapshot.preferences.usage_mode;
   const where = mode === 'local_only' ? 'Tudo roda neste computador' : mode === 'cloud_only' ? 'Respostas pela nuvem, com sua revisão' : 'Nuvem disponível';
 
@@ -117,6 +152,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     setConfirming(null);
     try {
       await native('delete_conversation', { id: item.id });
+      if (pinnedIds.has(item.id)) pinConversation(item.id, false);
       setConversations(prev => prev.filter(c => c.id !== item.id));
       replaceConversation(item.id, () => null);
       await refresh();
@@ -201,7 +237,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
       {project && <nav className="space-nav" aria-label="Seções do projeto">
         <button className="conversation-item" aria-current={view === 'overview' ? 'page' : undefined} onClick={() => setView('overview')}>Visão geral</button>
         <button className="conversation-item" aria-current={view === 'memory' ? 'page' : undefined} onClick={() => setView('memory')}>Memória</button>
-        <button className="conversation-item" aria-current={view === 'files' ? 'page' : undefined} onClick={() => setView('files')}>Arquivos</button>
+        <button className="conversation-item" aria-current={view === 'files' ? 'page' : undefined} onClick={() => setView('files')}>Arquivos e fontes</button>
       </nav>}
       <button className="new-chat" onClick={() => openConversation(null)}><PlusIcon size={18} />Nova conversa</button>
       <nav className="conversation-list" aria-label="Conversas e projetos">
@@ -231,7 +267,7 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
           {projects.map(item => <button key={item.id} className="conversation-item project-item" onClick={() => onOpenProject?.(item.id)}><ProjectAvatar project={item} size={22} /><span>{item.name}</span></button>)}
         </>}
         {conversations.length > 0 && <p className="sidebar-label">Conversas</p>}
-        {conversations.map(item => editing === item.id
+        {orderedConversations.map(item => editing === item.id
           ? <form key={item.id} className="conversation-edit" onSubmit={e => { e.preventDefault(); void rename(item); }}>
               <input autoFocus aria-label="Título da conversa" value={draftTitle} maxLength={120} onChange={e => setDraftTitle(e.target.value)} onBlur={() => void rename(item)} onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setEditing(null); } }} />
             </form>
@@ -244,6 +280,8 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
           : <div key={item.id} className="conversation-row">
               <button className="conversation-item" aria-current={view === 'chat' && item.id === conversation?.id ? 'page' : undefined} onClick={() => openConversation(item)} onDoubleClick={() => { setEditing(item.id); setDraftTitle(item.title); }} title={busyIds.has(item.id) ? `${item.title} · respondendo…` : item.title}>{busyIds.has(item.id) && <span className="conversation-spinner" role="status" aria-label="Respondendo"><i /><i /><i /></span>}{item.title}</button>
               <span className="row-tools">
+                <button className="icon-button tiny conversation-pin" aria-pressed={pinnedIds.has(item.id)} title={pinnedIds.has(item.id) ? 'Desafixar do topo' : 'Fixar no topo'}
+                  aria-label={`${pinnedIds.has(item.id) ? 'Desafixar' : 'Fixar'} “${item.title}”`} onClick={() => pinConversation(item.id, !pinnedIds.has(item.id))}><PinIcon size={15} /></button>
                 <button className="icon-button tiny" aria-label={`Renomear “${item.title}”`} title="Renomear" onClick={() => { setConfirming(null); setEditing(item.id); setDraftTitle(item.title); }}><PencilIcon size={15} /></button>
                 <button className="icon-button tiny" aria-label={`Apagar “${item.title}”`} title="Apagar" disabled={busyIds.has(item.id)} onClick={() => { setEditing(null); setConfirming(item.id); }}><TrashIcon size={15} /></button>
               </span>
@@ -256,14 +294,16 @@ export default function Space({ snapshot, refresh, project, active, compact = fa
     {/* A conversa fica montada ao ver a visão geral ou a memória: uma resposta em andamento continua. */}
     {slots.map(slot => <div key={slot.key} className="chat-slot" hidden={view !== 'chat' || slot.key !== activeKey}>
       <Chat snapshot={snapshot} refresh={refresh} project={project} conversation={slot.conversation} onConversation={item => onConversation(slot.key, item)} onBusy={busy => setSlotBusy(slot.key, busy)} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} active={active && view === 'chat' && slot.key === activeKey} focusComposer={slot.key === activeKey ? focusComposer : null} onOpenSettings={onOpenSettings} onOpenNote={onOpenNote} attach={slot.attach}
-        bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))} />
+        bases={slot.key === activeKey ? picked : []} onBasesUsed={() => setPicked([])} onRemoveBase={id => setPicked(prev => prev.filter(p => p.id !== id))}
+        onDiscarded={id => setConversations(prev => prev.filter(c => c.id !== id))} />
     </div>)}
     {project && view === 'overview' && <ProjectOverview project={project} conversations={conversations} refresh={refresh} onOpen={openConversation} onDeleted={onDeleted} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} error={error} />}
     {project && view === 'memory' && <main className="settings-main"><div className="settings-content">
       {!sidebar && <button className="ghost-button back-button-inline" onClick={() => setSidebar(true)}><SidebarIcon size={18} />Mostrar a barra lateral</button>}
       <MemoryPanel snapshot={snapshot} refresh={refresh} project={project} />
     </div></main>}
-    {project && view === 'files' && <ProjectFiles project={project} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} />}
+    {project && view === 'files' && <ProjectFiles project={project} sources={<ProjectSources project={project.id} open={s => onOpenSource?.(s)} removed={id => setPicked(prev => prev.filter(s => s.id !== 'project-source:' + id))}
+      use={s => { const id = 'project-source:' + s.id; setPicked(prev => prev.some(x => x.id === id) ? prev : [...prev,{id, name:s.name}]); setView('chat'); }} />} onShowSidebar={sidebar ? undefined : () => setSidebar(true)} />}
   </div>;
 }
 
@@ -292,6 +332,10 @@ function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, o
       <button className="primary-action with-icon" onClick={() => onOpen(null)}><PlusIcon size={18} />Nova conversa</button>
     </header>
     {(error || loadError) && <p role="alert" className="app-error">{error || loadError}</p>}
+
+    <section className="settings-group" aria-labelledby="look-title"><h2 id="look-title">Nome, ícone e cor</h2>
+      <ProjectLook key={project.id} project={project} refresh={refresh} preview={look => <ProjectAvatar project={{ id: project.id, ...look }} size={48} />} />
+    </section>
 
     <section className="settings-group" aria-labelledby="about-title"><h2 id="about-title">Sobre o projeto</h2>
       <div className="group-card">
@@ -331,7 +375,7 @@ function ProjectOverview({ project, conversations, refresh, onOpen, onDeleted, o
 }
 
 /** Arquivos guardados no projeto: enviados nas conversas ou adicionados aqui. */
-function ProjectFiles({ project, onShowSidebar }: { project: Project; onShowSidebar?: () => void }) {
+function ProjectFiles({ project, sources, onShowSidebar }: { project: Project; sources: React.ReactNode; onShowSidebar?: () => void }) {
   const [items, setItems] = useState<FileInfo[] | null>(null); const [error, setError] = useState('');
   const [busy, setBusy] = useState(false); const [confirm, setConfirm] = useState<string | null>(null);
   const load = useCallback(() => native<FileInfo[]>('project_files', { project: project.id }).then(setItems).catch(e => setError(errorText(e))), [project.id]);
@@ -354,6 +398,7 @@ function ProjectFiles({ project, onShowSidebar }: { project: Project; onShowSide
       <div className="row-text"><h1>Arquivos</h1><p className="row-hint">Cópias guardadas pela Ayla neste computador. Entram no backup e nunca vão para a nuvem.</p></div>
       <button className="primary-action with-icon" disabled={busy} onClick={() => void add()}><PlusIcon size={18} />{busy ? 'Guardando…' : 'Adicionar arquivos'}</button>
     </header>
+    {sources}
     {error && <p role="alert" className="app-error">{error}</p>}
     <div className="group-card">
       {items && !items.length && <div className="group-row"><span className="row-hint">Nenhum arquivo ainda. Anexe nas conversas do projeto ou adicione aqui: imagens, GIFs, PDFs, textos, áudios e vídeos.</span></div>}

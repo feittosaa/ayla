@@ -28,6 +28,29 @@ pub struct Note {
     pub bytes: u64,
 }
 
+/// Pasta dos projetos dentro da Athena (`athena/Projetos/<projeto>`): fica no mesmo repositório
+/// Git, mas cada projeto aparece como raiz própria, então as notas gerais não a percorrem (as de
+/// um projeto não se misturam com as gerais nem com as de outro).
+pub const PROJECTS_DIR: &str = "Projetos";
+static PROJECT_HOMES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Marca `root` como a raiz da Athena que guarda os projetos em `Projetos/`.
+pub fn register_projects_home(root: &Path) {
+    if let Ok(mut homes) = PROJECT_HOMES.lock() {
+        for path in [Some(root.to_path_buf()), root.canonicalize().ok()].into_iter().flatten() {
+            if !homes.contains(&path) { homes.push(path); }
+        }
+    }
+}
+
+/// Entrada que as varreduras pulam: ocultas e, na raiz da Athena, a pasta dos projetos.
+/// `dir`: a pasta da entrada, relativa à raiz.
+pub fn skipped(root: &Path, dir: &Path, name: &str) -> bool {
+    name.starts_with('.') || (dir.as_os_str().is_empty() && name == PROJECTS_DIR && PROJECT_HOMES.lock().is_ok_and(|homes| {
+        homes.iter().any(|h| h == root) || root.canonicalize().is_ok_and(|c| homes.contains(&c))
+    }))
+}
+
 /// Caminho relativo seguro de uma nota: só `.md`, sem `..`, sem absolutos e fora de pastas ocultas.
 pub fn safe_relative(relative: &str) -> Option<PathBuf> {
     let path = Path::new(relative);
@@ -62,7 +85,7 @@ pub fn texts(root: &Path) -> Vec<Note> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             let Ok(kind) = entry.file_type() else { continue };
-            if name.starts_with('.') {
+            if skipped(root, &dir, &name) {
                 continue;
             }
             let relative = dir.join(&name);
@@ -187,7 +210,7 @@ pub fn list(root: &Path) -> Vec<Note> {
         let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if skipped(root, &dir, &name) {
                 continue;
             }
             let Ok(kind) = entry.file_type() else { continue };
@@ -226,7 +249,7 @@ pub fn scan_attachments(root: &Path, limit: Option<usize>) -> (Vec<Note>, Vec<St
         let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if skipped(root, &dir, &name) {
                 continue;
             }
             let Ok(kind) = entry.file_type() else { continue };
@@ -271,6 +294,33 @@ pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, 
     Ok(relative_string(&to_path))
 }
 
+/// Move uma nota (`.md`) ou texto (`.txt`) para uma pasta de outra raiz (de um cofre para a
+/// Athena e vice-versa). Não sobrescreve: com o nome já usado, vira "Nota 2.md". Entre discos
+/// diferentes, copia e só então apaga a original. Devolve o caminho novo.
+pub fn move_between(from_root: &Path, from: &str, to_root: &Path, folder: &str) -> Result<String, String> {
+    let from_path = safe_text(from).ok_or("Só notas e textos mudam de lugar entre cofres")?;
+    let source = from_root.join(&from_path);
+    if !source.is_file() { return Err("Nota não encontrada".into()); }
+    let folder = safe_folder(folder).ok_or("Pasta inválida")?;
+    let stem = from_path.file_stem().map(|s| s.to_string_lossy().into_owned()).ok_or("Nota inválida")?;
+    let ext = from_path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "md".into());
+    let mut to_path = folder.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while to_root.join(&to_path).exists() { to_path = folder.join(format!("{stem} {n}.{ext}")); n += 1; }
+    let destination = to_root.join(&to_path);
+    if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|_| "Não foi possível criar a pasta")?; }
+    if fs::rename(&source, &destination).is_err() {
+        let temporary = destination.with_extension(format!("{ext}.ayla-tmp"));
+        fs::copy(&source, &temporary).and_then(|_| fs::rename(&temporary, &destination)).map_err(|_| { let _ = fs::remove_file(&temporary); "Não foi possível mover a nota" })?;
+        if fs::read(&destination).ok() != fs::read(&source).ok() {
+            let _ = fs::remove_file(&destination);
+            return Err("A cópia da nota não conferiu; nada foi movido".into());
+        }
+        fs::remove_file(&source).map_err(|_| "A nota foi copiada, mas a original não pôde ser apagada")?;
+    }
+    Ok(relative_string(&to_path))
+}
+
 /// Pastas (relativas, com `/`) para a árvore, inclusive as vazias; ignora as ocultas.
 pub fn folders(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -279,7 +329,7 @@ pub fn folders(root: &Path) -> Vec<String> {
         let Ok(entries) = fs::read_dir(root.join(&dir)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || !entry.file_type().is_ok_and(|k| k.is_dir()) {
+            if skipped(root, &dir, &name) || !entry.file_type().is_ok_and(|k| k.is_dir()) {
                 continue;
             }
             let relative = dir.join(&name);
@@ -424,6 +474,39 @@ pub fn graph_targets(text: &str) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Apelidos da nota (`aliases` ou `alias` nas propriedades do topo, como no Obsidian): em lista
+/// `[a, b]`, em itens `- a` ou num valor só.
+pub fn aliases(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") { return Vec::new(); }
+    let unquote = |v: &str| v.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_string();
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in lines {
+        if matches!(line.trim_end(), "---" | "...") { break; }
+        if inside {
+            if let Some(item) = line.trim_start().strip_prefix('-') {
+                out.push(unquote(item));
+                continue;
+            }
+            if line.starts_with([' ', '\t']) && line.trim().is_empty() { continue; }
+            inside = false;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        if line.starts_with([' ', '\t']) || !matches!(key.trim().to_lowercase().as_str(), "aliases" | "alias") { continue; }
+        let value = value.trim();
+        match value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            Some(list) => out.extend(list.split(',').map(unquote)),
+            None if value.is_empty() => inside = true,
+            None => out.push(unquote(value)),
+        }
+    }
+    out.retain(|a| !a.is_empty());
+    out.dedup();
+    out
 }
 
 /// O alvo de um link aponta para esta nota? Pelo nome (como o Obsidian) ou pelo caminho sem `.md`.
@@ -817,11 +900,32 @@ fn yaml_text(value: &str) -> String {
     if plain { value.to_string() } else { format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")) }
 }
 
+/// Linha que cabe em propriedades YAML: `chave: valor`, item de lista, continuação recuada,
+/// comentário ou vazia (o mesmo critério da Athena na interface). Um texto que só começa com `---`
+/// (um separador) não é bloco de propriedades.
+fn yaml_line(line: &str) -> bool {
+    let line = line.trim_end_matches(['\r', '\n']);
+    line.trim().is_empty() || line.trim_start().starts_with('#') || line.starts_with([' ', '\t']) || line == "-" || line.starts_with("- ")
+        || line.split_once(':').is_some_and(|(key, value)| !key.is_empty() && !key.starts_with(char::is_whitespace) && !key.starts_with(['#', '-'])
+            && (value.is_empty() || value.starts_with(char::is_whitespace)))
+}
+
+/// O início da nota é um bloco de propriedades (`---` … `---` só com linhas de propriedade).
+fn has_properties(content: &str) -> bool {
+    let mut lines = content.split_inclusive('\n');
+    if lines.next().map(str::trim_end) != Some("---") { return false; }
+    for line in lines {
+        if line.trim_end() == "---" { return true; }
+        if !yaml_line(line) { return false; }
+    }
+    false
+}
+
 pub fn with_banner(content: &str, target: &str) -> String {
     let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
     let banner = format!("banner: {}{newline}", yaml_text(target));
     let mut lines = content.split_inclusive('\n');
-    if let Some(opening) = lines.next().filter(|line| line.trim_end() == "---") {
+    if let Some(opening) = lines.next().filter(|line| line.trim_end() == "---" && has_properties(content)) {
         let mut updated = String::with_capacity(content.len() + banner.len());
         updated.push_str(opening);
         let mut offset = opening.len();
@@ -926,9 +1030,10 @@ pub fn find_attachment(root: &Path, target: &str) -> Option<PathBuf> {
     let mut seen = 0;
     while let Some(dir) = pending.pop() {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let relative = dir.strip_prefix(root).unwrap_or(&dir).to_path_buf();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if skipped(root, &relative, &name) {
                 continue;
             }
             seen += 1;
@@ -994,6 +1099,16 @@ pub fn context_block(chunks: &[(String, String, String)]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn aliases_from_properties() {
+        assert_eq!(super::aliases("---\naliases:\n  - Kael\n  - \"Kûarasy\"\ntags: [npc]\n---\n# Kael"), ["Kael", "Kûarasy"]);
+        assert_eq!(super::aliases("---\naliases:\n- Kael\n---\n"), ["Kael"]);
+        assert_eq!(super::aliases("---\nAliases: [Kael, 'K']\n---"), ["Kael", "K"]);
+        assert_eq!(super::aliases("---\nalias: Kael\n---"), ["Kael"]);
+        assert!(super::aliases("aliases: [Kael]\n").is_empty());
+        assert!(super::aliases("---\ntags:\n  - npc\n---\naliases: [Kael]").is_empty());
+    }
+
     use super::*;
 
     fn temp() -> PathBuf {
@@ -1112,6 +1227,29 @@ mod tests {
     }
 
     #[test]
+    fn notas_mudam_de_cofre_sem_sobrescrever() {
+        let base = std::env::temp_dir().join(format!("ayla-entre-cofres-{}", super::super::store::id()));
+        let (cofre, athena) = (base.join("cofre"), base.join("athena"));
+        fs::create_dir_all(cofre.join("Ideias")).unwrap();
+        fs::create_dir_all(athena.join("Jogos")).unwrap();
+        fs::write(cofre.join("Ideias/close_combat.md"), "---\njogo de luta\n---\nresto").unwrap();
+        fs::write(athena.join("Jogos/close_combat.md"), "outra").unwrap();
+        // Para a Athena: o nome já existe na pasta, vira "close_combat 2".
+        let moved = move_between(&cofre, "Ideias/close_combat.md", &athena, "Jogos").unwrap();
+        assert_eq!(moved, "Jogos/close_combat 2.md");
+        assert!(!cofre.join("Ideias/close_combat.md").exists());
+        assert_eq!(fs::read_to_string(athena.join(&moved)).unwrap(), "---\njogo de luta\n---\nresto");
+        assert_eq!(fs::read_to_string(athena.join("Jogos/close_combat.md")).unwrap(), "outra");
+        // E de volta, para a raiz do cofre; anexos e caminhos inválidos não passam.
+        assert_eq!(move_between(&athena, &moved, &cofre, "").unwrap(), "close_combat 2.md");
+        fs::write(cofre.join("mapa.png"), "x").unwrap();
+        assert!(move_between(&cofre, "mapa.png", &athena, "").is_err());
+        assert!(move_between(&cofre, "../fora.md", &athena, "").is_err());
+        assert!(move_between(&cofre, "close_combat 2.md", &athena, "../fora").is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn banner_usa_imagem_da_mesma_raiz_sem_copiar() {
         let root = temp();
         let outside = temp();
@@ -1137,6 +1275,10 @@ mod tests {
         assert_eq!(read(&root, &note).unwrap().0, updated);
         assert_eq!(attachments(&root).len(), before, "nada foi copiado");
         assert_eq!(with_banner("Texto", "mapa.png"), "---\nbanner: mapa.png\n---\n\nTexto");
+        // Texto que só começa com um separador: o banner entra num bloco novo, sem esconder o texto.
+        let separador = "---\njogo de luta rogue like\n---\nresto";
+        assert_eq!(with_banner(separador, "mapa.png"), format!("---\nbanner: mapa.png\n---\n\n{separador}"));
+        assert_eq!(with_banner("---\ntags:\n  - rpg\n# nota\n---\nCorpo", "a.png"), "---\ntags:\n  - rpg\n# nota\nbanner: a.png\n---\nCorpo");
         assert_eq!(yaml_text("Imagens/Personagens/As 6 Faces/Tauri.png"), "Imagens/Personagens/As 6 Faces/Tauri.png");
         assert_eq!(yaml_text("Ganchos/G5/_358c1d1b.jpg"), "Ganchos/G5/_358c1d1b.jpg");
         assert_eq!(yaml_text("#capa: a.png"), "\"#capa: a.png\"");
