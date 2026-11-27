@@ -9,10 +9,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import Markdown from './Markdown';
 import Diagram from './Diagram';
 import { Decoration, EditorView, keymap, placeholder, ViewPlugin, WidgetType, type ViewUpdate } from '@codemirror/view';
-import { IMAGE, imageWidth, isAttachment, resizedImage } from '../services/Wiki';
+import { IMAGE, imageWidth, isAttachment, mediaVersion, resizedImage } from '../services/Wiki';
 import { mediaUrl } from '../services/Media';
 
-type Atom = { label: string; target?: string; image?: boolean; width?: number; title?: string };
+type Atom = { label: string; target?: string; image?: boolean; width?: number; title?: string; version?: number };
 type Props = {
   value: string;
   root: string;
@@ -28,11 +28,17 @@ type Props = {
   onLink: (target: string) => void;
   /** O cursor mudou de lugar sem digitar (clique, setas). */
   onCaret?: (caret: number) => void;
+  /** `![[nome]]` sem extensão: o anexo com esse nome, se houver. */
+  embed?: (name: string) => string | undefined;
+  /** Muda quando os anexos da raiz mudam (imagem trocada no lugar): redesenha as imagens. */
+  media?: unknown;
 };
 
 const external = Annotation.define<boolean>();
 /** Soltou o mouse: as marcas voltam a seguir o cursor. */
 const pointerUp = StateEffect.define<null>();
+/** Os anexos mudaram: refaz as marcas (imagens com o endereço novo). */
+const mediaChanged = StateEffect.define<null>();
 const wikiPattern = /^(!?)\[\[([^\]\n|]+)(?:\|([^\]\n]+))?\]\]/;
 // Pares fechados sozinhos, como no Obsidian: digitar o fechamento ou dar Enter logo antes dele
 // sai do par; Backspace no par vazio apaga os dois.
@@ -85,7 +91,7 @@ class InlineAtom extends WidgetType {
   eq(other: InlineAtom) {
     return this.from === other.from && this.to === other.to && this.atom.target === other.atom.target
       && this.atom.label === other.atom.label && this.atom.width === other.atom.width
-      && this.atom.title === other.atom.title && this.atom.image === other.atom.image;
+      && this.atom.title === other.atom.title && this.atom.image === other.atom.image && this.atom.version === other.atom.version;
   }
 
   toDOM(view: EditorView) {
@@ -261,11 +267,11 @@ function decorations(view: EditorView, options: { current: Props }) {
       if (name === 'AthenaLink') {
         const [, bang, target, alias] = wikiPattern.exec(slice(from, to))!;
         if (editing(from, to, !bang)) return false;
-        const clean = target.trim();
         const width = imageWidth(alias);
+        const clean = (bang && options.current.embed?.(target.trim().split('#')[0])) || target.trim();
         const path = clean.split('#')[0];
         const image = Boolean(bang && IMAGE.test(path));
-        atom(from, to, { target: isAttachment(path) ? path : clean, label: width ? clean : alias || clean, image, width: Number(width?.split('x')[0]) || undefined });
+        atom(from, to, { target: isAttachment(path) ? path : clean, label: width ? target.trim() : alias || target.trim(), image, width: Number(width?.split('x')[0]) || undefined, version: image ? mediaVersion(options.current.root, path) : undefined });
         return false;
       }
       if ((name === 'Link' || name === 'Image' || name === 'Autolink') && to <= line.to) {
@@ -277,7 +283,7 @@ function decorations(view: EditorView, options: { current: Props }) {
         const title = node.getChild('LinkTitle');
         const titleText = title ? slice(title.from + 1, title.to - 1) : undefined;
         const target = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(destination) ? destination : localTarget(destination);
-        atom(from, to, { target, label: label || target, title: titleText, image: name === 'Image', width: Number(imageWidth(titleText)?.split('x')[0]) || undefined });
+        atom(from, to, { target, label: label || target, title: titleText, image: name === 'Image', width: Number(imageWidth(titleText)?.split('x')[0]) || undefined, version: name === 'Image' ? mediaVersion(options.current.root, target.split('#')[0]) : undefined });
         return false;
       }
       if (name === 'URL' && /^(https?:\/\/|www\.)/i.test(slice(from, to)) && !editing(from, to)) {
@@ -323,7 +329,7 @@ export default function AthenaEditor(props: Props) {
       decorations: ReturnType<typeof decorations>;
       constructor(view: EditorView) { this.decorations = decorations(view, options); }
       update(update: ViewUpdate) {
-        const released = update.transactions.some(t => t.effects.some(e => e.is(pointerUp)));
+        const released = update.transactions.some(t => t.effects.some(e => e.is(pointerUp) || e.is(mediaChanged)));
         const onlySelection = !update.docChanged && !update.viewportChanged && syntaxTree(update.state) === syntaxTree(update.startState);
         if (selecting && onlySelection && !released) return;
         if (released || update.docChanged || update.viewportChanged || update.selectionSet || syntaxTree(update.state) !== syntaxTree(update.startState)) {
@@ -351,6 +357,20 @@ export default function AthenaEditor(props: Props) {
         EditorView.contentAttributes.of({ 'aria-label': 'Conteúdo da nota', spellcheck: 'true' }),
         EditorView.inputHandler.of((view, from, to, text) => {
           if (view.state.readOnly || view.composing) return false;
+          // ">" com texto selecionado vira citação nas linhas selecionadas (como no Obsidian), sem apagar o texto.
+          if (text === '>' && view.state.selection.ranges.some(r => !r.empty)) {
+            const lines = new Set<number>();
+            for (const r of view.state.selection.ranges) {
+              if (r.empty) continue;
+              const first = view.state.doc.lineAt(r.from).number;
+              const end = view.state.doc.lineAt(r.to);
+              const last = end.from === r.to && end.number > first ? end.number - 1 : end.number;
+              for (let n = first; n <= last; n++) lines.add(n);
+            }
+            const changes = [...lines].sort((a, b) => a - b).map(n => { const line = view.state.doc.line(n); return { from: line.from, insert: line.text.trim() ? '> ' : '>' }; });
+            view.dispatch(view.state.update({ changes, userEvent: 'input.type' }));
+            return true;
+          }
           if (text !== '-' || from !== to) return false;
           const line = view.state.doc.lineAt(from);
           if (line.number === 1 || line.length || !view.state.doc.line(line.number - 1).text.trim()) return false;
@@ -393,5 +413,6 @@ export default function AthenaEditor(props: Props) {
     }
     if (view.state.readOnly !== props.readOnly) view.dispatch({ effects: readOnly.current.reconfigure(EditorState.readOnly.of(props.readOnly)) });
   }, [props.editor, props.value, props.readOnly]);
+  useLayoutEffect(() => { props.editor.current?.dispatch({ effects: mediaChanged.of(null) }); }, [props.editor, props.media]);
   return <div ref={mount} className="athena-visual-editor markdown" />;
 }

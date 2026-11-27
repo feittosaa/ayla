@@ -68,3 +68,24 @@ export function maskDate(text: string): string {
   const digits = text.replace(/\D/g, '').slice(0, 8);
   return [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean).join('/');
 }
+
+/** Edição num campo com máscara (data, hora) sem jogar o cursor para o fim: conta os dígitos antes
+ * do cursor e o devolve depois do mesmo dígito. Campo cheio: o dígito novo substitui o seguinte
+ * (como digitar por cima). Apagar só a barra ou os dois-pontos apaga o dígito antes deles. */
+export function maskedEdit(previous: string, raw: string, caret: number, max: number, format: (digits: string) => string) {
+  const onlyDigits = (text: string) => text.replace(/\D/g, '');
+  let before = onlyDigits(raw.slice(0, caret)).length;
+  let digits = onlyDigits(raw);
+  if (raw.length < previous.length && digits === onlyDigits(previous) && before > 0) {
+    digits = digits.slice(0, before - 1) + digits.slice(before);
+    before -= 1;
+  }
+  if (digits.length > max) digits = digits.slice(0, before) + digits.slice(before + digits.length - max);
+  before = Math.min(before, digits.length);
+  const value = format(digits);
+  let position = 0;
+  for (let seen = 0; position < value.length && seen < before; position++) if (/\d/.test(value[position])) seen++;
+  // Depois de digitar, o cursor passa a barra que a máscara acabou de pôr.
+  if (raw.length > previous.length && before < digits.length && /\D/.test(value[position] ?? '')) position++;
+  return { value, caret: position };
+}

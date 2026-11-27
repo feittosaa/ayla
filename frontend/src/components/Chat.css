@@ -173,7 +173,16 @@
 .chat-image { margin: 10px 0 4px; max-width: min(100%, 520px); border: 1px solid var(--ayla-border-soft); border-radius: calc(14px * var(--ayla-round, 1)); overflow: hidden; background: var(--ayla-panel); }
 .chat-image img { display: block; width: 100%; height: auto; max-height: 520px; object-fit: contain; background: var(--ayla-code); }
 .chat-image figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px 4px 12px; font-size: 12px; color: var(--ayla-text-faint); }
-.chat-image figcaption span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-image figcaption span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Salvar" nunca quebra em duas linhas, nem na imagem estreita da mensagem enviada. */
+.chat-image figcaption .ghost-button { flex: none; white-space: nowrap; }
+.chat-image-open { display: block; width: 100%; padding: 0; border: 0; border-radius: 0; background: none; cursor: zoom-in; }
+.composer-files .file-thumb { width: 28px; height: 28px; flex: none; border-radius: 6px; object-fit: cover; }
+.image-lightbox-stage { flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.image-lightbox-stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+/* Prévia de documento: páginas na largura da tela (até 1000px), rolando com a roda do mouse. */
+.image-lightbox-scroll { flex: 1; min-height: 0; width: min(1000px, 100%); overflow-y: auto; display: flex; flex-direction: column; gap: 12px; overscroll-behavior: contain; }
+.image-lightbox .image-lightbox-scroll img { width: 100%; height: auto; max-height: none; max-width: none; flex: none; border-radius: 4px; }
 .chat-image-loading { display: block; padding: 40px 16px; text-align: center; color: var(--ayla-text-faint); font-size: 13px; }
 .message.user .chat-image { max-width: 240px; margin: 0; }
 .message.user .message-files { align-items: flex-end; }

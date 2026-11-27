@@ -52,12 +52,23 @@ pub fn notify_test(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Lembrete na hora marcada: o texto é do próprio lembrete; avisa mesmo com a Ayla em foco.
-pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: bool) {
+/// Devolve se o aviso saiu: no Linux, espera o servidor de notificações aceitar (o plugin envia em
+/// segundo plano e esconde a falha); sem confirmação, o lembrete tenta de novo em vez de se perder.
+/// Bloqueia (D-Bus): chame fora do laço assíncrono.
+pub fn reminder(app: &tauri::AppHandle, prefs: &Preferences, text: &str, late: bool) -> bool {
     if !prefs.notifications.reminders {
-        return;
+        return true;
     }
     let title = if late { "Lembrete atrasado" } else { "Lembrete" };
-    let _ = show(app, title, text);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        notify_rust::Notification::new().appname("Ayla").summary(title).body(text).icon(&crate::desktop::notification_icon()).show().is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        show(app, title, text).is_ok()
+    }
 }
 
 pub fn send(app: &tauri::AppHandle, prefs: &Preferences, event: Event) {

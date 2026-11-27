@@ -501,6 +501,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .tree-drop.drop-target { border-radius: calc(8px * var(--ayla-round, 1)); background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); box-shadow: inset 0 0 0 1px var(--ayla-accent); }
 .athena.dragging .tree-root { padding-bottom: 10px; }
 .note-pane { position: relative; }
+/* Onde a aba arrastada vai entrar, entre as outras. */
+.tab-drop-marker { position: absolute; z-index: 21; top: 6px; width: 3px; height: 34px; margin-left: -2px; border-radius: 2px; background: var(--ayla-accent); pointer-events: none; }
 .drop-zone { position: absolute; z-index: 20; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--ayla-accent); border-radius: calc(10px * var(--ayla-round, 1)); background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); pointer-events: none; }
 .drop-zone.center { left: 0; right: 0; }
 .drop-zone.left { left: 0; width: 50%; }
@@ -797,6 +799,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 /* Seção aberta por um atalho (ex.: o ⚠ de uma fonte sem chave): destaque breve. */
 .settings-group.section-reveal { animation: section-reveal 1.6s ease-out; border-radius: calc(14px * var(--ayla-round, 1)); }
 @keyframes section-reveal { 0%, 30% { box-shadow: 0 0 0 2px var(--ayla-accent-ring); } 100% { box-shadow: 0 0 0 2px transparent; } }
+/* Renomear na barra do visualizador da Iris. */
+.iris-rename input { width: min(360px, 40vw); padding: 3px 8px; border: 1px solid #ffffff38; border-radius: 6px; background: #ffffff10; color: #eee; font: inherit; font-weight: 600; }
 /* Editor da Iris (imagem e vídeo) */
 .iris-editor { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: #0b0b0d; color: #eee; }
 .iris-editor .iris-viewer-bar .primary-action, .iris-editor .iris-viewer-bar .ghost-button { white-space: nowrap; }
@@ -1063,6 +1067,7 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .chat-ficha li s { color: var(--ayla-text-faint); }
 .chat-ficha-previews { display: flex; gap: 8px; overflow-x: auto; }
 .chat-ficha-previews img { width: 240px; flex: none; border-radius: 4px; box-shadow: 0 2px 8px rgb(0 0 0 / .3); }
+.app-shell .chat-ficha-preview { flex: none; padding: 0; border: 0; background: none; cursor: zoom-in; min-height: 0; }
 .chat-ficha-done { color: var(--ayla-accent); font-size: 13px; }
 
 .settings-search { display: grid; gap: 8px; margin-top: 12px; }

@@ -574,6 +574,30 @@ impl Store {
             .map(|(role, content)| serde_json::json!({"role":role,"content":content}))
             .collect())
     }
+    /// Extras das respostas no caminho até `upto` (a mais recente primeiro): fichas e notas que a
+    /// conversa acabou de criar ou propor, para um pedido seguinte que não diga o nome ("altera ele").
+    pub fn recent_extras(&self, id: &str, upto: Option<i64>, limit: usize) -> rusqlite::Result<Vec<serde_json::Value>> {
+        let Some(upto) = upto else { return Ok(Vec::new()) };
+        let rows: Vec<String> = self.conn.prepare(&format!("{PATH_CTE} SELECT m.extras FROM messages m JOIN path ON m.id=path.id WHERE m.conversation_id=?1 AND m.role='assistant' AND m.extras IS NOT NULL ORDER BY m.id DESC LIMIT ?3"))?
+            .query_map(params![id, upto, limit as i64], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows.iter().filter_map(|t| serde_json::from_str(t).ok()).collect())
+    }
+    /// Guarda no cartão da ficha (em `extras.ficha.situacao`) que ele foi aplicado ou cancelado,
+    /// para voltar assim ao reabrir a conversa. Acha a resposta mais recente com a mesma proposta.
+    pub fn mark_ficha(&self, conversation: &str, root: &str, path: &str, primeira: u32, valores: &serde_json::Value, situacao: serde_json::Value) -> rusqlite::Result<bool> {
+        let rows: Vec<(i64, String)> = self.conn.prepare("SELECT id, extras FROM messages WHERE conversation_id=?1 AND role='assistant' AND extras IS NOT NULL ORDER BY id DESC")?
+            .query_map(params![conversation], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        for (id, text) in rows {
+            let Ok(mut extras) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let ficha = &extras["ficha"];
+            if ficha["root"].as_str() != Some(root) || ficha["path"].as_str() != Some(path)
+                || ficha["primeira"].as_u64() != Some(primeira as u64) || &ficha["valores"] != valores || ficha["situacao"].is_object() { continue; }
+            extras["ficha"]["situacao"] = situacao;
+            self.conn.execute("UPDATE messages SET extras=?2 WHERE id=?1", params![id, extras.to_string()])?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// Onde entra o próximo turno. Sem `edit_of` nem `regenerate`: depois do caminho mostrado.
     /// `edit_of`: nova versão dessa pergunta (irmã dela). `regenerate`: outra resposta para essa
     /// pergunta (devolve também o texto dela). Só perguntas desta conversa.
@@ -678,6 +702,10 @@ impl Store {
             params![file.id, file.name, file.kind.as_str(), file.bytes, file.created_at, file.conversation_id, file.project_id, file.message_id, file.path, file.extracted, sha256, kept],
         )?;
         Ok(())
+    }
+    /// Nome mostrado de um arquivo guardado na Ayla (o arquivo no disco não muda).
+    pub fn rename_file(&self, id: &str, name: &str) -> rusqlite::Result<bool> {
+        Ok(self.conn.execute("UPDATE files SET name=?2 WHERE id=?1", params![id, name])? > 0)
     }
     pub fn file(&self, id: &str) -> rusqlite::Result<Option<FileInfo>> {
         let mut rows = self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE id=?1"))?.query_map([id], Self::file_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1393,6 +1421,30 @@ mod tests {
         let extras = messages[3].extras.as_ref().unwrap();
         assert_eq!((extras["images"]["query"].as_str(), extras["sources"][0]["url"].as_str()), (Some("gato"), Some("https://doi.org/1")));
         assert_eq!(messages[2].extras, None, "só a resposta recebe");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn cartao_da_ficha_volta_aplicado_ou_cancelado_ao_reabrir() {
+        let root = std::env::temp_dir().join(format!("ayla-ficha-cartao-{}", id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("ayla.db");
+        let db = Store::open(&path).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        let card = |vida: i64| serde_json::json!({"ficha":{"root":"r","path":"Fichas/Besta.pdf","primeira":1,"nome":"Besta","valores":{"nome":"CASCO","vida":vida},"mudancas":[]}});
+        for vida in [40, 50] {
+            db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0, "muda a ficha", "Proposta", true, &[], &[], None).unwrap();
+            db.set_last_reply_extras(&chat.id, &card(vida).to_string()).unwrap();
+        }
+        let valores = |vida: i64| serde_json::json!({"nome":"CASCO","vida":vida});
+        let feito = serde_json::json!({"estado":"aplicado","arquivo":"/v/Fichas/Casco.pdf"});
+        assert!(db.mark_ficha(&chat.id, "r", "Fichas/Besta.pdf", 1, &valores(40), feito.clone()).unwrap(), "acha a proposta certa, não só a última");
+        assert!(!db.mark_ficha(&chat.id, "r", "Fichas/Besta.pdf", 1, &valores(40), serde_json::json!({"estado":"cancelado"})).unwrap(), "já decidida, não muda");
+        assert!(!db.mark_ficha(&chat.id, "r", "Fichas/Outra.pdf", 1, &valores(50), feito.clone()).unwrap());
+        assert!(db.mark_ficha(&chat.id, "r", "Fichas/Besta.pdf", 1, &valores(50), serde_json::json!({"estado":"cancelado"})).unwrap());
+        drop(db);
+        let messages = Store::open(&path).unwrap().messages(&chat.id).unwrap();
+        let situacoes: Vec<_> = messages.iter().filter_map(|m| m.extras.as_ref()).map(|e| e["ficha"]["situacao"].clone()).collect();
+        assert_eq!(situacoes, vec![feito, serde_json::json!({"estado":"cancelado"})]);
         std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
