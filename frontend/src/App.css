@@ -1075,3 +1075,23 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .settings-search [role="status"], .settings-search small { color: var(--ayla-text-soft); }
 .settings-search ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }
 .settings-search li button { width: 100%; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; text-align: left; }
+
+/* Designs sobre documentos (PDFs e imagens da Athena/Iris) */
+.design-page.doc { background-color: #fff; background-size: 100% 100%; background-repeat: no-repeat; background-position: 0 0; }
+.design-pages-nav { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
+.design-page-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.design-page-list button { min-width: 40px; min-height: 32px; padding: 0 8px; border-radius: calc(6px * var(--ayla-round, 1)); font-size: 13px; }
+.design-page-list button.active { border-color: var(--ayla-accent); color: var(--ayla-accent); }
+.design-open-file { max-width: 420px; text-align: left; }
+.design-picker-pdf { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; width: 56px; height: 56px; flex: none; border-radius: 8px; background: var(--ayla-control); color: var(--ayla-accent); }
+.design-picker-pdf small { font-size: 10px; color: var(--ayla-text-faint); }
+.dialog.design-picker { width: min(760px, 94vw); max-height: 86vh; }
+.design-picker-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.design-picker-bar .organ-search { flex: 1; min-width: 220px; }
+.design-picker-list { list-style: none; margin: 0; padding: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 120px; }
+.app-shell .design-picker-list button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 6px 8px; border: 0; border-radius: calc(8px * var(--ayla-round, 1)); background: none; text-align: left; color: var(--ayla-text); }
+.app-shell .design-picker-list button:hover:not(:disabled) { background: var(--ayla-hover); }
+.design-picker-list img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex: none; background: var(--ayla-control); }
+.design-picker-list button > span:not(.design-picker-pdf) { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.design-picker-list b { font-weight: 500; overflow-wrap: anywhere; }
+.design-picker-list small { color: var(--ayla-text-faint); font-size: 12px; overflow-wrap: anywhere; }

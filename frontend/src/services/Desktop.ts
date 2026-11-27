@@ -59,7 +59,7 @@ export type CapabilityRequest = { id: string; text: string; sensitivity: Sensiti
 export type Effort = '' | 'low' | 'medium' | 'high';
 /** Memória pública que pode acompanhar um envio à nuvem, se continuar marcada na revisão. */
 export type Reference = { id: string; content: string };
-export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; edit_of?: number | null; regenerate?: number | null; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean; notes?: string[] };
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; edit_of?: number | null; regenerate?: number | null; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean; hand?: boolean; notes?: string[] };
 /** Nota da Athena oferecida para ir junto à nuvem (o caminho é a chave da busca). */
 export type OfferedNote = { title: string; path: string; cut: boolean };
 /** Nota encontrada que fica neste computador por parecer sensível. */
