@@ -53,6 +53,9 @@ pub struct Preferences {
     pub athena_folder: String,
     pub iris_folder: Option<PathBuf>,
     pub iris_folders: Vec<PathBuf>,
+    /// Pastas em que o Hand pode mudar arquivos (mover, renomear, criar, lixeira). `None`: as
+    /// padrão (Downloads, Documentos, Imagens, Área de trabalho). A busca vê a pasta pessoal toda.
+    pub hand_folders: Option<Vec<PathBuf>>,
     /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
     /// Pastas de livros e mangás conectadas à Biblioteca da Athena (lidas no lugar, sem cópia).
@@ -181,6 +184,7 @@ impl Default for Preferences {
             athena_folder: String::new(),
             iris_folder: None,
             iris_folders: Vec::new(),
+            hand_folders: None,
             athena_vaults: Vec::new(),
             library_folders: Vec::new(),
             athena_git: true,

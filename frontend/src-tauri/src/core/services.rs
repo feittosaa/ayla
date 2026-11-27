@@ -1,3 +1,4 @@
+pub mod hand;
 pub mod project_sources;
 use super::{
     cloud::{self, Api, Login, Secret},
@@ -2760,6 +2761,8 @@ fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: V
             Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
             Some("designs") => kept["designs"] = event["items"].clone(),
             Some("ficha") => kept["ficha"] = event["item"].clone(),
+            // Cartão do Hand (captura, busca, plano, programa ou comando).
+            Some("hand") => kept["hand"] = event["item"].clone(),
             // Ficha criada pela resposta (não aparece; lembra qual é para o próximo pedido).
             Some("ficha_ref") => kept["ficha_ref"] = event["item"].clone(),
             // Nota criada pela resposta: botão para abri-la na Athena.
@@ -5140,6 +5143,15 @@ pub async fn chat(
             metric_model="athena".into();first=Some(start.elapsed().as_millis() as u64);chunks+=1;partial.push_str(&reply);
             let _=events.send(json!({"type":"token","text":reply}));
             return Ok(());
+        }
+        // Hand: pedidos claros ao computador ("tira um print", "organiza meus Downloads"), sem
+        // modelo e sempre neste computador (nada vai para a nuvem, em qualquer modo).
+        if request.attachments.is_empty() {
+            if let Some(reply) = hand::hand_conversa(&state, &request.message, &events, &extras, ).await? {
+                metric_model = "hand".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
         }
         use super::research::AutoRoute;
         let auto_route = if request.automatic && prefs.usage_mode != UsageMode::LocalOnly

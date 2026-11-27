@@ -8,6 +8,7 @@ import { asksForImage, asksAboutScreen } from '../services/Intent';
 import ImageResults from './ImageResults';
 import ChatDesigns from './ChatDesigns';
 import ChatFicha from './ChatFicha';
+import ChatHand, { type HandCard } from './ChatHand';
 import type { FichaCard } from '../services/Ficha';
 import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, LayoutIcon, MicIcon, ChevronLeftIcon, ChevronRightIcon, PaperclipIcon, PencilIcon, RefreshIcon, ScreenIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import Markdown from './Markdown';
@@ -49,7 +50,7 @@ const fitHeight = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.st
 /** Editar uma pergunta (nova versão dela) ou gerar outra resposta: `id` da pergunta; `cut`, a
  * posição a partir da qual a tela troca; `files`, os anexos da pergunta original. */
 type Branch = { kind: 'edit' | 'regenerate'; id: number; text: string; cut: number; files: FileInfo[] };
-const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha, created: m.extras.created ?? m.created } : m;
+const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha, hand: m.extras.hand ?? m.hand, created: m.extras.created ?? m.created } : m;
 
 /** Setas para alternar entre as versões de uma mensagem (‹ 2/3 ›). */
 function Versions({ message, disabled, onPick }: { message: Message; disabled: boolean; onPick: (id: number) => void }) {
@@ -400,6 +401,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'routing') { setRouting(event.text || ''); setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, notice: event.text || '' } : m)); }
         if (event.type === 'images') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, images: { query: event.query ?? '', items: event.items ?? [], links: event.links ?? [] } } : m));
         if (event.type === 'note_created') { const item = (event as unknown as { item?: CreatedNote }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, created: [...(m.created ?? []), item] } : m)); }
+        if (event.type === 'hand') { const item = (event as unknown as { item?: HandCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, hand: item } : m)); }
         if (event.type === 'ficha') { const item = (event as unknown as { item?: FichaCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, ficha: item } : m)); }
         if (event.type === 'designs') { const items = (event as unknown as { items?: DesignCard[] }).items ?? []; setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, designs: items } : m)); }
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
@@ -557,6 +559,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
                   {m.designs?.length ? <ChatDesigns items={m.designs} /> : null}
+                  {m.hand ? <ChatHand item={m.hand} /> : null}
                   {m.ficha ? <ChatFicha item={m.ficha} conversa={conversationId} onOpen={onOpenNote} /> : null}
                   {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
                   {m.created?.length && onOpenNote ? <p className="message-created">{m.created.map(item => <button key={item.note} type="button" className="file-chip link-chip" title={item.note} onClick={() => onOpenNote(item.note)}><FileIcon size={14} />Abrir “{item.title}” na Athena</button>)}</p> : null}

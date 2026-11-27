@@ -1,5 +1,6 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type { FichaCard } from './Ficha';
+import type { HandCard } from '../components/ChatHand';
 
 export type Profile = 'light' | 'moderate' | 'maximum';
 export type Capability = 'text' | 'reasoning' | 'vision' | 'transcription' | 'speech' | 'embedding';
@@ -42,7 +43,7 @@ export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
 export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
 export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
 export type ReplyOrigin = 'cloud' | 'cloud_search';
-export type Message = { id?: number; versions?: number[]; origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; ficha?: FichaCard; created?: CreatedNote[]; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[]; ficha?: FichaCard; created?: CreatedNote[] } | null };
+export type Message = { id?: number; versions?: number[]; origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; ficha?: FichaCard; hand?: HandCard; created?: CreatedNote[]; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[]; ficha?: FichaCard; hand?: HandCard; created?: CreatedNote[] } | null };
 /** Nota que a Ayla criou na resposta (caminho completo, para abrir na Athena). */
 export type CreatedNote = { title: string; note: string };
 /** Design criado pela Ayla na resposta (guardado na Iris › Designs). */
@@ -52,7 +53,7 @@ export type ImageItem = { provider: string; id: string; thumb: string; full: str
 export type ImageResults = { query: string; items: ImageItem[]; links: { name: string; url: string }[] };
 /** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
 export type Source = { id: string; name: string; pages: number[]; date?: string; url?: string; note?: string };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'ficha' | 'note_created' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'ficha' | 'hand' | 'note_created' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
 export type Effort = '' | 'low' | 'medium' | 'high';

@@ -474,6 +474,36 @@ A Ayla vai além de um chatbot: vai reunir projetos e produtos (como a Moneta) q
 - [x] **Memórias temporárias:** a extração automática não guarda valores em dinheiro nem estados do momento ("em aberto", "hoje", "este mês"), nem dados vindos dos órgãos; regra nas instruções e filtro em código (`memory::temporary`). Pedidos explícitos ("lembre que…") continuam valendo. Memórias já guardadas não foram apagadas.
 - [x] **Escolha do modelo na conversa:** em Ajustes desta resposta, a ordem é onde responder (neste computador ou na nuvem) → modelo (locais, ou os da conta conectada na nuvem) → esforço (automático, leve, médio, alto). Na nuvem, o esforço vai como `reasoning_effort` (APIs compatíveis), `reasoning.effort` (plano do ChatGPT) ou orçamento de raciocínio (Claude: 2.048/8.000/16.000 tokens); só é enviado quando escolhido. Neste computador, leve = resposta direta e alto = raciocínio. Revisão de envio e regras de privacidade inalteradas.
 
+### Hand — a mão da Ayla no computador (branch `feature/hand`, 27/11/2026)
+
+**Decisões confirmadas pelo usuário (27/11/2026):**
+- Escopo: capturas de tela, busca de arquivos, organizar pastas, abrir programas e comandos. Objetivo final: o Hand age como uma pessoa operando o computador e pode fazer tudo o que o usuário faz manualmente.
+- Mudanças em arquivos: prévia com Aplicar e histórico para desfazer. Apagar vai para a lixeira do sistema, com confirmação em dois passos.
+- Pastas: a busca vê a pasta pessoal inteira (sem ocultas e sem os dados da Ayla); as mudanças só acontecem nas pastas liberadas em Hand › Pastas liberadas (padrão: Downloads, Documentos, Imagens e Área de trabalho).
+- Uso: página própria do Hand e pedidos pela conversa, tudo neste computador (nada vai para a nuvem).
+
+- [x] **Etapa 1: serviços determinísticos, página e conversa.**
+  - Núcleo `core/hand.rs`, sem IA:
+    - Capturas: tela inteira com `grim`; região ou janela com `slurp` (janelas visíveis listadas pelo `hyprctl`). Ficam em Imagens/Capturas de tela.
+    - Busca: índice do `plocate` mais uma varredura limitada das pastas do dia a dia. Filtra por nome, sem diferenciar acentos, por tipo e por data, fora de ocultas, de `node_modules`/`target` e dos dados da Ayla.
+    - Planos de organização por tipo ou por data: nunca sobrescrevem (nome repetido vira "nome 2"). Antes de Aplicar, o plano é conferido: tudo dentro das pastas liberadas, sem `..`, sem pastas ocultas e com os destinos livres.
+    - Histórico dos últimos 50 lotes, com desfazer.
+    - Programas lidos dos `.desktop` (nome em português) e abertos pelo `gtk-launch`.
+    - Comandos no `bash`, na pasta pessoal, com limite de 60 s e de 64 KB de saída.
+  - Página do Hand no estilo dos órgãos, com as seções Capturas, Buscar, Organizar, Programas, Comandos, Histórico e Pastas liberadas.
+  - Conversa, sem modelo e antes de qualquer decisão de nuvem (o Automático trata o pedido como local):
+    - Pedidos claros como "tira um print", "acha o PDF do contrato", "organiza meus Downloads", "abre o Firefox" e "roda o comando `…`" viram cartões.
+    - O cartão de plano volta aplicado ao reabrir a conversa, pelo histórico (`origem`).
+    - Um comando só roda depois de "Rodar" e da confirmação.
+  - **Validação:**
+    - Testes Rust do Hand: plano, aplicar e desfazer; recusa fora das pastas liberadas; busca; `.desktop`; histórico; comando com limite de tempo; pedidos da conversa e nomes de pastas e programas. Ao todo, 220 testes Rust e 54 do cliente.
+    - App de teste isolado, com uma pasta liberada descartável: o plano por tipo moveu 5 arquivos, o desfazer devolveu tudo e 81 programas foram listados. Pela conversa, o plano aplicou e o comando mostrou a saída; uma pergunta comum seguiu a conversa normal.
+  - **Pendente:**
+    - Captura real (não testada para não gravar a tela do usuário).
+    - Abrir um programa pela conversa no desktop.
+    - Commit: as mudanças estão na branch `feature/hand` (criada pelo usuário em 27/11/2026), ainda sem commit.
+- [ ] **Etapa 2: operar como uma pessoa.** Teclado com `wtype`, mouse com `ydotool` (os dois já instalados) e janelas com `hyprctl`. A Ayla olha a tela por capturas e decide o próximo passo. Antes de implementar, decidir com o usuário a autonomia: quanto ela faz sozinha numa sequência e como ele interrompe.
+
 ### P2 — Primeira integração com a Moneta
 
 **Moneta como órgão (pedido de 20/11/2026, branch `feature/moneta-orgao`).** Opcional, como os demais órgãos não simbióticos: a pessoa baixa em Configurações › Órgãos ou com `./install.sh --com-moneta` (que chama `ayla --instalar-moneta`). A Ayla não copia código da Moneta: busca a tag fixada no repositório oficial, confere o commit, sobe o `compose.yaml` dela num projeto Docker próprio (`ayla-moneta`) com a sobreposição `organs/moneta/compose.ayla.yaml` e mostra a página dela num espaço do trilho, na mesma janela Tauri. A camada `moneta://` (núcleo Rust) repassa cada pedido ao servidor da Moneta com a chave em `Authorization`, sem expô-la à página; troca só `frame-ancestors` e recusa `/entrar`. O contêiner sobe ao abrir o espaço e para quando a Ayla encerra. "Abrir em janela separada" mostra a mesma Moneta numa janela própria; remover apaga repositório, contêiner e imagem, nunca os dados.

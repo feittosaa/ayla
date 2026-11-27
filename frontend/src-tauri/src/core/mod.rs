@@ -8,6 +8,7 @@ pub mod cloud;
 pub mod external;
 pub mod files;
 pub mod fichas;
+pub mod hand;
 pub mod hardware;
 pub mod images;
 pub mod iris;

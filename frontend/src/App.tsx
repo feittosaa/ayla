@@ -17,6 +17,7 @@ import Reminders from './components/Reminders';
 import Confirm from './components/Confirm';
 import Athena from './components/Athena';
 import Iris from './components/Iris';
+import Hand from './components/Hand';
 import AthenaSettings from './components/AthenaSettings';
 import BasesSettings from './components/BasesSettings';
 import ImageSearchSettings from './components/ImageSearchSettings';
@@ -38,7 +39,7 @@ const sections = [
 ];
 type Page = 'models' | 'capabilities' | 'settings';
 /** Espaço aberto: a conversa geral ("ayla"), um órgão ("moneta") ou as configurações. */
-type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena' | 'iris';
+type SpaceId = 'ayla' | 'settings' | 'moneta' | 'athena' | 'iris' | 'hand';
 /** "Abrir com" do gerenciador de arquivos, entregue pelo núcleo. */
 type OpenRequest = { target: 'ayla' | 'athena' | 'iris'; paths: string[] };
 let openCounter = 0;
@@ -76,7 +77,7 @@ export default function App() {
   const [draft, setDraft] = useState<Preferences | null>(null); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
   const [key, setKey] = useState(''); const [remember, setRemember] = useState(false);
   const [desktopError, setDesktopError] = useState('');
-  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [irisVisited, setIrisVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
+  const organ = useOrgan(); const [organVisited, setOrganVisited] = useState(false); const [athenaVisited, setAthenaVisited] = useState(false); const [irisVisited, setIrisVisited] = useState(false); const [handVisited, setHandVisited] = useState(false); const [askOrgan, setAskOrgan] = useState(false);
   const organInstalled = Boolean(organ.status?.installed);
   useEffect(() => { if (!organInstalled) { setOrganVisited(false); setSpace(prev => prev === 'moneta' ? 'ayla' : prev); } }, [organInstalled]);
   const onQuick = useCallback(() => { setSpace('ayla'); setDesktopError(''); }, []);
@@ -131,6 +132,7 @@ export default function App() {
     if (id === 'moneta') setOrganVisited(true);
     if (id === 'athena') setAthenaVisited(true);
     if (id === 'iris') setIrisVisited(true);
+    if (id === 'hand') setHandVisited(true);
   }
   // Design criado na conversa: "Abrir no editor" leva à Iris › Designs.
   useEffect(() => {
@@ -219,6 +221,8 @@ export default function App() {
       <button className="rail-item" aria-label="Athena" title="Athena · notas" aria-current={space === 'athena' ? 'page' : undefined} onClick={() => openSpace('athena')}><BrandMark name="athena" size={26} /></button>
       {/* Iris: imagens, vídeos e PDFs de toda a Ayla (Athena, chat e imagens geradas). */}
       <button className="rail-item" aria-label="Iris" title="Iris · imagens, vídeos e PDFs" aria-current={space === 'iris' ? 'page' : undefined} onClick={() => openSpace('iris')}><BrandMark name="iris" size={24} /></button>
+      {/* Hand: a mão da Ayla no computador (capturas, busca, organizar, programas, comandos). */}
+      <button className="rail-item" aria-label="Hand" title="Hand · mexer no computador" aria-current={space === 'hand' ? 'page' : undefined} onClick={() => openSpace('hand')}><BrandMark name="hand" size={24} /></button>
       {/* Órgãos: sempre visíveis; apagados enquanto não baixados, e o clique oferece a instalação. */}
       <div className="rail-projects">
         {organ.status && <>
@@ -248,6 +252,9 @@ export default function App() {
       </div>}
       {irisVisited && !view.quick && <div className="page" hidden={space !== 'iris'}>
         <Iris active={space === 'iris'} projectTarget={projectTarget?.target === 'iris' ? projectTarget : undefined} external={opened.iris} />
+      </div>}
+      {handVisited && !view.quick && <div className="page" hidden={space !== 'hand'}>
+        <Hand active={space === 'hand'} />
       </div>}
       {organ.status?.installed && organVisited && !view.quick && <div className="page" hidden={space !== 'moneta'}>
         <OrganSpace status={organ.status} active={space === 'moneta'} refresh={organ.refresh} onOpenSettings={() => go('settings', 'orgaos')} />

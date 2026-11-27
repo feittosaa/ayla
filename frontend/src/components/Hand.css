@@ -1,0 +1,36 @@
+/* Hand: mesmo esqueleto dos órgãos (lateral organ-sidebar, barra organ-bar). */
+.hand-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.hand-title { margin: 0 8px; font-size: 14px; font-weight: 600; color: var(--ayla-text); }
+.hand-content { flex: 1; overflow: auto; padding: 18px 22px 40px; }
+.hand-panel { display: flex; flex-direction: column; gap: 12px; max-width: 920px; }
+.hand-sections { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
+.hand-privacy { padding: 8px 14px; margin-top: auto; font-size: 12px; }
+.hand-search { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hand-search .organ-search, .hand-command { flex: 1; min-width: 220px; }
+.hand-command { font-family: var(--ayla-mono, ui-monospace, monospace); }
+.hand-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--ayla-text-soft); font-size: 13px; }
+.hand-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--ayla-border-soft); }
+.hand-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--ayla-border-soft); }
+.hand-list li.gone { opacity: .5; }
+.hand-name { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.hand-name b { font-weight: 500; overflow-wrap: anywhere; }
+.hand-name small { color: var(--ayla-text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.hand-plan { border: 1px solid var(--ayla-border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--ayla-panel); }
+.hand-plan header { display: flex; flex-direction: column; gap: 2px; }
+.hand-plan header small { color: var(--ayla-text-soft); font-size: 12px; }
+.hand-steps { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.hand-steps li { display: flex; gap: 8px; align-items: baseline; }
+.hand-steps li > span:last-child { overflow-wrap: anywhere; color: var(--ayla-text); }
+.hand-verb { flex: none; min-width: 92px; color: var(--ayla-text-soft); font-size: 12px; }
+.hand-verb.danger { color: var(--ayla-danger, #e5484d); }
+.hand-done { color: var(--ayla-accent); font-size: 13px; }
+.hand-run { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--ayla-border-soft); }
+.hand-run code { font-size: 13px; }
+.hand-run pre { margin: 0; padding: 10px; border-radius: 8px; background: var(--ayla-panel); max-height: 360px; overflow: auto; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hand-run pre.hand-stderr { color: var(--ayla-text-soft); }
+.hand-batch { border-bottom: 1px solid var(--ayla-border-soft); padding: 8px 0; }
+.hand-batch summary { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.hand-batch summary small { color: var(--ayla-text-soft); font-size: 12px; flex: 1; }
+.hand-batch .hand-steps { margin-top: 8px; }
+.chat-hand { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
+.chat-hand > p.hand-name { margin: 0; }

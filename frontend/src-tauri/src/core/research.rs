@@ -128,6 +128,10 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
     if super::understand::guard(&message) {
         return Ok(json!({"route": "local", "search": false}));
     }
+    // Pedido ao Hand ("tira um print", "organiza meus Downloads"): feito neste computador, sem modelo.
+    if super::hand::pedido(&message).is_some() {
+        return Ok(json!({"route": "local", "search": false}));
+    }
     // Mudança na ficha de que a resposta anterior tratou: fica neste computador, como as fichas.
     if super::services::segue_ficha(&state, conversation.as_deref(), edit_of, regenerate, &message) {
         return Ok(json!({"route": "local", "search": false}));
