@@ -175,6 +175,72 @@ pub fn collect_imports(sources: &[PathBuf]) -> (Vec<(String, String)>, usize) {
     (out, skipped)
 }
 
+/// Anexo importável (imagem, PDF ou vídeo que a Athena mostra) de até 1 GB.
+pub const MAX_IMPORTED_FILE: u64 = 1024 * 1024 * 1024;
+
+/// Anexos a importar junto das notas (imagens, PDFs e vídeos): caminho relativo de destino (com as
+/// subpastas e a extensão) e o arquivo de origem. Mesmas regras de `collect_imports`: ocultos e
+/// links simbólicos ficam de fora; grandes demais são contados como ignorados.
+pub fn collect_files(sources: &[PathBuf]) -> (Vec<(String, PathBuf)>, usize) {
+    let mut out = Vec::new();
+    let mut skipped = 0;
+    let mut visit = |path: &Path, relative: &Path, out: &mut Vec<(String, PathBuf)>| {
+        if attachment_mime(path).is_none() { return; }
+        if !fs::metadata(path).is_ok_and(|m| m.len() <= MAX_IMPORTED_FILE) { skipped += 1; return; }
+        let mut parts: Vec<String> = relative.components().map(|c| file_name(&c.as_os_str().to_string_lossy())).collect();
+        // `file_name` limpa o nome; a extensão do arquivo volta no fim.
+        if let (Some(last), Some(ext)) = (parts.last_mut(), path.extension()) {
+            let stem = Path::new(last.as_str()).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| last.clone());
+            *last = format!("{}.{}", file_name(&stem), ext.to_string_lossy().to_lowercase());
+        }
+        out.push((parts.join("/"), path.to_path_buf()));
+    };
+    for source in sources {
+        let Ok(meta) = fs::symlink_metadata(source) else { continue };
+        let Some(name) = source.file_name() else { continue };
+        if meta.is_file() { visit(source, Path::new(name), &mut out); continue; }
+        if !meta.is_dir() { continue; }
+        let mut pending = vec![PathBuf::from(name)];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(source.parent().unwrap_or(Path::new("/")).join(&dir)) else { continue };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                let Ok(kind) = entry.file_type() else { continue };
+                if entry_name.starts_with('.') || kind.is_symlink() { continue; }
+                let relative = dir.join(&entry_name);
+                if kind.is_dir() { pending.push(relative); } else if kind.is_file() { visit(&entry.path(), &relative, &mut out); }
+            }
+            if out.len() >= MAX_NOTES { break; }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    (out, skipped)
+}
+
+/// Copia os anexos coletados para a pasta da raiz, sem sobrescrever ("Foto 2.png"); a cópia passa
+/// por um temporário oculto, então um arquivo pela metade nunca aparece.
+pub fn import_files(root: &Path, folder: &str, files: &[(String, PathBuf)]) -> Result<usize, String> {
+    let folder = safe_folder(folder).ok_or("Pasta inválida")?;
+    let mut count = 0;
+    for (relative, source) in files {
+        let wanted = folder.join(relative);
+        if !wanted.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.'))) { continue; }
+        let stem = wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = wanted.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut target = wanted.clone();
+        let mut n = 2;
+        while root.join(&target).exists() { target = parent.join(format!("{stem} {n}.{ext}")); n += 1; }
+        let destination = root.join(&target);
+        fs::create_dir_all(root.join(&parent)).map_err(|_| "Não foi possível criar a pasta")?;
+        let temporary = root.join(&parent).join(format!(".{stem}.{ext}.ayla-tmp"));
+        fs::copy(source, &temporary).and_then(|_| fs::rename(&temporary, &destination))
+            .map_err(|_| { let _ = fs::remove_file(&temporary); format!("Não foi possível copiar {}", relative) })?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Importa as notas coletadas para a pasta da raiz, sem sobrescrever (nomes repetidos ganham " 2").
 pub fn import_into(root: &Path, folder: &str, notes: &[(String, String)]) -> Result<usize, String> {
     let folder = safe_folder(folder).ok_or("Pasta inválida")?;
@@ -293,6 +359,30 @@ pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, 
     }
     fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível mover o arquivo")?;
     Ok(relative_string(&to_path))
+}
+
+/// Renomeia um arquivo (imagem, vídeo, PDF ou texto) na mesma pasta, mantendo a extensão, e
+/// atualiza os links das notas para ele (`![[foto.png]]`), como o Obsidian. Devolve o caminho
+/// novo e quantas notas mudaram.
+/// `relink`: atualizar as notas da raiz (pastas da Athena e cofres; não nas pastas de fotos da Iris).
+pub fn rename_attachment(root: &Path, from: &str, name: &str, relink: bool) -> Result<(String, usize), String> {
+    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some() || is_txt(p)).ok_or("Arquivo inválido")?;
+    if !root.join(&from_path).is_file() { return Err("Arquivo não encontrado".into()); }
+    let ext = from_path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = name.trim();
+    // "Casco.png" ou só "Casco": a extensão é sempre a do arquivo.
+    let stem = name.strip_suffix(&format!(".{ext}")).or_else(|| name.strip_suffix(&format!(".{}", ext.to_lowercase()))).unwrap_or(name).trim();
+    if stem.is_empty() || file_name(stem) != stem || stem.starts_with('.') {
+        return Err("O nome não pode ter / \\ : * ? \" < > | # ^ [ ] nem começar com ponto".into());
+    }
+    let to_path = from_path.with_file_name(format!("{stem}.{ext}"));
+    if to_path == from_path { return Ok((relative_string(&from_path), 0)); }
+    // Só a caixa mudou ("foto" → "Foto"): o sistema de arquivos pode dizer que já existe.
+    let same_file = to_path.to_string_lossy().to_lowercase() == from_path.to_string_lossy().to_lowercase();
+    if root.join(&to_path).exists() && !same_file { return Err("Já existe um arquivo com esse nome nessa pasta".into()); }
+    fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível renomear o arquivo")?;
+    let changed = if relink { relink_all(root, &[(relative_string(&from_path), relative_string(&to_path))]) } else { 0 };
+    Ok((relative_string(&to_path), changed))
 }
 
 /// Move uma nota (`.md`) ou texto (`.txt`) para uma pasta de outra raiz (de um cofre para a
@@ -1368,6 +1458,24 @@ mod tests {
     }
 
     #[test]
+    fn renomear_imagem_atualiza_os_links_das_notas() {
+        let root = temp();
+        fs::create_dir_all(root.join("Imagens/Feras")).unwrap();
+        fs::write(root.join("Imagens/Feras/Volcanic Beast.png"), b"png").unwrap();
+        fs::write(root.join("Imagens/Feras/Outra.png"), b"png").unwrap();
+        fs::write(root.join("Fera.md"), "# Fera\n![[Volcanic Beast.png|300]]\n![](Imagens/Feras/Volcanic%20Beast.png)\n`![[Volcanic Beast.png]]`\n").unwrap();
+        let (novo, notas) = rename_attachment(&root, "Imagens/Feras/Volcanic Beast.png", "Casco de Cinzas", true).unwrap();
+        assert_eq!((novo.as_str(), notas), ("Imagens/Feras/Casco de Cinzas.png", 1));
+        assert!(root.join("Imagens/Feras/Casco de Cinzas.png").is_file() && !root.join("Imagens/Feras/Volcanic Beast.png").exists());
+        assert_eq!(fs::read_to_string(root.join("Fera.md")).unwrap(), "# Fera\n![[Casco de Cinzas.png|300]]\n![](Imagens/Feras/Casco%20de%20Cinzas.png)\n`![[Volcanic Beast.png]]`\n", "código fica como está");
+        assert_eq!(rename_attachment(&root, "Imagens/Feras/Casco de Cinzas.png", "Casco.png", true).unwrap().0, "Imagens/Feras/Casco.png", "a extensão digitada não dobra");
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "Outra", true).is_err(), "não sobrescreve");
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "../fora", true).is_err());
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "a/b", true).is_err());
+        assert!(rename_attachment(&root, "Fera.md", "Outra", true).is_err(), "nota renomeia pelo caminho dela");
+    }
+
+    #[test]
     fn txt_abre_e_importacao_traz_txt_e_md_como_notas() {
         let root = temp();
         let outside = temp();
@@ -1410,6 +1518,22 @@ mod tests {
         assert_eq!(import_into(&root, "Importadas", &[("Gancho 10.2".into(), "novo".into())]).unwrap(), 1);
         assert_eq!(fs::read_to_string(root.join("Importadas/Gancho 10.2.md")).unwrap(), "novo");
         assert!(!root.join("Importadas/Gancho 10.2 2.md").exists());
+        // Imagens, PDFs e vídeos entram como estão, com as subpastas; o resto (e o oculto) fica de fora.
+        fs::write(src.join("Viagens/mapa.pdf"), b"%PDF").unwrap();
+        fs::write(src.join("Fera 10.2.PNG"), b"png2").unwrap();
+        fs::write(src.join("planilha.xlsx"), b"x").unwrap();
+        fs::write(src.join(".git/oculto.png"), b"x").unwrap();
+        let (files, big) = collect_files(&[src.clone()]);
+        assert_eq!(files.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["Antigas/Fera 10.2.png", "Antigas/Viagens/mapa.pdf", "Antigas/foto.png"]);
+        assert_eq!(big, 0);
+        fs::write(root.join("Importadas/Antigas/foto.png"), b"ja existia").unwrap();
+        assert_eq!(import_files(&root, "Importadas", &files).unwrap(), 3);
+        assert_eq!(fs::read(root.join("Importadas/Antigas/foto.png")).unwrap(), b"ja existia", "não sobrescreve");
+        assert_eq!(fs::read(root.join("Importadas/Antigas/foto 2.png")).unwrap(), b"png");
+        assert_eq!(fs::read(root.join("Importadas/Antigas/Fera 10.2.png")).unwrap(), b"png2");
+        assert!(root.join("Importadas/Antigas/Viagens/mapa.pdf").is_file());
+        assert!(fs::read_dir(root.join("Importadas/Antigas")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".ayla-tmp")));
+        assert!(import_files(&root, "../fora", &files).is_err());
         assert_eq!(fs::read_to_string(src.join("Ideias.md")).unwrap(), "# Ideias\n[[Link]]", "original intacto");
         let (single, _) = collect_imports(&[src.join("Viagens/acentos.txt")]);
         assert_eq!(single[0].0, "acentos");

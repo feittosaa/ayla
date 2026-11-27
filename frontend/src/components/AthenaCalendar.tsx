@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type InputHTMLAttributes } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import Confirm from './Confirm';
 import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, FileIcon, PencilIcon, PlusIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
-import { alertFrom, alertMinutes, alertsLabel, maskDate, maskTime, parseDate, parseTime, showDate, type Alert, type AlertUnit } from '../services/Calendar';
+import { alertFrom, alertMinutes, alertsLabel, maskDate, maskTime, maskedEdit, parseDate, parseTime, showDate, type Alert, type AlertUnit } from '../services/Calendar';
 import './AthenaCalendar.css';
 
 /** Uma ocorrência num dia (os itens que repetem aparecem em cada dia). */
@@ -28,6 +28,23 @@ function monthGrid(month: Date): string[] {
 }
 
 /** Calendário da Athena: notas do dia (só as da Athena), eventos e lembretes, com repetições. */
+/** Campo de data ou hora com máscara que deixa o cursor onde a pessoa clicou ou digitou. */
+function MaskedInput({ value, max, format, onValue, ...rest }: { value: string; max: number; format: (digits: string) => string; onValue: (value: string) => void } & Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'max'>) {
+  const input = useRef<HTMLInputElement>(null);
+  const caret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (caret.current !== null && input.current && document.activeElement === input.current) input.current.setSelectionRange(caret.current, caret.current);
+    caret.current = null;
+  });
+  return <input {...rest} ref={input} inputMode="numeric" value={value} onChange={e => {
+    const next = maskedEdit(value, e.target.value, e.target.selectionStart ?? e.target.value.length, max, format);
+    caret.current = next.caret;
+    // Mesmo valor (ex.: dígito a mais num campo cheio no fim): o React não redesenha, então o cursor volta aqui.
+    if (next.value === value) { e.target.value = value; e.target.setSelectionRange(next.caret, next.caret); }
+    onValue(next.value);
+  }} />;
+}
+
 export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => void; onOpenDay: (date: string) => void }) {
   const today = iso(new Date());
   const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
@@ -136,8 +153,8 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
           <h4>{draft.id ? 'Editar' : draft.alerts.length ? 'Novo lembrete' : 'Novo evento'}</h4>
           <label>O quê<input autoFocus required maxLength={200} value={draft.text} placeholder={draft.alerts.length ? 'Ligar pro médico' : 'Aniversário da Ana'} onChange={e => setDraft({ ...draft, text: e.target.value })} /></label>
           <div className="calendar-row">
-            <label>{draft.repeat === 'none' ? 'Dia' : 'Começa em'}<input required inputMode="numeric" placeholder="DD/MM/AAAA" value={draft.date} onChange={e => setDraft({ ...draft, date: maskDate(e.target.value) })} /></label>
-            {!draft.allDay && <label>Hora (24 h)<input required inputMode="numeric" placeholder="HH:MM" value={draft.time} onChange={e => setDraft({ ...draft, time: maskTime(e.target.value) })} onBlur={() => { const t = parseTime(draft.time); if (t) setDraft({ ...draft, time: t }); }} /></label>}
+            <label>{draft.repeat === 'none' ? 'Dia' : 'Começa em'}<MaskedInput required placeholder="DD/MM/AAAA" value={draft.date} max={8} format={maskDate} onValue={date => setDraft(d => d && { ...d, date })} /></label>
+            {!draft.allDay && <label>Hora (24 h)<MaskedInput required placeholder="HH:MM" value={draft.time} max={4} format={maskTime} onValue={time => setDraft(d => d && { ...d, time })} onBlur={() => { const t = parseTime(draft.time); if (t) setDraft({ ...draft, time: t }); }} /></label>}
           </div>
           <label className="calendar-check"><input type="checkbox" checked={draft.allDay} onChange={e => setDraft({ ...draft, allDay: e.target.checked, time: e.target.checked ? '' : draft.time || '09:00' })} />Dia todo</label>
           <label>Repetir<select value={draft.repeat} onChange={e => setDraft({ ...draft, repeat: e.target.value })}>{REPEATS.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>

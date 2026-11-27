@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TAG, WIKI, attachmentUrl, changeBanner, frontmatter, imageWidth, isAttachment, resizedImage, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
+import { TAG, WIKI, attachmentUrl, changeBanner, setMediaVersions, frontmatter, embedResolver, imageWidth, isAttachment, resizedImage, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
 
 test('links do Obsidian viram links internos, com apelido e seção', () => {
   assert.equal(wikiToMarkdown('Ver [[Personagens]].'), `Ver [Personagens](${WIKI}Personagens).`);
@@ -80,4 +80,26 @@ test('texto que começa com --- (separador) não vira propriedades nem esconde o
   const valid = frontmatter('---\n# comentário\ntags:\n- rpg\naliases: [a, b]\n---\nCorpo');
   assert.deepEqual(valid.properties, [{ key: 'tags', values: ['rpg'] }, { key: 'aliases', values: ['a', 'b'] }]);
   assert.equal(valid.body, 'Corpo');
+});
+
+test('![[nome]] sem extensão acha o anexo da raiz, imagem primeiro, e só se for um', () => {
+  const embed = embedResolver([{ path: 'Imagens/Casco de Cinzas.png' }, { path: 'Fichas/Casco de Cinzas.pdf' }, { path: 'Notas/Casco de Cinzas.md' }, { path: 'a/Mapa.jpg' }, { path: 'b/Mapa.webp' }]);
+  assert.equal(embed('Casco de Cinzas'), 'Imagens/Casco de Cinzas.png');
+  assert.equal(embed('casco de cinzas'), 'Imagens/Casco de Cinzas.png');
+  assert.equal(embed('Mapa'), undefined, 'dois com o mesmo nome: não adivinha');
+  assert.equal(embed('Casco de Cinzas.png'), undefined, 'com extensão segue o caminho normal');
+  assert.equal(embed('Bohr'), undefined);
+  assert.match(wikiToMarkdown('![[Casco de Cinzas|300]] e [[Casco de Cinzas]]', embed), /^!\[Casco de Cinzas\]\(athena-link:Imagens%2FCasco%20de%20Cinzas\.png "300"\) e \[Casco de Cinzas\]\(athena-link:Casco%20de%20Cinzas\)$/);
+});
+
+test('anexo trocado no lugar ganha endereço novo (data de alteração), pelo caminho ou pelo nome', () => {
+  const before = attachmentUrl('cofre', 'Imagens/Mapas/Krakatoa.png');
+  setMediaVersions('cofre', [{ path: 'Imagens/Mapas/Krakatoa.png', modified: 100 }]);
+  const v1 = attachmentUrl('cofre', 'Imagens/Mapas/Krakatoa.png');
+  assert.notEqual(v1, before);
+  assert.ok(v1.endsWith('?v=100'));
+  assert.ok(attachmentUrl('cofre', 'krakatoa.png', true).endsWith('?miniatura&v=100'), 'pelo nome, como o ![[Krakatoa.png]]');
+  setMediaVersions('cofre', [{ path: 'Imagens/Mapas/Krakatoa.png', modified: 200 }]);
+  assert.ok(attachmentUrl('cofre', 'Imagens/Mapas/Krakatoa.png').endsWith('?v=200'));
+  assert.ok(!attachmentUrl('outro', 'Imagens/Mapas/Krakatoa.png').includes('v='), 'cada raiz com as suas datas');
 });

@@ -49,12 +49,14 @@ type Props = {
   /** Abre um anexo numa aba (clique na imagem ou em [[arquivo.pdf]]). */
   onAttachment?: (target: string) => void;
   onWebError?: (message: string) => void;
+  /** `![[nome]]` sem extensão: o anexo com esse nome, se houver. */
+  embed?: (name: string) => string | undefined;
 };
 
 /** Links da web abrem no navegador do sistema (só http/https). Imagens remotas nunca são carregadas
  * (evita rastreamento), só o texto alternativo; imagens anexadas às notas vêm da pasta da nota. */
-export default function Markdown({ text, onNoteLink, onTag, media, onAttachment, onWebError }: Props) {
-  const source = onNoteLink ? wikiToMarkdown(text) : text;
+export default function Markdown({ text, onNoteLink, onTag, media, onAttachment, onWebError, embed }: Props) {
+  const source = onNoteLink ? wikiToMarkdown(text, embed) : text;
   const relative = (src: string) => !/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith('//') && !src.startsWith('#');
   const components: Components = {
     a: ({ href, children }) => {

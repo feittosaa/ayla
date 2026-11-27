@@ -62,6 +62,8 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 # Miniaturas da Iris: mesma versão que o GTK do Tauri já usa (sem dependência nova na prática).
 gdk-pixbuf = "=0.18.5"
+# Lembretes: a mesma do plugin de notificações, chamada direto para saber se o sistema aceitou o aviso.
+notify-rust = "4.11"
 
 # Verificação SHA-256 de modelos (GBs) lenta sem otimização; só afeta builds de desenvolvimento.
 [profile.dev.package.sha2]

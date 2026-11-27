@@ -11,7 +11,7 @@ import ChatFicha from './ChatFicha';
 import type { FichaCard } from '../services/Ficha';
 import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, LayoutIcon, MicIcon, ChevronLeftIcon, ChevronRightIcon, PaperclipIcon, PencilIcon, RefreshIcon, ScreenIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import Markdown from './Markdown';
-import FilePreview from './FilePreview';
+import FilePreview, { AttachmentThumb } from './FilePreview';
 import './Chat.css';
 
 type Props = {
@@ -557,7 +557,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
                   {m.designs?.length ? <ChatDesigns items={m.designs} /> : null}
-                  {m.ficha ? <ChatFicha item={m.ficha} /> : null}
+                  {m.ficha ? <ChatFicha item={m.ficha} conversa={conversationId} onOpen={onOpenNote} /> : null}
                   {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
                   {m.created?.length && onOpenNote ? <p className="message-created">{m.created.map(item => <button key={item.note} type="button" className="file-chip link-chip" title={item.note} onClick={() => onOpenNote(item.note)}><FileIcon size={14} />Abrir “{item.title}” na Athena</button>)}</p> : null}
                   {m.sources?.length ? <p className="message-sources"><span>Fontes</span>{m.sources.map(source => {
@@ -641,7 +641,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         <form className={listening === 'recording' ? 'composer recording' : 'composer'} onSubmit={e => { e.preventDefault(); if (canSend) void send(); }}>
           {listening !== 'idle' && <p className="composer-status" role="status"><span className="dot" aria-hidden="true" />{listening === 'recording' ? `Ouvindo · ${clock(seconds)}${RECORD_LIMIT_MS / 1000 - seconds <= 30 ? ` · para em ${RECORD_LIMIT_MS / 1000 - seconds} s` : ''}` : 'Transcrevendo…'}</p>}
           {(attachments.length > 0 || adding) && <ul className="composer-files" aria-label="Arquivos anexados">
-            {attachments.map(file => <li key={file.id} className="file-chip"><FileIcon size={14} /><span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><Confirm className="chip-remove" ariaLabel={`Remover ${file.name}`} disabled={busy} question="Tirar este anexo?" confirm="Tirar" onConfirm={() => removeAttachment(file)}><CloseIcon size={14} /></Confirm></li>)}
+            {attachments.map(file => <li key={file.id} className="file-chip">{file.kind === 'image' || file.kind === 'gif' ? <AttachmentThumb file={file} /> : <FileIcon size={14} />}<span className="file-name">{file.name}</span><span className="file-meta">{fileLabels[file.kind]} · {formatBytes(file.bytes)}</span><Confirm className="chip-remove" ariaLabel={`Remover ${file.name}`} disabled={busy} question="Tirar este anexo?" confirm="Tirar" onConfirm={() => removeAttachment(file)}><CloseIcon size={14} /></Confirm></li>)}
             {adding && <li className="file-chip" role="status">Guardando…</li>}
           </ul>}
           {bases.length > 0 && <ul className="composer-files" aria-label="Bases nesta mensagem">

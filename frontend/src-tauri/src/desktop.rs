@@ -53,6 +53,13 @@ fn enqueue(request: OpenRequest) -> Launch {
 }
 pub const ATHENA_WINDOW: &str = "athena";
 
+/// Pede o foco para a janela. Com `AYLA_SEM_FOCO=1` (instâncias de teste), nunca pede: no Hyprland
+/// com `focus_on_activate`, o pedido levaria a pessoa ao workspace da janela de teste.
+pub fn focus<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    if std::env::var_os("AYLA_SEM_FOCO").is_some_and(|v| v == "1") { return Ok(()); }
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 /// Mostra (ou cria) a janela da Athena e avisa que há arquivos na fila.
 pub fn show_athena(app: &AppHandle) -> Result<(), String> {
     let window = match app.get_webview_window(ATHENA_WINDOW) {
@@ -89,7 +96,7 @@ pub fn show_athena(app: &AppHandle) -> Result<(), String> {
     });
     window.show().map_err(|e| e.to_string())?;
     window.unminimize().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
+    focus(&window)?;
     if !ATHENA_QUEUE.lock().unwrap().is_empty() {
         app.emit_to(ATHENA_WINDOW, "athena-open", ()).map_err(|e| e.to_string())?;
     }
@@ -655,7 +662,7 @@ fn set_mode(app: &AppHandle, quick: bool) -> Result<(), String> {
     if quick { return Ok(()); }
     window.show().map_err(|e| e.to_string())?;
     window.unminimize().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
+    focus(&window)?;
     prepare_on_first_open(app);
     Ok(())
 }
@@ -671,7 +678,7 @@ pub fn quick_ready(app: AppHandle, generation: u64) -> Result<(), String> {
     drop(view);
     window.show().map_err(|e| e.to_string())?;
     window.unminimize().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
+    focus(&window)?;
     click_away(&window, armed)?;
     prepare_on_first_open(&app);
     Ok(())
