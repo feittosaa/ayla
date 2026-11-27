@@ -1,11 +1,12 @@
 import type { ProjectSource } from './ProjectSources';
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import MediaView from './MediaView';
 import { preloadPdf } from '../services/PdfJs';
-import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, ExpandIcon, FileIcon, PencilIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, CursorTextIcon, ExpandIcon, FileIcon, PencilIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { mediaUrl, openInSystem, type MediaRef } from '../services/Media';
+import { setMediaVersions } from '../services/Wiki';
 import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
 import IrisEditor, { type EditResult } from './IrisEditor';
@@ -214,6 +215,7 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
         if (!root?.hasMedia) return null;
         return selected.path && !root.folders.includes(selected.path) ? { root: root.id, path: '' } : selected;
       });
+      for (const item of result.items) if (item.root && item.path) setMediaVersions(item.root, [{ path: item.path, modified: item.date }]);
       setLibrary(result); setError('');
     }, e => { if (request.current === id) setError(errorText(e)); })
       .finally(() => { if (request.current === id) setLoading(false); });
@@ -387,10 +389,28 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
   const [editing, setEditing] = useState(false);
   // Ficha de RPG (PDF de um cofre da Athena): valores na nota e camada no PDF.
   const [sheet, setSheet] = useState(false);
+  // Renomear pela barra do visualizador (a extensão fica; nas pastas da Athena, os links das notas acompanham).
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const renameBusy = useRef(false);
+  async function renameCurrent(item: Item, name: string) {
+    if (renameBusy.current) return;
+    renameBusy.current = true;
+    setRenaming(null);
+    try {
+      const current = item.name.replace(/\.[^.]+$/, '');
+      if (!name.trim() || name.trim() === current) return;
+      const result = await native<{ path?: string; root?: string; file?: string; name?: string; relinked?: number }>('iris_rename', { ...mediaOf(item), name: name.trim() });
+      await load();
+      setOpen(result.file ? item.key : `${result.root}|${result.path}`);
+      setUpscaled(result.relinked ? `Renomeada · links atualizados em ${result.relinked} ${result.relinked === 1 ? 'nota' : 'notas'}.` : 'Renomeada.');
+    } catch (e) { setUpscaled(`Não deu para renomear: ${errorText(e)}`); } finally { renameBusy.current = false; }
+  }
   async function afterEdit(result: EditResult) {
     setEditing(false);
     setUpscaled(result.replaced ? `Original substituído: ${result.name}.` : `Salva como ${result.name}.`);
     await load();
+    // A Athena (aqui ou na janela separada) relê os anexos e mostra a imagem nova nas notas.
+    if (result.replaced && result.root) void emit('notes-updated', { root: result.root });
     if (!outside && !result.replaced) setOpen(result.file ? `arquivo:${result.file}` : `${result.root}|${result.path}`);
   }
   function closeViewer() {
@@ -422,7 +442,8 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
   useEffect(() => {
     if (!current) return;
     const key = (event: KeyboardEvent) => {
-      if (trashing || editing || sheet) return;
+      // Digitando o nome novo: as setas andam no texto, não entre as imagens.
+      if (trashing || editing || sheet || renaming !== null) return;
       if (confirmTrash) {
         if (event.key === 'Escape') { setConfirmTrash(false); setTrashError(''); }
         return;
@@ -433,7 +454,7 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [current, step, confirmTrash, trashing, editing, sheet]);
+  }, [current, step, confirmTrash, trashing, editing, sheet, renaming]);
 
   function system(item: Item) {
     void openInSystem(mediaOf(item)).catch(e => setError(errorText(e)));
@@ -559,8 +580,14 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
     </section>
     {current && <div className="iris-viewer" role="dialog" aria-modal="true" aria-label={current.name} onClick={() => { if (!confirmTrash) closeViewer(); }}>
       <header className="iris-viewer-bar" onClick={e => e.stopPropagation()}>
-        <span className="iris-viewer-title"><b>{current.name}</b><small>{itemLocation(current)} · {day(current.date)} · {size(current.bytes)}</small></span>
+        <span className="iris-viewer-title">{renaming !== null
+          ? <form className="iris-rename" onSubmit={e => { e.preventDefault(); void renameCurrent(current, renaming); }}>
+              <input autoFocus value={renaming} maxLength={200} aria-label={`Novo nome de ${current.name}`} title="Novo nome (a extensão fica)" onFocus={e => e.currentTarget.select()}
+                onChange={e => setRenaming(e.target.value)} onBlur={() => void renameCurrent(current, renaming)} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null); } }} />
+            </form>
+          : <b>{current.name}</b>}<small>{itemLocation(current)} · {day(current.date)} · {size(current.bytes)}</small></span>
         <span className="iris-viewer-count">{index + 1} de {list.length}</span>
+        {!outside && <button className="icon-button" data-tip="Renomear" aria-label="Renomear" onClick={() => setRenaming(current.name.replace(/\.[^.]+$/, ''))}><CursorTextIcon size={17} /></button>}
         <button className="icon-button" data-tip="Abrir no visualizador do sistema" aria-label="Abrir no visualizador do sistema" onClick={() => system(current)}><ExpandIcon size={17} /></button>
         {current.kind === 'image' && !/\.gif$/i.test(current.name) && <button className={upscaling ? 'icon-button active' : 'icon-button'} data-tip="Upscale de imagem" aria-label="Upscale de imagem" aria-pressed={upscaling}
           onClick={() => { setUpscaled(''); setUpscaling(v => !v); }}><UpscaleIcon /></button>}

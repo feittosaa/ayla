@@ -394,9 +394,16 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .athena-visual-editor .athena-heading-2 { font-size: 21px; }
 .athena-strong { font-weight: 700; }
 .athena-emphasis { font-style: italic; }
+/* Itálico nas notas da Athena (editor e modo Ver) na cor de destaque, como em temas do Obsidian. */
+.athena-visual-editor .athena-emphasis, .note-page .markdown em { color: var(--ayla-accent); }
 .athena-strike { text-decoration: line-through; }
 .athena-visual-editor .athena-code { font-family: monospace; background: var(--ayla-hover); }
 .athena-visual-editor .athena-quote { color: var(--ayla-text-soft); }
+/* Tabela e diagrama desenhados no editor; o clique volta ao texto. */
+.athena-visual-editor .athena-drawn { padding: 4px 0; cursor: text; }
+.athena-visual-editor .athena-drawn .markdown table, .athena-visual-editor .athena-drawn .diagram { margin: 0; }
+.athena-visual-editor .cm-line.athena-rule { position: relative; }
+.athena-visual-editor .cm-line.athena-rule::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--ayla-border); pointer-events: none; }
 .note-resizable-image { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
 .note-page .markdown .note-resizable-image img.note-image { margin: 0; cursor: default; }
 .app-shell .note-resize-handle { position: absolute; top: 0; bottom: 0; width: 12px; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: ew-resize; touch-action: none; }
@@ -416,6 +423,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .note-panes { flex: 1; min-height: 0; display: flex; }
 .note-pane { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
 .note-pane + .note-pane { border-left: 1px solid var(--ayla-border-soft); }
+.note-panes > .pane-split + .note-pane { border-left: 1px solid var(--ayla-border-soft); }
+.athena .icon-button.mirror svg { transform: scaleX(-1); }
 .note-pane.focused .note-tab.active { box-shadow: inset 0 2px 0 var(--ayla-accent); }
 .note-tabs { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; min-height: 44px; padding: 4px 8px 0; border-bottom: 1px solid var(--ayla-border-soft); background: var(--ayla-sidebar); }
 .tab-strip { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 2px; align-self: stretch; overflow-x: auto; scrollbar-width: none; }
@@ -492,6 +501,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .tree-drop.drop-target { border-radius: calc(8px * var(--ayla-round, 1)); background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); box-shadow: inset 0 0 0 1px var(--ayla-accent); }
 .athena.dragging .tree-root { padding-bottom: 10px; }
 .note-pane { position: relative; }
+/* Onde a aba arrastada vai entrar, entre as outras. */
+.tab-drop-marker { position: absolute; z-index: 21; top: 6px; width: 3px; height: 34px; margin-left: -2px; border-radius: 2px; background: var(--ayla-accent); pointer-events: none; }
 .drop-zone { position: absolute; z-index: 20; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--ayla-accent); border-radius: calc(10px * var(--ayla-round, 1)); background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); pointer-events: none; }
 .drop-zone.center { left: 0; right: 0; }
 .drop-zone.left { left: 0; width: 50%; }
@@ -788,6 +799,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 /* Seção aberta por um atalho (ex.: o ⚠ de uma fonte sem chave): destaque breve. */
 .settings-group.section-reveal { animation: section-reveal 1.6s ease-out; border-radius: calc(14px * var(--ayla-round, 1)); }
 @keyframes section-reveal { 0%, 30% { box-shadow: 0 0 0 2px var(--ayla-accent-ring); } 100% { box-shadow: 0 0 0 2px transparent; } }
+/* Renomear na barra do visualizador da Iris. */
+.iris-rename input { width: min(360px, 40vw); padding: 3px 8px; border: 1px solid #ffffff38; border-radius: 6px; background: #ffffff10; color: #eee; font: inherit; font-weight: 600; }
 /* Editor da Iris (imagem e vídeo) */
 .iris-editor { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: #0b0b0d; color: #eee; }
 .iris-editor .iris-viewer-bar .primary-action, .iris-editor .iris-viewer-bar .ghost-button { white-space: nowrap; }
@@ -795,14 +808,18 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-editor-stage { flex: 1; min-width: 0; min-height: 0; margin: 8px 24px 24px; display: flex; align-items: center; justify-content: center; }
 .iris-editor-frame { position: relative; overflow: hidden; flex: none; }
 .iris-editor-frame img, .iris-editor-frame video { position: absolute; left: 50%; top: 50%; max-width: none; user-select: none; pointer-events: none; }
-.iris-crop { position: absolute; box-shadow: 0 0 0 9999px rgb(0 0 0 / .55); outline: 1px solid #fff; cursor: move; touch-action: none;
-  background-image: linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40), linear-gradient(#ffffff40, #ffffff40);
+/* Linha do recorte: branca e grossa, com um fio escuro por dentro para aparecer também em fotos claras. */
+.iris-crop { position: absolute; box-shadow: 0 0 0 9999px rgb(0 0 0 / .6), inset 0 0 0 3px rgb(0 0 0 / .45); outline: 2px solid #fff; outline-offset: -2px; cursor: move; touch-action: none;
+  background-image: linear-gradient(#ffffff80, #ffffff80), linear-gradient(#ffffff80, #ffffff80), linear-gradient(#ffffff80, #ffffff80), linear-gradient(#ffffff80, #ffffff80);
   background-size: 1px 100%, 1px 100%, 100% 1px, 100% 1px; background-position: 33.33% 0, 66.66% 0, 0 33.33%, 0 66.66%; background-repeat: no-repeat; }
-.iris-crop-handle { position: absolute; width: 16px; height: 16px; border: 3px solid #fff; touch-action: none; }
-.iris-crop-handle.nw { left: -3px; top: -3px; border-right: 0; border-bottom: 0; cursor: nwse-resize; }
-.iris-crop-handle.ne { right: -3px; top: -3px; border-left: 0; border-bottom: 0; cursor: nesw-resize; }
-.iris-crop-handle.sw { left: -3px; bottom: -3px; border-right: 0; border-top: 0; cursor: nesw-resize; }
-.iris-crop-handle.se { right: -3px; bottom: -3px; border-left: 0; border-top: 0; cursor: nwse-resize; }
+/* Cantos: área de 36px para pegar (dentro da imagem, que corta o que passa da borda) e um "L" grosso. */
+.iris-crop-handle { position: absolute; width: 36px; height: 36px; touch-action: none; }
+.iris-crop-handle.nw, .iris-crop-handle.ne, .iris-crop-handle.sw, .iris-crop-handle.se { z-index: 1; }
+.iris-crop-handle.nw::before, .iris-crop-handle.ne::before, .iris-crop-handle.sw::before, .iris-crop-handle.se::before { content: ''; position: absolute; width: 24px; height: 24px; border: 5px solid #fff; filter: drop-shadow(0 0 1px rgb(0 0 0 / .7)); }
+.iris-crop-handle.nw { left: 0; top: 0; cursor: nwse-resize; } .iris-crop-handle.nw::before { left: 0; top: 0; border-right: 0; border-bottom: 0; }
+.iris-crop-handle.ne { right: 0; top: 0; cursor: nesw-resize; } .iris-crop-handle.ne::before { right: 0; top: 0; border-left: 0; border-bottom: 0; }
+.iris-crop-handle.sw { left: 0; bottom: 0; cursor: nesw-resize; } .iris-crop-handle.sw::before { left: 0; bottom: 0; border-right: 0; border-top: 0; }
+.iris-crop-handle.se { right: 0; bottom: 0; cursor: nwse-resize; } .iris-crop-handle.se::before { right: 0; bottom: 0; border-left: 0; border-top: 0; }
 .iris-editor-panel { width: 288px; flex: none; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; padding: 8px 18px 24px; border-left: 1px solid #ffffff14; font-size: 13px; }
 .iris-editor-panel section { display: flex; flex-direction: column; gap: 8px; }
 .iris-editor-panel h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: #aaa; text-transform: uppercase; }
@@ -829,16 +846,17 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .iris-upscale, .iris-upscale *, .iris-editor-panel, .iris-editor .iris-viewer-title b { overflow-wrap: anywhere; }
 .iris-upscale-size { font-size: 13px; color: var(--ayla-text-soft); font-variant-numeric: tabular-nums; }
 .iris-upscale-size b { color: var(--ayla-text); font-weight: 600; }
-/* Bordas do recorte: faixa larga para pegar, traço curto no meio. */
+/* Bordas do recorte: faixa larga para pegar (entre os cantos), traço curto no meio. */
 .iris-crop.full { cursor: default; background-image: none; }
-.iris-crop-handle.n, .iris-crop-handle.s { left: 14px; right: 14px; width: auto; height: 14px; border: 0; cursor: ns-resize; }
-.iris-crop-handle.e, .iris-crop-handle.w { top: 14px; bottom: 14px; height: auto; width: 14px; border: 0; cursor: ew-resize; }
-.iris-crop-handle.n { top: -7px; } .iris-crop-handle.s { bottom: -7px; }
-.iris-crop-handle.e { right: -7px; } .iris-crop-handle.w { left: -7px; }
+.iris-crop-handle.n, .iris-crop-handle.s { left: 36px; right: 36px; width: auto; height: 18px; cursor: ns-resize; }
+.iris-crop-handle.e, .iris-crop-handle.w { top: 36px; bottom: 36px; height: auto; width: 18px; cursor: ew-resize; }
+.iris-crop-handle.n { top: 0; } .iris-crop-handle.s { bottom: 0; }
+.iris-crop-handle.e { right: 0; } .iris-crop-handle.w { left: 0; }
 .iris-crop-handle.n::after, .iris-crop-handle.s::after, .iris-crop-handle.e::after, .iris-crop-handle.w::after { content: ''; position: absolute; background: #fff; border-radius: 2px; }
-.iris-crop-handle.n::after, .iris-crop-handle.s::after { left: 50%; top: 5px; width: 28px; height: 4px; transform: translateX(-50%); }
-.iris-crop-handle.e::after, .iris-crop-handle.w::after { top: 50%; left: 5px; width: 4px; height: 28px; transform: translateY(-50%); }
-.iris-crop-handle.nw, .iris-crop-handle.ne, .iris-crop-handle.sw, .iris-crop-handle.se { z-index: 1; }
+.iris-crop-handle.n::after, .iris-crop-handle.s::after { left: 50%; width: 32px; height: 5px; transform: translateX(-50%); }
+.iris-crop-handle.n::after { top: 0; } .iris-crop-handle.s::after { bottom: 0; }
+.iris-crop-handle.e::after, .iris-crop-handle.w::after { top: 50%; width: 5px; height: 32px; transform: translateY(-50%); }
+.iris-crop-handle.w::after { left: 0; } .iris-crop-handle.e::after { right: 0; }
 /* Ação secundária com contorno (ex.: "Substituir original"): parece botão, sem competir com o principal. */
 .app-shell .iris-editor .iris-outline-button { border: 1px solid #ffffff38; background: #ffffff0d; color: #eee; padding: 7px 14px; }
 .app-shell .iris-editor .iris-outline-button:hover:not(:disabled) { border-color: #ffffff60; background: #ffffff1f; }
@@ -1049,6 +1067,7 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .chat-ficha li s { color: var(--ayla-text-faint); }
 .chat-ficha-previews { display: flex; gap: 8px; overflow-x: auto; }
 .chat-ficha-previews img { width: 240px; flex: none; border-radius: 4px; box-shadow: 0 2px 8px rgb(0 0 0 / .3); }
+.app-shell .chat-ficha-preview { flex: none; padding: 0; border: 0; background: none; cursor: zoom-in; min-height: 0; }
 .chat-ficha-done { color: var(--ayla-accent); font-size: 13px; }
 
 .settings-search { display: grid; gap: 8px; margin-top: 12px; }

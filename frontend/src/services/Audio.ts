@@ -31,9 +31,12 @@ export function base64(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-export type Recording = { stop: () => void; result: Promise<string>; peek: () => string | null };
+export type Recording = { stop: () => void; result: Promise<string>; peek: () => string | null; reachedLimit: () => boolean };
 
-export async function recordWav(limitMs = 30000): Promise<Recording> {
+/** Uma fala pode ter até 5 minutos (cabe na prévia ao vivo e transcreve em poucos segundos). */
+export const RECORD_LIMIT_MS = 10 * 60 * 1000;
+
+export async function recordWav(limitMs = RECORD_LIMIT_MS): Promise<Recording> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
   const context = new AudioContext();
   await context.resume();
@@ -42,7 +45,7 @@ export async function recordWav(limitMs = 30000): Promise<Recording> {
   const chunks: Float32Array[] = []; let length = 0;
   processor.onaudioprocess = event => { const data = event.inputBuffer.getChannelData(0); chunks.push(new Float32Array(data)); length += data.length; };
   source.connect(processor); processor.connect(context.destination);
-  let finished = false;
+  let finished = false; let limited = false;
   const collect = () => { const samples = new Float32Array(length); let offset = 0; for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; } return samples; };
   let finish: () => void = () => {};
   const result = new Promise<string>((resolve, reject) => {
@@ -55,8 +58,8 @@ export async function recordWav(limitMs = 30000): Promise<Recording> {
       resolve(base64(encodeWav(resample(collect(), rate), 16000)));
     };
   });
-  const timer = setTimeout(() => finish(), limitMs);
+  const timer = setTimeout(() => { limited = true; finish(); }, limitMs);
   // Áudio gravado até agora, para a prévia ao vivo.
   const peek = () => finished || length < context.sampleRate * 0.5 ? null : base64(encodeWav(resample(collect(), context.sampleRate), 16000));
-  return { stop: () => finish(), result, peek };
+  return { stop: () => finish(), result, peek, reachedLimit: () => limited };
 }

@@ -243,6 +243,29 @@ impl Imagem {
         let s = self.escala;
         Some([x0 as f64 / s, y0 as f64 / s, (x1 + 1) as f64 / s, (y1 + 1) as f64 / s])
     }
+    /// Linhas pontilhadas cinza que atravessam a caixa (separadores dos traços): a altura de cada
+    /// uma, em pontos. Linha de texto não conta (tem pixels escuros; a pontilhada é só cinza).
+    pub fn linhas_pontilhadas(&self, caixa: [f64; 4]) -> Vec<f64> {
+        let s = self.escala;
+        let (x0, x1) = ((caixa[0] * s).max(0.0) as usize, ((caixa[2] * s) as usize).min(self.largura));
+        let (y0, y1) = ((caixa[1] * s).max(0.0) as usize, ((caixa[3] * s) as usize).min(self.altura));
+        if x1 <= x0 + 10 { return Vec::new(); }
+        let largura = (x1 - x0) as f64;
+        let mut linhas: Vec<(usize, usize)> = Vec::new();
+        for y in y0..y1 {
+            let (mut cinza, mut escuro, mut primeiro, mut ultimo) = (0usize, 0usize, usize::MAX, 0usize);
+            for x in x0..x1 {
+                let [r, g, b] = self.rgb(x, y);
+                let media = (r as u32 + g as u32 + b as u32) / 3;
+                let neutro = r.abs_diff(g) < 30 && g.abs_diff(b) < 30;
+                if media < 110 { escuro += 1; } else if media < 232 && neutro { cinza += 1; primeiro = primeiro.min(x); ultimo = x; }
+            }
+            let linha = cinza as f64 > largura * 0.2 && (ultimo.saturating_sub(primeiro)) as f64 > largura * 0.6 && (escuro as f64) < largura * 0.02;
+            if !linha { continue; }
+            match linhas.last_mut() { Some((_, fim)) if *fim + 1 >= y => *fim = y, _ => linhas.push((y, y)) }
+        }
+        linhas.into_iter().filter(|(a, b)| b - a <= (3.0 * s) as usize).map(|(a, b)| (a + b) as f64 / 2.0 / s).collect()
+    }
     /// Fração de pixels escuros no retângulo.
     fn escuro(&self, caixa: [f64; 4]) -> f64 {
         let s = self.escala;
@@ -377,7 +400,9 @@ pub fn diferencas(mapa: &Mapa, antes: &Valores, depois: &Valores) -> Vec<(String
 
 /// "BARTHOLOMEW ROBERTS" → "Bartholomew Roberts" (nome da nota).
 pub fn nome_proprio(text: &str) -> String {
-    text.split_whitespace().map(titulo).collect::<Vec<_>>().join(" ")
+    // "CARANGUEJO DE LAVA" → "Caranguejo de Lava": conectores minúsculos (menos no começo).
+    let menores = ["de", "da", "do", "das", "dos", "e", "a", "o", "em", "na", "no"];
+    text.split_whitespace().enumerate().map(|(i, w)| if i > 0 && menores.contains(&w.to_lowercase().as_str()) { w.to_lowercase() } else { titulo(w) }).collect::<Vec<_>>().join(" ")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -450,7 +475,19 @@ pub fn propor(pagina: &Pagina, imagem: &Imagem, indice: u32) -> Vec<Campo> {
     struct Proposta { label: usize, caixa: [f64; 4], tipo: Tipo }
     let mut found: Vec<Proposta> = Vec::new();
     let mut sections: Vec<(usize, [f64; 4])> = Vec::new();
+    // Valores em maiúsculas já preenchidos ("BESTA ARK" sob "NOME") que não são rótulos: um único
+    // texto, sem ":", numa área de uma linha logo abaixo do rótulo.
+    let mut valores: BTreeSet<usize> = BTreeSet::new();
+    let valor_sob = |area: [f64; 4], i: usize| -> Option<usize> {
+        let label = &labels[i];
+        let inside: Vec<usize> = labels.iter().enumerate().filter(|(j, l)| *j != i && dentro(area, centro(l.caixa))).map(|(j, _)| j).collect();
+        match inside.as_slice() {
+            [j] if altura(area) <= altura(label.caixa) * 2.8 && centro(labels[*j].caixa).1 > centro(label.caixa).1 + altura(label.caixa) * 0.5 && !labels[*j].texto.ends_with(':') => Some(*j),
+            _ => None,
+        }
+    };
     for (i, label) in labels.iter().enumerate() {
+        if valores.contains(&i) { continue; }
         let (_, cy) = centro(label.caixa);
         let h = altura(label.caixa);
         let own = imagem.celula(label.caixa[2] + 2.0, cy).or_else(|| imagem.celula(label.caixa[2] + 4.0, cy));
@@ -476,10 +513,12 @@ pub fn propor(pagina: &Pagina, imagem: &Imagem, indice: u32) -> Vec<Campo> {
                 }
             }
         }
+        // Rótulo com dois-pontos ("Atual:", "Alcance:"): o valor vem na mesma linha, nunca embaixo.
+        let colon = pagina.palavras.iter().any(|w| w.texto.ends_with(':') && (w.caixa[2] - label.caixa[2]).abs() < 0.6 && (centro(w.caixa).1 - cy).abs() < h * 0.5);
         // Faixa de título: a célula do rótulo é baixa, ou logo abaixo há outra da mesma largura e
         // sem rótulo (o valor vai embaixo, como em Nome | Pronomes | Ferramenta).
-        let strip = own.is_some_and(|c| altura(c) < h * 1.65 || below(c).is_some_and(|b| {
-            (largura(b) - largura(c)).abs() < largura(c) * 0.1 && b[1] - c[3] < 6.0 && altura(b) >= altura(c) * 0.8 && !has_label(b, i)
+        let strip = !colon && own.is_some_and(|c| altura(c) < h * 1.65 || below(c).is_some_and(|b| {
+            (largura(b) - largura(c)).abs() < largura(c) * 0.1 && b[1] - c[3] < 6.0 && altura(b) >= altura(c) * 0.8 && (!has_label(b, i) || (neighbors.is_empty() && valor_sob(b, i).is_some()))
         }));
         let similar = |a: &[f64; 4], b: &[f64; 4]| (largura(*a) - largura(*b)).abs() < largura(*a).max(largura(*b)) * 0.25 && (altura(*a) - altura(*b)).abs() < 4.0;
         if neighbors.len() >= 2 && neighbors.windows(2).all(|w| similar(&w[0], &w[1])) && largura(neighbors[0]) < altura(neighbors[0]) * 2.5 {
@@ -502,9 +541,26 @@ pub fn propor(pagina: &Pagina, imagem: &Imagem, indice: u32) -> Vec<Campo> {
             continue;
         }
         let base = own.filter(|c| c[1] <= label.caixa[1] + 1.0).unwrap_or(label.caixa);
-        let Some(area) = below(base).or_else(|| below(label.caixa)) else { continue };
+        let Some(area) = below(base).or_else(|| below(label.caixa)) else {
+            // Cabeçalho dentro da própria coluna em branco (Vigor: "Atual | Max" em cima dela): o
+            // campo é a coluna abaixo do rótulo, dividida entre os rótulos da mesma linha.
+            let Some(cell) = imagem.celula(centro(label.caixa).0, label.caixa[3] + 2.0).filter(|c| c[1] <= label.caixa[1] + 1.0 && c[3] > label.caixa[3] + h) else { continue };
+            let mut row: Vec<usize> = labels.iter().enumerate()
+                .filter(|(_, l)| (centro(l.caixa).1 - cy).abs() < h * 0.5 && centro(l.caixa).0 > cell[0] && centro(l.caixa).0 < cell[2]).map(|(j, _)| j).collect();
+            row.sort_by(|a, b| labels[*a].caixa[0].partial_cmp(&labels[*b].caixa[0]).unwrap_or(std::cmp::Ordering::Equal));
+            let pos = row.iter().position(|&j| j == i).unwrap_or(0);
+            let left = if pos == 0 { cell[0] } else { (labels[row[pos - 1]].caixa[2] + label.caixa[0]) / 2.0 };
+            let right = if pos + 1 == row.len() { cell[2] } else { (label.caixa[2] + labels[row[pos + 1]].caixa[0]) / 2.0 };
+            let caixa = [left, label.caixa[3] + 1.0, right, cell[3]];
+            found.push(Proposta { label: i, caixa, tipo: if altura(caixa) > h * 2.8 { Tipo::Bloco } else { Tipo::Linha } });
+            continue;
+        };
         let inside: Vec<usize> = labels.iter().enumerate().filter(|(j, l)| *j != i && dentro(area, centro(l.caixa))).map(|(j, _)| j).collect();
-        if inside.is_empty() {
+        // Ficha preenchida: um único texto em maiúsculas numa área de uma linha logo abaixo do
+        // rótulo é o valor dele (o nome da fera), não outro rótulo.
+        let valor = valor_sob(area, i);
+        if inside.is_empty() || valor.is_some() {
+            if let Some(j) = valor { valores.insert(j); }
             let tipo = if altura(area) > h * 2.8 { Tipo::Bloco } else { Tipo::Linha };
             found.push(Proposta { label: i, caixa: area, tipo });
         } else if inside.iter().all(|&j| (centro(labels[j].caixa).1 - cy).abs() < h) {
@@ -522,6 +578,7 @@ pub fn propor(pagina: &Pagina, imagem: &Imagem, indice: u32) -> Vec<Campo> {
     }
     // Nomes: o rótulo, com a seção na frente quando ele se repete ("Vigor · Atual").
     let repeated: Vec<String> = found.iter().map(|p| labels[p.label].texto.clone()).collect();
+    let campos_de: BTreeSet<usize> = found.iter().map(|p| p.label).collect();
     let count = |text: &str| repeated.iter().filter(|t| *t == text).count();
     let mut used: Vec<String> = Vec::new();
     found.into_iter().map(|p| {
@@ -531,7 +588,13 @@ pub fn propor(pagina: &Pagina, imagem: &Imagem, indice: u32) -> Vec<Campo> {
             .map(|(s, _)| titulo(&labels[*s].texto));
         let mut rotulo = titulo(&label.texto);
         if count(&label.texto) > 1 {
-            rotulo = match section { Some(s) => format!("{s} · {rotulo}"), None => rotulo };
+            // "Durabilidade  Atual: [ ]  Max: [ ]": o rótulo sem campo à esquerda, na mesma linha, dá o nome.
+            let (_, cy) = centro(label.caixa);
+            let dono = labels.iter().enumerate()
+                .filter(|(j, l)| !campos_de.contains(j) && (centro(l.caixa).1 - cy).abs() < altura(label.caixa) * 0.5 && l.caixa[2] <= label.caixa[0] && label.caixa[0] - l.caixa[2] < 200.0)
+                .max_by(|a, b| a.1.caixa[2].partial_cmp(&b.1.caixa[2]).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, l)| titulo(&l.texto));
+            rotulo = match dono.or(section) { Some(s) => format!("{s} · {rotulo}"), None => rotulo };
         }
         let mut id = slug(&rotulo);
         let mut n = 2;
@@ -726,6 +789,157 @@ pub fn nome_bate(nome: &str, pedido: &str) -> usize {
     usadas.len()
 }
 
+/// Pedido de mudança sem dizer "ficha" ("altera o nome dele pra…, coloca 50 de vida"): vale só
+/// logo depois de uma resposta sobre uma ficha.
+pub fn pede_mudanca(message: &str) -> bool {
+    let verbos = ["altera", "altere", "alterar", "muda", "mude", "mudar", "coloca", "coloque", "colocar", "poe", "bota", "tira", "tire", "tirar",
+        "remove", "remova", "remover", "adiciona", "adicione", "adicionar", "acrescenta", "acrescente", "troca", "troque", "trocar",
+        "aumenta", "aumente", "diminui", "diminua", "renomeia", "renomeie", "substitui", "substitua", "deixa", "deixe", "preenche", "preencha"];
+    slug(message).split('-').any(|w| verbos.contains(&w))
+}
+
+/// Campos que se reconhecem pelo nome: "Traços" é uma lista (título maior e descrição, centralizados),
+/// não um texto corrido — assim a Ayla tira e põe traços pelo título e desenha como a ficha.
+pub fn tipos_conhecidos(campos: &mut [Campo]) {
+    for campo in campos.iter_mut() {
+        if campo.tipo == Tipo::Bloco && slug(&campo.rotulo).split('-').last() == Some("tracos") { campo.tipo = Tipo::Tracos; }
+    }
+}
+
+/// O valor serve para o tipo do campo (numa troca de mapa, o que não serve é lido de novo).
+pub fn serve(campo: &Campo, valor: &Valor) -> bool {
+    matches!((&campo.tipo, valor), (Tipo::Numero | Tipo::Bolinhas { .. }, Valor::Numero(_)) | (Tipo::Linha | Tipo::Bloco, Valor::Texto(_)) | (Tipo::Tracos, Valor::Tracos(_)))
+}
+
+/// Quantos traços do começo ficam quando o pedido manda trocar os outros: "remove os traços exceto
+/// pelo primeiro" → 1; "deixa só os dois primeiros" → 2; "substitua os traços" / "tira todos" → 0.
+pub fn regra_tracos(message: &str) -> Option<usize> {
+    let text = format!(" {} ", slug(message).replace('-', " "));
+    if !text.contains(" tracos ") && !text.contains(" traco ") { return None; }
+    let numero = |w: &str| match w { "primeiro" | "um" | "1" => Some(1), "dois" | "2" => Some(2), "tres" | "3" => Some(3), _ => None };
+    for marker in [" exceto ", " menos ", " so ", " apenas ", " somente ", " fora "] {
+        if let Some(at) = text.find(marker) {
+            let words: Vec<&str> = text[at + marker.len()..].split_whitespace().take(5).collect();
+            if let Some(i) = words.iter().position(|w| w.starts_with("primeir")) {
+                // "o primeiro" = 1; "os dois primeiros" = 2.
+                return Some(words[..i].iter().rev().find_map(|w| numero(w)).unwrap_or(1));
+            }
+        }
+    }
+    // Todos: "substitua os traços", "troca todos os traços", "tira todos". "Troca o segundo traço"
+    // é um só (fica com o modelo, que diz qual).
+    let todos = text.contains(" todos ") || text.contains(" tudo ");
+    let troca = [" substitui ", " substitua ", " substituir ", " troca ", " troque ", " trocar "].iter().any(|m| text.contains(m));
+    let tira = [" remove ", " remova ", " tira ", " tire ", " apaga ", " apague "].iter().any(|m| text.contains(m));
+    // Trocar "os traços" é trocar todos; tirar só quando diz "todos" ("remove os traços de voo" não).
+    ((troca && (todos || text.contains(" os tracos "))) || (tira && todos)).then_some(0)
+}
+
+/// O pedido manda criar traços novos ("coloque no lugar habilidades que combinem", "cria 2 traços")
+/// e quantos (o número dito perto de "no total", "traços", "habilidades"; sem número, 2).
+pub fn pede_tracos_novos(message: &str) -> Option<usize> {
+    let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
+    let criar = ["coloque", "coloca", "ponha", "poe", "bota", "crie", "cria", "criar", "adicione", "adiciona", "inventa", "invente", "sugira", "sugere", "gere", "gera", "lugar"];
+    let alvo = |w: &str| matches!(w, "traco" | "tracos" | "habilidade" | "habilidades" | "poderes" | "poder");
+    if !words.iter().any(|w| criar.contains(&w.as_str())) || !words.iter().any(|w| alvo(w)) { return None; }
+    let numero = |w: &str| match w { "um" | "uma" | "1" => Some(1), "dois" | "duas" | "2" => Some(2), "tres" | "3" => Some(3), "quatro" | "4" => Some(4), _ => None };
+    let perto = words.iter().enumerate().filter(|(_, w)| alvo(w) || w.as_str() == "total").flat_map(|(i, _)| (i.saturating_sub(3)..(i + 1).min(words.len())).chain(i + 1..(i + 4).min(words.len())))
+        .find_map(|j| numero(&words[j]).filter(|_| words[j] != "um" || words.get(j + 1).is_some_and(|w| alvo(w))));
+    Some(perto.unwrap_or(2))
+}
+
+/// "Coloca 50 de vida", "vigor 50", "PV para 50": o número pedido para o Vigor (sem depender do modelo).
+pub fn pedido_vigor(message: &str) -> Option<i64> {
+    let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
+    let vida = |w: &str| matches!(w, "vida" | "vigor" | "pv" | "hp");
+    let numero = |w: &str| w.parse::<i64>().ok().filter(|n| *n > 0 && *n < 100_000);
+    for (i, w) in words.iter().enumerate() {
+        if !vida(w) { continue; }
+        // Antes: "50 de vida", "50 pontos de vida"; depois: "vida 50", "vida para 50".
+        let before = (i.saturating_sub(4)..i).rev().map(|j| &words[j]).take_while(|w| numero(w).is_some() || matches!(w.as_str(), "de" | "pontos" | "ponto")).find_map(|w| numero(w));
+        let after = words.iter().skip(i + 1).take(3).take_while(|w| numero(w).is_some() || matches!(w.as_str(), "para" | "pra" | "em" | "de" | "max" | "maximo" | "maxima")).find_map(|w| numero(w));
+        if let Some(n) = before.or(after) { return Some(n); }
+    }
+    None
+}
+
+/// "Remove o RD", "tira a RDA", "sem RD": tirar a redução de dano do Vigor.
+pub fn pede_sem_rd(message: &str) -> bool {
+    let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
+    words.iter().any(|w| w == "rd" || w == "rda")
+        && words.iter().any(|w| matches!(w.as_str(), "remove" | "remova" | "remover" | "tira" | "tire" | "tirar" | "retira" | "retire" | "sem" | "apaga" | "apague"))
+}
+
+/// Aplica o Vigor pedido e a retirada do RD no campo de Vigor máximo (ou no único de Vigor):
+/// troca o número da primeira linha e tira as linhas "RD…", mantendo o resto. `false` se não há campo.
+pub fn ajustar_vigor(mapa: &Mapa, valores: &mut Valores, vigor: Option<i64>, sem_rd: bool) -> bool {
+    let vigor_campos: Vec<&Campo> = mapa.campos.iter().filter(|c| slug(&c.rotulo).split('-').any(|w| w == "vigor")).collect();
+    let Some(campo) = vigor_campos.iter().find(|c| slug(&c.rotulo).ends_with("max")).or(vigor_campos.first()).copied() else { return false };
+    if let (Tipo::Numero | Tipo::Bolinhas { .. }, Some(n)) = (&campo.tipo, vigor) {
+        valores.insert(campo.id.clone(), Valor::Numero(n));
+        return true;
+    }
+    let atual = match valores.get(&campo.id) { Some(Valor::Texto(t)) => t.clone(), Some(Valor::Numero(n)) => n.to_string(), _ => String::new() };
+    let mut linhas: Vec<String> = atual.lines().map(str::to_string).collect();
+    if sem_rd { linhas.retain(|l| !slug(l).starts_with("rd")); }
+    if let Some(n) = vigor {
+        match linhas.iter().position(|l| l.trim().chars().all(|c| c.is_ascii_digit()) && !l.trim().is_empty()) {
+            Some(i) => linhas[i] = n.to_string(),
+            None => linhas.insert(0, n.to_string()),
+        }
+    }
+    valores.insert(campo.id.clone(), Valor::Texto(linhas.join("\n")));
+    true
+}
+
+/// Pedido de ficha nova a partir de outra ("cria uma ficha pra esse monstro com os valores base da
+/// Besta Ark"): verbo de criar e a palavra ficha. A ficha base é achada pelo nome, como nas edições.
+pub fn pede_nova(message: &str) -> bool {
+    let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
+    let criar = ["cria", "crie", "criar", "faz", "faca", "fazer", "monta", "monte", "montar", "gera", "gere", "gerar", "nova", "novo", "duplica", "duplique", "copia", "copie"];
+    words.iter().any(|w| w == "ficha" || w == "fichas") && words.iter().any(|w| criar.contains(&w.as_str()))
+}
+
+/// Nome da ficha nova dito no pedido: "chamada Caranguejo Vulcânico", "com o nome X", entre aspas
+/// ou "ficha do Caranguejo Vulcânico a partir da…". `None` quando o pedido só aponta ("esse monstro").
+pub fn nome_pedido(message: &str) -> Option<String> {
+    let clean = |text: &str| -> Option<String> {
+        let stops = [",", ".", ";", "!", "?", "\n", " a partir", " baseado", " baseada", " com ", " use ", " usando", " igual", " copiando", " no ", " na ", " nos ", " nas ", " do mesmo", " da mesma", " e "];
+        let mut end = text.len();
+        for stop in stops { if let Some(at) = text.find(stop) { end = end.min(at); } }
+        let name = text[..end].trim().trim_matches(|c: char| c == '"' || c == '“' || c == '”' || c == '\'').trim();
+        let lower = name.to_lowercase();
+        let pointer = ["esse", "essa", "este", "esta", "ele", "ela", "isso", "o monstro", "a fera", "monstro", "fera", "criatura", "personagem", "imagem", "mim"];
+        (name.chars().any(char::is_alphabetic) && name.split_whitespace().count() <= 6 && !pointer.iter().any(|p| lower == *p || lower.starts_with(&format!("{p} "))))
+            .then(|| nome_proprio(name))
+    };
+    for (open, close) in [('“', '”'), ('"', '"')] {
+        if let Some(start) = message.find(open) {
+            let rest = &message[start + open.len_utf8()..];
+            if let Some(end) = rest.find(close) { if let Some(name) = clean(&rest[..end]) { return Some(name); } }
+        }
+    }
+    let lower = message.to_lowercase();
+    for marker in ["chamado ", "chamada ", "com o nome ", "com nome ", "de nome ", "nomeado ", "nomeada ", "ficha do ", "ficha da ", "ficha de ", "ficha pro ", "ficha pra ", "ficha para o ", "ficha para a "] {
+        for (at, _) in lower.match_indices(marker) {
+            if let Some(name) = message.get(at + marker.len()..).and_then(clean) { return Some(name); }
+        }
+    }
+    None
+}
+
+/// Nome a partir do arquivo de uma imagem anexada ("Volcanic Tidepool Crustacean Beast.png"):
+/// `None` para nomes de câmera ou só números ("IMG_2034", "image").
+pub fn nome_de_arquivo(file: &str) -> Option<String> {
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    let words: Vec<&str> = stem.split(|c: char| c == '_' || c == '-' || c.is_whitespace()).filter(|w| !w.is_empty()).collect();
+    let letters = |w: &str| w.chars().filter(|c| c.is_alphabetic()).count();
+    let junk = ["img", "image", "imagem", "screenshot", "captura", "foto", "photo", "pxl", "dsc", "whatsapp", "download"];
+    let good: Vec<&str> = words.iter().copied().filter(|w| letters(w) >= 2 && letters(w) * 2 > w.chars().count()).collect();
+    if good.is_empty() || good.iter().any(|w| junk.contains(&w.to_lowercase().as_str())) || good.len() * 2 < words.len() { return None; }
+    Some(good.join(" "))
+}
+
 /// Larguras da Helvetica Bold (WinAnsi, 32 a 255), em milésimos do tamanho da letra; tiradas da
 /// Nimbus Sans Bold (URW), de métrica igual.
 const WIDTHS: [u16; 224] = [
@@ -762,7 +976,181 @@ pub fn winansi(text: &str) -> Vec<u8> {
 
 /// Largura do texto em pontos.
 pub fn medir(text: &str, size: f64) -> f64 {
+    if let Some(w) = fonte_do_campo(|f| f.largura(text)) { return w * size / 1000.0; }
     winansi(text).iter().map(|&b| if b >= 32 { WIDTHS[(b - 32) as usize] as f64 } else { 0.0 }).sum::<f64>() * size / 1000.0
+}
+
+/// Fonte da própria ficha (a do Canva, embutida no PDF só com as letras que ela usa): a Ayla
+/// escreve com ela quando todas as letras do texto estão lá; senão, em Helvetica.
+#[derive(Clone, Debug, Default)]
+pub struct Fonte {
+    /// Letra → glifo (CID, Identity-H).
+    glifos: BTreeMap<char, u16>,
+    larguras: BTreeMap<u16, f64>,
+    padrao: f64,
+}
+
+impl Fonte {
+    fn cobre(&self, text: &str) -> bool { text.chars().all(|c| self.glifos.contains_key(&c)) }
+    /// Largura em milésimos do tamanho, se todas as letras existirem.
+    fn largura(&self, text: &str) -> Option<f64> {
+        self.cobre(text).then(|| text.chars().map(|c| self.larguras.get(&self.glifos[&c]).copied().unwrap_or(self.padrao)).sum())
+    }
+    fn hex(&self, text: &str) -> String {
+        format!("<{}>", text.chars().map(|c| format!("{:04X}", self.glifos[&c])).collect::<String>())
+    }
+    /// Lê o mapa de letras (ToUnicode) e as larguras (/W) de uma fonte Type0 Identity-H.
+    pub fn ler(doc: &lopdf::Document, fonte: &lopdf::Dictionary) -> Option<Self> {
+        use lopdf::Object;
+        let deref = |o: &Object| match o { Object::Reference(r) => doc.get_object(*r).ok().cloned(), other => Some(other.clone()) };
+        if fonte.get(b"Subtype").ok()?.as_name().ok()? != b"Type0" || fonte.get(b"Encoding").ok().and_then(|e| e.as_name().ok()) != Some(b"Identity-H".as_slice()) { return None; }
+        let cmap = match deref(fonte.get(b"ToUnicode").ok()?)? { Object::Stream(s) => s.decompressed_content().ok().unwrap_or(s.content.clone()), _ => return None };
+        let glifos = to_unicode(&String::from_utf8_lossy(&cmap));
+        if glifos.is_empty() { return None; }
+        let descendente = match deref(fonte.get(b"DescendantFonts").ok()?)? { Object::Array(a) => deref(a.first()?)?, _ => return None };
+        let descendente = descendente.as_dict().ok()?;
+        let padrao = descendente.get(b"DW").ok().and_then(|o| o.as_float().ok().map(f64::from).or_else(|| o.as_i64().ok().map(|v| v as f64))).unwrap_or(1000.0);
+        let mut larguras = BTreeMap::new();
+        if let Some(Object::Array(w)) = descendente.get(b"W").ok().and_then(deref) {
+            let num = |o: &Object| deref(o).and_then(|o| o.as_float().ok().map(f64::from).or_else(|| o.as_i64().ok().map(|v| v as f64)));
+            let mut i = 0;
+            while i < w.len() {
+                let Some(first) = num(&w[i]) else { break };
+                match w.get(i + 1).and_then(deref) {
+                    Some(Object::Array(list)) => { for (k, v) in list.iter().enumerate() { if let Some(v) = num(v) { larguras.insert(first as u16 + k as u16, v); } } i += 2; }
+                    Some(_) => { let (Some(last), Some(v)) = (num(&w[i + 1]), w.get(i + 2).and_then(num)) else { break }; for c in first as u16..=last as u16 { larguras.insert(c, v); } i += 3; }
+                    None => break,
+                }
+            }
+        }
+        Some(Fonte { glifos, larguras, padrao })
+    }
+}
+
+/// League Spartan Bold completa (OFL), a fonte das fichas do Canva: escreve qualquer letra nelas.
+const LEAGUE_SPARTAN: &[u8] = include_bytes!("../../fonts/LeagueSpartan-Bold.ttf");
+
+/// Métricas de uma TrueType para o descritor do PDF (em milésimos).
+struct Metricas { ascent: f64, descent: f64, bbox: [f64; 4] }
+
+/// Lê de uma TrueType a tabela de letras (Latim, U+0020 a U+02FF) e as larguras, em milésimos.
+fn fonte_ttf(ttf: &[u8]) -> Option<(Fonte, Metricas)> {
+    let u16_at = |o: usize| ttf.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let i16_at = |o: usize| u16_at(o).map(|v| v as i16 as f64);
+    let u32_at = |o: usize| ttf.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let tabela = |tag: &[u8; 4]| (0..u16_at(4)? as usize).find_map(|i| { let r = 12 + i * 16; (ttf.get(r..r + 4)? == tag).then(|| u32_at(r + 8)).flatten() });
+    let (head, hhea, hmtx, cmap) = (tabela(b"head")?, tabela(b"hhea")?, tabela(b"hmtx")?, tabela(b"cmap")?);
+    let upem = u16_at(head + 18)? as f64;
+    let escala = |v: f64| v * 1000.0 / upem;
+    let metricas = Metricas { ascent: escala(i16_at(hhea + 4)?), descent: escala(i16_at(hhea + 6)?), bbox: [escala(i16_at(head + 36)?), escala(i16_at(head + 38)?), escala(i16_at(head + 40)?), escala(i16_at(head + 42)?)] };
+    let metricas_h = u16_at(hhea + 34)? as usize;
+    let avanco = |g: u16| { let i = (g as usize).min(metricas_h.saturating_sub(1)); u16_at(hmtx + i * 4).map(|w| escala(w as f64)) };
+    // Subtabela Unicode BMP (formato 4).
+    let sub = (0..u16_at(cmap + 2)? as usize).find_map(|i| {
+        let r = cmap + 4 + i * 8;
+        let (plataforma, codificacao) = (u16_at(r)?, u16_at(r + 2)?);
+        let off = cmap + u32_at(r + 4)?;
+        ((plataforma == 3 && codificacao == 1) || plataforma == 0).then_some(off).filter(|o| u16_at(*o) == Some(4))
+    })?;
+    let segs = u16_at(sub + 6)? as usize / 2;
+    let (fins, inicios, deltas, faixas) = (sub + 14, sub + 16 + segs * 2, sub + 16 + segs * 4, sub + 16 + segs * 6);
+    let glifo = |c: u32| -> Option<u16> {
+        let i = (0..segs).find(|&i| u16_at(fins + i * 2).is_some_and(|f| f as u32 >= c))?;
+        let inicio = u16_at(inicios + i * 2)? as u32;
+        if inicio > c { return None; }
+        let delta = u16_at(deltas + i * 2)?;
+        let faixa = u16_at(faixas + i * 2)? as usize;
+        let g = if faixa == 0 { (c as u16).wrapping_add(delta) } else {
+            let g = u16_at(faixas + i * 2 + faixa + (c - inicio) as usize * 2)?;
+            if g == 0 { return None; }
+            g.wrapping_add(delta)
+        };
+        (g != 0).then_some(g)
+    };
+    let mut fonte = Fonte { padrao: avanco(0)?, ..Default::default() };
+    for c in 0x20u32..0x300 {
+        let (Some(ch), Some(g)) = (char::from_u32(c), glifo(c)) else { continue };
+        fonte.glifos.insert(ch, g);
+        if let Some(w) = avanco(g) { fonte.larguras.insert(g, w); }
+    }
+    (!fonte.glifos.is_empty()).then_some((fonte, metricas))
+}
+
+/// Embute a League Spartan no PDF (Type0 / CIDFontType2, Identity-H, com ToUnicode para o texto
+/// continuar copiável) e devolve o objeto da fonte e o mapa para escrever com ela.
+fn embutir_league(doc: &mut lopdf::Document) -> Option<(lopdf::ObjectId, Fonte)> {
+    use lopdf::{Dictionary, Object, Stream};
+    let (fonte, m) = fonte_ttf(LEAGUE_SPARTAN)?;
+    let nome = || Object::Name(b"LeagueSpartan-Bold".to_vec());
+    let mut arquivo = Stream::new(Dictionary::from_iter([("Length1", Object::Integer(LEAGUE_SPARTAN.len() as i64))]), LEAGUE_SPARTAN.to_vec());
+    let _ = arquivo.compress();
+    let arquivo = doc.add_object(Object::Stream(arquivo));
+    let descritor = doc.add_object(Object::Dictionary(Dictionary::from_iter([
+        ("Type", Object::Name(b"FontDescriptor".to_vec())), ("FontName", nome()), ("Flags", Object::Integer(32)),
+        ("FontBBox", Object::Array(m.bbox.iter().map(|v| Object::Integer(*v as i64)).collect())), ("ItalicAngle", Object::Integer(0)),
+        ("Ascent", Object::Integer(m.ascent as i64)), ("Descent", Object::Integer(m.descent as i64)), ("CapHeight", Object::Integer(700)),
+        ("StemV", Object::Integer(140)), ("FontFile2", Object::Reference(arquivo)),
+    ])));
+    let mut larguras: Vec<Object> = Vec::new();
+    for (g, w) in &fonte.larguras { larguras.push(Object::Integer(*g as i64)); larguras.push(Object::Array(vec![Object::Integer(w.round() as i64)])); }
+    let cid = doc.add_object(Object::Dictionary(Dictionary::from_iter([
+        ("Type", Object::Name(b"Font".to_vec())), ("Subtype", Object::Name(b"CIDFontType2".to_vec())), ("BaseFont", nome()),
+        ("CIDSystemInfo", Object::Dictionary(Dictionary::from_iter([("Registry", Object::string_literal("Adobe")), ("Ordering", Object::string_literal("Identity")), ("Supplement", Object::Integer(0))]))),
+        ("FontDescriptor", Object::Reference(descritor)), ("DW", Object::Integer(fonte.padrao.round() as i64)), ("W", Object::Array(larguras)),
+        ("CIDToGIDMap", Object::Name(b"Identity".to_vec())),
+    ])));
+    let pares: Vec<String> = fonte.glifos.iter().map(|(c, g)| format!("<{g:04X}> <{:04X}>", *c as u32)).collect();
+    let mut cmap = String::from("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    for bloco in pares.chunks(100) { cmap.push_str(&format!("{} beginbfchar\n{}\nendbfchar\n", bloco.len(), bloco.join("\n"))); }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    let mut unicode = Stream::new(Dictionary::new(), cmap.into_bytes());
+    let _ = unicode.compress();
+    let unicode = doc.add_object(Object::Stream(unicode));
+    let tipo0 = doc.add_object(Object::Dictionary(Dictionary::from_iter([
+        ("Type", Object::Name(b"Font".to_vec())), ("Subtype", Object::Name(b"Type0".to_vec())), ("BaseFont", nome()),
+        ("Encoding", Object::Name(b"Identity-H".to_vec())), ("DescendantFonts", Object::Array(vec![Object::Reference(cid)])), ("ToUnicode", Object::Reference(unicode)),
+    ])));
+    Some((tipo0, fonte))
+}
+
+/// CMap ToUnicode → letra para glifo (só os glifos de uma letra; o espaço também).
+fn to_unicode(cmap: &str) -> BTreeMap<char, u16> {
+    let hex = |t: &str| u32::from_str_radix(t.trim_matches(|c| c == '<' || c == '>'), 16).ok();
+    let letra = |t: &str| { let t = t.trim_matches(|c| c == '<' || c == '>'); (t.len() == 4).then(|| u32::from_str_radix(t, 16).ok().and_then(char::from_u32)).flatten() };
+    let mut out = BTreeMap::new();
+    let mut put = |c: char, g: u32| { if let Ok(g) = u16::try_from(g) { out.entry(c).or_insert(g); } };
+    let mut modo = "";
+    for line in cmap.lines() {
+        let line = line.trim();
+        if line.ends_with("beginbfchar") { modo = "char"; continue; }
+        if line.ends_with("beginbfrange") { modo = "range"; continue; }
+        if line.starts_with("endbf") { modo = ""; continue; }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match (modo, parts.as_slice()) {
+            ("char", [g, u]) => if let (Some(g), Some(c)) = (hex(g), letra(u)) { put(c, g) },
+            ("range", [a, b, u]) if !u.starts_with('[') => if let (Some(a), Some(b), Some(start)) = (hex(a), hex(b), hex(u)) {
+                for (k, g) in (a..=b).enumerate() { if let Some(c) = char::from_u32(start + k as u32) { put(c, g) } }
+            },
+            ("range", [a, _b, rest @ ..]) => if let Some(a) = hex(a) {
+                for (k, u) in rest.iter().map(|t| t.trim_matches(|c| c == '[' || c == ']')).filter(|t| !t.is_empty()).enumerate() { if let Some(c) = letra(u) { put(c, a + k as u32) } }
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
+thread_local! {
+    /// Fonte da página que está sendo desenhada (medir e escrever usam a mesma).
+    static FONTE: std::cell::RefCell<Option<Fonte>> = const { std::cell::RefCell::new(None) };
+    /// O campo em desenho tem letra fora da fonte da ficha: ele todo vai em Helvetica (sem misturar).
+    static SO_HELVETICA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fonte da ficha, se ela vale para o campo atual.
+fn fonte_do_campo<T>(f: impl FnOnce(&Fonte) -> Option<T>) -> Option<T> {
+    if SO_HELVETICA.with(|s| s.get()) { return None; }
+    FONTE.with(|fonte| fonte.borrow().as_ref().and_then(f))
 }
 
 fn pdf_string(text: &str) -> String {
@@ -811,7 +1199,9 @@ impl Tela {
             x + k, y - raio, x + raio, y - k, x + raio, y));
     }
     fn texto(&mut self, text: &str, x: f64, baseline_top: f64, size: f64) {
-        self.ops.push_str(&format!("BT 0.08 0.08 0.1 rg /AylaF {size:.2} Tf {:.2} {:.2} Td {} Tj ET\n", self.x0 + x, self.y(baseline_top), pdf_string(text)));
+        let propria = fonte_do_campo(|f| f.cobre(text).then(|| f.hex(text)));
+        let (fonte, codigo) = match propria { Some(hex) => ("AylaE", hex), None => ("AylaF", pdf_string(text)) };
+        self.ops.push_str(&format!("BT 0.08 0.08 0.1 rg /{fonte} {size:.2} Tf {:.2} {:.2} Td {codigo} Tj ET\n", self.x0 + x, self.y(baseline_top)));
     }
 }
 
@@ -842,7 +1232,7 @@ fn dica(campo: &Campo, original: &Pagina) -> Option<Dica> {
 }
 
 /// Desenha um campo na tela. Com `dica`, segue o tamanho e o alinhamento do texto original.
-fn desenhar(tela: &mut Tela, campo: &Campo, valor: Option<&Valor>, dica: Option<Dica>) {
+fn desenhar(tela: &mut Tela, campo: &Campo, valor: Option<&Valor>, dica: Option<Dica>, linhas: &[(f64, [u8; 3])]) {
     let caixa = campo.caixa;
     let pad = 2.0;
     let inner = [caixa[0] + pad, caixa[1] + pad * 0.5, caixa[2] - pad, caixa[3] - pad * 0.5];
@@ -872,20 +1262,21 @@ fn desenhar(tela: &mut Tela, campo: &Campo, valor: Option<&Valor>, dica: Option<
         }
         (Tipo::Bloco, Some(Valor::Texto(t))) => {
             let size = caber(inner, dica.map_or(9.0, |d| d.tamanho.min(9.0)), |s| quebrar(t, s, largura(inner)).len() as f64 * s * 1.2);
+            // O texto original estava no meio da caixa (o "120" do Vigor): o novo também.
+            let meio = dica.and_then(|d| d.faixa).is_some_and(|(a, b)| ((a + b) / 2.0 - centro(inner).0).abs() < largura(inner) * 0.08 && b - a < largura(inner) * 0.85);
             for (i, line) in quebrar(t, size, largura(inner)).iter().enumerate() {
-                tela.texto(line, inner[0], inner[1] + size * (1.2 * i as f64 + 0.95), size);
+                let x = if meio { inner[0] + (largura(inner) - medir(line, size)).max(0.0) / 2.0 } else { inner[0] };
+                tela.texto(line, x, inner[1] + size * (1.2 * i as f64 + 0.95), size);
             }
         }
         (Tipo::Tracos, Some(Valor::Tracos(list))) => {
             // Título maior e centralizado; descrição menor, centralizada embaixo dele.
-            let height = |s: f64| list.iter().map(|t| {
+            let um = |t: &Traco, s: f64| {
                 let title = quebrar(&t.titulo, s * 1.25, largura(inner)).len() as f64 * s * 1.25 * 1.15;
                 let desc = if t.descricao.is_empty() { 0.0 } else { quebrar(&t.descricao, s, largura(inner)).len() as f64 * s * 1.2 };
-                title + desc + s * 1.1
-            }).sum::<f64>();
-            let size = caber(inner, 8.5, height);
-            let mut top = inner[1];
-            for t in list {
+                title + desc
+            };
+            let escrever = |tela: &mut Tela, t: &Traco, size: f64, mut top: f64| {
                 let ts = size * 1.25;
                 for line in quebrar(&t.titulo, ts, largura(inner)) {
                     tela.texto(&line, inner[0] + (largura(inner) - medir(&line, ts)) / 2.0, top + ts * 0.95, ts);
@@ -897,7 +1288,46 @@ fn desenhar(tela: &mut Tela, campo: &Campo, valor: Option<&Valor>, dica: Option<
                         top += size * 1.2;
                     }
                 }
-                top += size * 1.1;
+                top
+            };
+            // O tamanho da descrição original (o título é 1,25 vez maior), sem encolher à toa.
+            let maximo = dica.map_or(8.5, |d| d.tamanho.min(14.0));
+            // Linhas cinza que separam os traços na ficha: cada traço no seu espaço; o que não cabe
+            // num só ocupa os seguintes (a linha do meio é apagada, como no original).
+            let cortes: Vec<(f64, [u8; 3])> = linhas.iter().copied().filter(|(y, _)| *y > inner[1] + 6.0 && *y < inner[3] - 6.0).collect();
+            let mut espacos: Vec<(f64, f64)> = Vec::new();
+            let mut topo = inner[1];
+            for (y, _) in &cortes { espacos.push((topo, *y)); topo = *y; }
+            espacos.push((topo, inner[3]));
+            let folga = 5.0;
+            let distribuir = |size: f64| -> Option<Vec<(usize, usize)>> {
+                let mut livre = 0;
+                let mut out = Vec::new();
+                for t in list {
+                    let precisa = um(t, size) + folga * 2.0;
+                    let mut fim = livre;
+                    while fim < espacos.len() && espacos[fim].1 - espacos.get(livre)?.0 < precisa { fim += 1; }
+                    if fim >= espacos.len() { return None; }
+                    out.push((livre, fim));
+                    livre = fim + 1;
+                }
+                Some(out)
+            };
+            let mut size = maximo;
+            let mut lugar = None;
+            if !cortes.is_empty() {
+                while size >= 4.0 { if let Some(l) = distribuir(size) { lugar = Some(l); break; } size -= 0.25; }
+            }
+            if let Some(lugar) = lugar {
+                for (t, (a, b)) in list.iter().zip(lugar) {
+                    for (y, cor) in &cortes[a..b] { tela.retangulo([campo.caixa[0] + 1.0, y - 1.6, campo.caixa[2] - 1.0, y + 1.6], *cor); }
+                    let (topo, fundo) = (espacos[a].0, espacos[b].1);
+                    escrever(tela, t, size, (topo + (fundo - topo - um(t, size)) / 2.0).max(topo + folga));
+                }
+            } else {
+                let size = caber(inner, maximo, |s| list.iter().map(|t| um(t, s) + s * 1.1).sum::<f64>());
+                let mut top = inner[1];
+                for t in list { top = escrever(tela, t, size, top) + size * 1.1; }
             }
         }
         _ => {}
@@ -914,7 +1344,14 @@ pub struct Ficha<'a> {
 /// Camada de uma página: cobre o texto antigo dentro dos campos (e as caixas das bolinhas) com a
 /// cor do fundo em volta e desenha os valores. `pagina` é o texto que sobrou depois de tirar o
 /// antigo; `original`/`imagem` são do PDF original (o tamanho e a posição do texto antigo).
-fn camada(campos: &[(&Campo, Option<&Valor>)], todos: &[&Campo], pagina: &Pagina, original: &Pagina, imagem: &Imagem, altura_pdf: f64, x0: f64) -> String {
+fn camada(campos: &[(&Campo, Option<&Valor>)], todos: &[&Campo], pagina: &Pagina, original: &Pagina, imagem: &Imagem, altura_pdf: f64, x0: f64, fonte: Option<Fonte>) -> String {
+    FONTE.with(|f| *f.borrow_mut() = fonte);
+    let ops = camada_com_fonte(campos, todos, pagina, original, imagem, altura_pdf, x0);
+    FONTE.with(|f| *f.borrow_mut() = None);
+    ops
+}
+
+fn camada_com_fonte(campos: &[(&Campo, Option<&Valor>)], todos: &[&Campo], pagina: &Pagina, original: &Pagina, imagem: &Imagem, altura_pdf: f64, x0: f64) -> String {
     let mut tela = Tela { ops: String::new(), altura: altura_pdf, x0 };
     for (campo, _) in campos {
         match &campo.tipo {
@@ -941,7 +1378,21 @@ fn camada(campos: &[(&Campo, Option<&Valor>)], todos: &[&Campo], pagina: &Pagina
     };
     for (campo, valor) in campos {
         let d = dica(campo, original).or_else(|| do_tipo(&campo.tipo).map(|tamanho| Dica { tamanho, faixa: None }));
-        desenhar(&mut tela, campo, *valor, d);
+        // Linhas cinza dos Traços, com a cor do fundo em volta de cada uma (para apagar a do meio de
+        // um traço que ocupa dois espaços).
+        let linhas: Vec<(f64, [u8; 3])> = if campo.tipo == Tipo::Tracos {
+            imagem.linhas_pontilhadas(campo.caixa).into_iter().map(|y| (y, imagem.fundo([campo.caixa[0] + 4.0, y - 1.2, campo.caixa[2] - 4.0, y + 1.2]))).collect()
+        } else { Vec::new() };
+        let textos: String = match valor {
+            Some(Valor::Texto(t)) => t.chars().filter(|c| *c != '\n').collect(),
+            Some(Valor::Tracos(l)) => l.iter().map(|t| format!("{}{}", t.titulo, t.descricao)).collect(),
+            Some(Valor::Numero(n)) => n.to_string(),
+            None => String::new(),
+        };
+        let cobre = FONTE.with(|f| f.borrow().as_ref().is_none_or(|f| f.cobre(&textos)));
+        SO_HELVETICA.with(|s| s.set(!cobre));
+        desenhar(&mut tela, campo, *valor, d, &linhas);
+        SO_HELVETICA.with(|s| s.set(false));
     }
     tela.ops
 }
@@ -1134,18 +1585,41 @@ pub fn aplicar(original: &Path, destino: &Path, fichas: &[Ficha]) -> Result<(), 
     font.set("BaseFont", Object::Name(b"Helvetica-Bold".to_vec()));
     font.set("Encoding", Object::Name(b"WinAnsiEncoding".to_vec()));
     let font_id = doc.add_object(Object::Dictionary(font));
+    let mut completa: Option<(lopdf::ObjectId, Fonte)> = None;
     for (number, campos) in by_page {
         let (page, mbox) = boxes[&number];
         let texto = palavras(&stripped, number)?;
         let pixels = imagem(original, number)?;
         let antes = palavras(original, number)?;
-        let ops = camada(&campos, &todos[&number], &texto, &antes, &pixels, mbox[3], mbox[0]);
+        // A fonte da ficha nesta página (a Type0 com mais letras), usada pelo texto novo.
+        let propria: Option<(lopdf::ObjectId, Fonte)> = {
+            let dict_of = |o: Option<&Object>| match o { Some(Object::Dictionary(d)) => d.clone(), Some(Object::Reference(r)) => doc.get_dictionary(*r).cloned().unwrap_or_default(), _ => Dictionary::new() };
+            let resources = recursos(&doc, page)?;
+            // As fontes da página e as dos desenhos (XObjects) dela, um nível abaixo (o Canva usa).
+            let mut ids: Vec<lopdf::ObjectId> = dict_of(resources.get(b"Font").ok()).iter().filter_map(|(_, o)| o.as_reference().ok()).collect();
+            for (_, x) in dict_of(resources.get(b"XObject").ok()).iter() {
+                let Ok(id) = x.as_reference() else { continue };
+                if let Ok(Object::Stream(form)) = doc.get_object(id) {
+                    let inner = dict_of(form.dict.get(b"Resources").ok());
+                    ids.extend(dict_of(inner.get(b"Font").ok()).iter().filter_map(|(_, o)| o.as_reference().ok()));
+                }
+            }
+            let achada = ids.into_iter().filter_map(|id| Some((id, Fonte::ler(&doc, doc.get_dictionary(id).ok()?)?))).max_by_key(|(_, f)| f.glifos.len());
+            // Ficha em League Spartan (a do Canva): a fonte completa, embutida uma vez no PDF.
+            let league = achada.as_ref().and_then(|(id, _)| doc.get_dictionary(*id).ok()?.get(b"BaseFont").ok()?.as_name().ok().map(|n| String::from_utf8_lossy(n).contains("LeagueSpartan")));
+            if league == Some(true) {
+                if completa.is_none() { completa = embutir_league(&mut doc); }
+                completa.clone().or(achada)
+            } else { achada }
+        };
+        let ops = camada(&campos, &todos[&number], &texto, &antes, &pixels, mbox[3], mbox[0], propria.as_ref().map(|(_, f)| f.clone()));
         let mut form = Dictionary::new();
         form.set("Type", Object::Name(b"XObject".to_vec()));
         form.set("Subtype", Object::Name(b"Form".to_vec()));
         form.set("BBox", Object::Array(mbox.iter().map(|v| Object::Real(*v as f32)).collect()));
         let mut fonts = Dictionary::new();
         fonts.set("AylaF", Object::Reference(font_id));
+        if let Some((id, _)) = &propria { fonts.set("AylaE", Object::Reference(*id)); }
         let mut form_resources = Dictionary::new();
         form_resources.set("Font", Object::Dictionary(fonts));
         form.set("Resources", Object::Dictionary(form_resources));
@@ -1259,6 +1733,28 @@ pub(crate) mod tests {
         doc.save(path).unwrap();
     }
 
+    /// Ficha real de uma página só, já preenchida (`AYLA_FICHA_UNICA`): campos e nome lidos.
+    #[test]
+    #[ignore = "usa uma ficha real indicada por variável de ambiente"]
+    fn ficha_unica_real() {
+        let pdf = PathBuf::from(std::env::var("AYLA_FICHA_UNICA").expect("AYLA_FICHA_UNICA"));
+        let pagina = palavras(&pdf, 1).unwrap();
+        let campos = propor(&pagina, &imagem(&pdf, 1).unwrap(), 0);
+        for c in &campos { eprintln!("{:28} {:?} {:?}", c.rotulo, c.tipo, c.caixa); }
+        if std::env::var("AYLA_FICHA_DEPURAR").is_ok() {
+            let img = imagem(&pdf, 1).unwrap();
+            for l in rotulos(&pagina.palavras).iter().filter(|l| ["VIGOR", "ATUAL", "MAX", "DURABILIDADE", "ATUAL:", "MAX:", "CONDIÇÕES"].iter().any(|t| l.texto == t.trim_end_matches(':'))) {
+                let (_, cy) = centro(l.caixa);
+                let own = img.celula(l.caixa[2] + 2.0, cy).or_else(|| img.celula(l.caixa[2] + 4.0, cy));
+                let below = [2.5, 5.0, 8.0, 12.0].iter().find_map(|d| img.celula(centro(l.caixa).0, l.caixa[3] + d));
+                eprintln!("rótulo {:?} {:?} own={:?} below={:?}", l.texto, l.caixa.map(|v| v.round()), own.map(|c| c.map(|v| v.round())), below.map(|c| c.map(|v| v.round())));
+            }
+        }
+        let mapa = Mapa { nome: "Real".into(), paginas: 1, campos };
+        eprintln!("nome: {:?}", nome_na_pagina(&mapa, &pagina));
+        for (k, v) in ler(&mapa, &pdf, 1).unwrap() { eprintln!("valor {k} = {v:?}"); }
+    }
+
     /// Ficha real: `AYLA_FICHA_BRANCA` (modelo), `AYLA_FICHA_CHEIA` (preenchida) e `AYLA_FICHA_SAIDA`.
     #[test]
     #[ignore = "usa uma ficha real indicada por variáveis de ambiente"]
@@ -1348,6 +1844,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn league_spartan_completa_tem_as_letras_da_lingua() {
+        let (fonte, m) = fonte_ttf(LEAGUE_SPARTAN).expect("TrueType lida");
+        assert!(fonte.cobre("ÁÂÃÀÇÉÊÍÓÔÕÚÜ áâãàçéêíóôõúü +5 (MÁXIMO) 1D6"), "letras do português");
+        let a = fonte.largura("A").unwrap();
+        assert!(a > 400.0 && a < 900.0, "largura do A em milésimos: {a}");
+        assert!(m.ascent > 600.0 && m.descent < 0.0);
+    }
+
+    #[test]
+    fn fonte_da_ficha_mapa_de_letras() {
+        let cmap = "/CIDInit /ProcSet findresource begin\n2 beginbfchar\n<0003> <0020>\n<0010> <00C7>\nendbfchar\n2 beginbfrange\n<0024> <0026> <0041>\n<0030> <0031> [<0035> <0036>]\nendbfrange\nend";
+        let glifos = to_unicode(cmap);
+        assert_eq!((glifos[&' '], glifos[&'Ç'], glifos[&'A'], glifos[&'C'], glifos[&'5'], glifos[&'6']), (3, 0x10, 0x24, 0x26, 0x30, 0x31));
+        let fonte = Fonte { glifos, larguras: BTreeMap::from([(0x24, 600.0)]), padrao: 500.0 };
+        assert_eq!(fonte.largura("A C"), Some(1600.0));
+        assert_eq!(fonte.largura("AZ"), None, "letra fora da fonte: a linha vai em Helvetica");
+        assert_eq!(fonte.hex("AÇ"), "<00240010>");
+    }
+
+    #[test]
+    fn pedido_de_ficha_nova_e_nome() {
+        let pedido = "cria pra mim no wilderfeast uma ficha pra esse monstro, use os valores base da Besta Ark";
+        assert!(pede_nova(pedido));
+        assert!(pede_mudanca("altera o nome dele pra Casco de Cinzas, coloca 50 de vida e remove o RD"));
+        assert!(!pede_mudanca("o que você acha desse monstro?"));
+        let pedido = "altera o nome dele pra Casco de Cinzas, coloca 50 de vida e remove o RD. remova os traços exceto pelo primeiro";
+        assert_eq!(pedido_vigor(pedido), Some(50));
+        assert_eq!(regra_tracos(pedido), Some(1));
+        assert_eq!(pede_tracos_novos("remova os traços exceto pelo primeiro, e coloque no lugar habilidades que voce acha que faça juz a esse monstro. podem ser 2 no total"), Some(2));
+        assert_eq!(pede_tracos_novos("cria três traços de gelo"), Some(3));
+        assert_eq!(pede_tracos_novos("coloca 50 de vida"), None);
+        assert_eq!(regra_tracos("deixa só os dois primeiros traços e cria mais um"), Some(2));
+        assert_eq!(regra_tracos("substitua os traços por habilidades de fogo"), Some(0));
+        assert_eq!(regra_tracos("adiciona um traço de voo"), None);
+        assert_eq!(regra_tracos("troca o segundo traço por um traço novo de fogo"), None, "um só: quem diz qual é o modelo");
+        assert_eq!(regra_tracos("tira todos os traços e cria três de gelo"), Some(0));
+        assert_eq!(regra_tracos("remove os traços de voo"), None);
+        let mut campos = vec![Campo { id: "tracos".into(), rotulo: "Traços".into(), pagina: 0, caixa: [0.0; 4], tipo: Tipo::Bloco }];
+        tipos_conhecidos(&mut campos);
+        assert_eq!(campos[0].tipo, Tipo::Tracos);
+        assert_eq!(pedido_vigor("muda o vigor para 80"), Some(80));
+        assert_eq!(pedido_vigor("ele tem muita vida"), None);
+        assert!(pede_sem_rd(pedido) && !pede_sem_rd("coloca RD 3"));
+        let mapa = Mapa { nome: "Fera".into(), paginas: 1, campos: vec![
+            Campo { id: "vigor-atual".into(), rotulo: "Vigor · Atual".into(), pagina: 0, caixa: [0.0; 4], tipo: Tipo::Bloco },
+            Campo { id: "vigor-max".into(), rotulo: "Vigor · Max".into(), pagina: 0, caixa: [0.0; 4], tipo: Tipo::Bloco }] };
+        let mut valores = Valores::new();
+        valores.insert("vigor-max".into(), Valor::Texto("120\nRDA 2".into()));
+        assert!(ajustar_vigor(&mapa, &mut valores, Some(50), true));
+        assert_eq!(valores["vigor-max"], Valor::Texto("50".into()));
+        assert!(!valores.contains_key("vigor-atual"));
+        assert!(!pede_nova("adiciona um ponto em Golpear na ficha do Bartholomew"));
+        assert_eq!(nome_pedido(pedido), None, "\"esse monstro\" não é nome");
+        assert_eq!(nome_pedido("cria a ficha do Caranguejo Vulcânico a partir da Besta Ark").as_deref(), Some("Caranguejo Vulcânico"));
+        assert_eq!(nome_pedido("faz uma ficha chamada caranguejo de lava, com os valores da Besta Ark").as_deref(), Some("Caranguejo de Lava"));
+        assert_eq!(nome_pedido("cria uma ficha “Rei das Marés” igual à do Basilisco").as_deref(), Some("Rei das Marés"));
+        assert_eq!(nome_de_arquivo("Volcanic Tidepool Crustacean Beast.png").as_deref(), Some("Volcanic Tidepool Crustacean Beast"));
+        assert_eq!(nome_de_arquivo("IMG_2034.jpg"), None);
+        assert_eq!(nome_de_arquivo("20261126_143000.png"), None);
+    }
+
+    #[test]
     fn propoe_le_e_desenha_uma_ficha() {
         if !poppler() { eprintln!("sem poppler-utils: teste pulado"); return; }
         let dir = temp("ciclo");
@@ -1367,6 +1925,12 @@ pub(crate) mod tests {
         // Ficha preenchida: lê os valores.
         let lidos = ler(&mapa, &cheia, 1).unwrap();
         assert_eq!(lidos["nome"], Valor::Texto("BARTHOLOMEW".into()));
+        // Ficha de uma página só (sem modelo em branco): o nome preenchido é valor de "Nome", não rótulo.
+        let da_cheia = propor(&palavras(&cheia, 1).unwrap(), &imagem(&cheia, 1).unwrap(), 0);
+        assert!(da_cheia.iter().all(|c| c.id != "bartholomew"), "{da_cheia:?}");
+        let mapa_cheia = Mapa { nome: "Cheia".into(), paginas: 1, campos: da_cheia };
+        assert_eq!(campo_nome(&mapa_cheia).map(|c| c.id.as_str()), Some("nome"));
+        assert_eq!(nome_na_pagina(&mapa_cheia, &palavras(&cheia, 1).unwrap()).as_deref(), Some("Bartholomew"));
         assert_eq!(lidos["golpear"], Valor::Numero(3));
         assert_eq!(lidos["poderoso"], Valor::Numero(2));
         assert_eq!(lidos["tracos"], Valor::Tracos(vec![Traco { titulo: "DETERMINAÇÃO".into(), descricao: "VONTADE DE VIVER".into() }]));

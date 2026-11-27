@@ -4,9 +4,16 @@ import type { EditorView } from '@codemirror/view';
 import MediaView from './MediaView';
 import { errorText, native } from '../services/Desktop';
 import { base64 } from '../services/Audio';
-import { attachmentUrl, changeBanner, folderOf, frontmatter, isAttachment, titleOf, type Banner as BannerSettings } from '../services/Wiki';
+import { attachmentUrl, changeBanner, embedResolver, folderOf, frontmatter, isAttachment, titleOf, type Banner as BannerSettings } from '../services/Wiki';
 
 const AthenaEditor = lazy(() => import('./AthenaEditor'));
+/** Link sendo digitado antes do cursor ("[[Bo|"): o que já foi escrito e onde começa. */
+function linkAt(body: string, caret: number) {
+  const prefix = body.slice(0, caret);
+  const open = prefix.lastIndexOf('[[');
+  if (open < 0 || prefix.slice(open).includes(']]') || prefix.slice(open).includes('\n') || caret - open > 80) return null;
+  return { query: prefix.slice(open + 2), start: open + 2 };
+}
 
 export type Note = { path: string; title: string; modified: number; bytes: number };
 export type Tab = { root: string; path: string; pinned: boolean; editing: boolean };
@@ -103,6 +110,8 @@ type Props = {
   aliases?: Record<string, string[]>;
   /** Imagens da mesma raiz (cofre, projeto ou Athena): as únicas que podem virar banner. */
   images: Note[];
+  /** Anexos da mesma raiz (imagens, PDFs, vídeos): entram nas sugestões do [[ e resolvem `![[nome]]`. */
+  files: Note[];
   rootName: string;
   /** Altura padrão dos banners no make-md do cofre, para ficar igual ao Obsidian. */
   bannerHeight?: number;
@@ -278,11 +287,16 @@ export default function AthenaNote(props: Props) {
     const prior = frontmatter(text).body;
     const newline = prior.includes('\r\n') ? '\r\n' : '\n';
     change(text.slice(0, text.length - prior.length) + body.replace(/\n/g, newline));
-    const prefix = body.slice(0, caret);
-    const open = prefix.lastIndexOf('[[');
-    if (open >= 0 && !prefix.slice(open).includes(']]') && !prefix.slice(open).includes('\n') && caret - open <= 80) setSuggest({ query: prefix.slice(open + 2), start: open + 2 });
-    else setSuggest(null);
+    setSuggest(linkAt(body, caret));
     setHighlight(0);
+  }
+  // Cursor levado para fora do link (clique ou setas, sem Enter): a lista fecha. Só digitar a abre.
+  function caretMoved(caret: number) {
+    setSuggest(current => {
+      if (!current) return current;
+      const next = linkAt(editor.current?.state.doc.toString() ?? '', caret);
+      return next && next.start === current.start ? next : null;
+    });
   }
 
   function pick(title: string, alias?: string) {
@@ -290,7 +304,8 @@ export default function AthenaNote(props: Props) {
     if (!view || !suggest || pasteJob.current) return;
     const caret = view.state.selection.main.head;
     const closing = view.state.doc.sliceString(caret, caret + 2) === ']]' ? 2 : 0;
-    const insert = `${title}${alias ? `|${alias}` : ''}]]`;
+    const embed = view.state.doc.sliceString(suggest.start - 3, suggest.start - 2) === '!';
+    const insert = `${title}${alias && !embed ? `|${alias}` : ''}]]`;
     view.dispatch({ changes: { from: suggest.start, to: caret + closing, insert }, selection: { anchor: suggest.start + insert.length } });
     setSuggest(null);
     view.focus();
@@ -301,7 +316,7 @@ export default function AthenaNote(props: Props) {
     if (key === 'ArrowUp' || key === 'ArrowDown') {
       const step = key === 'ArrowDown' ? 1 : -1;
       setHighlight(h => (Math.min(h, suggestions.length - 1) + step + suggestions.length) % suggestions.length);
-    } else { const chosen = suggestions[Math.min(highlight, suggestions.length - 1)]; pick(chosen.title, chosen.alias); }
+    } else { const chosen = suggestions[Math.min(highlight, suggestions.length - 1)]; pick(chosen.link ?? chosen.title, chosen.alias); }
     return true;
   }
 
@@ -317,20 +332,33 @@ export default function AthenaNote(props: Props) {
 
   const note = useMemo(() => frontmatter(content ?? ''), [content]);
   // Pelo título ou por um apelido (sem diferenciar acentos); o apelido vira o texto do link.
+  // Anexos (imagens, PDFs) também entram, com a extensão, como no Obsidian; depois de "![[", vêm primeiro.
+  const { files } = props;
   const suggestions = useMemo(() => {
     if (!suggest) return [];
     const plain = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
     const q = plain(suggest.query);
     const rank = (text: string) => { const t = plain(text); return t === q ? 0 : t.startsWith(q) ? 1 : t.includes(q) ? 2 : -1; };
-    const out: { path: string; title: string; alias?: string; rank: number }[] = [];
+    const embed = editor.current?.state.doc.sliceString(suggest.start - 3, suggest.start - 2) === '!';
+    const out: { path: string; title: string; alias?: string; link?: string; file?: boolean; rank: number }[] = [];
     for (const n of notes) {
       if (n.path === tab.path) continue;
       const own = rank(n.title);
-      if (own >= 0) out.push({ path: n.path, title: n.title, rank: own });
-      for (const alias of props.aliases?.[n.path] ?? []) { const r = rank(alias); if (r >= 0) out.push({ path: n.path, title: n.title, alias, rank: r }); }
+      if (own >= 0) out.push({ path: n.path, title: n.title, rank: own + (embed ? 3 : 0) });
+      if (!embed) for (const alias of props.aliases?.[n.path] ?? []) { const r = rank(alias); if (r >= 0) out.push({ path: n.path, title: n.title, alias, rank: r }); }
+    }
+    const names = new Map<string, number>();
+    for (const f of files) { const name = f.path.slice(f.path.lastIndexOf('/') + 1).toLowerCase(); names.set(name, (names.get(name) ?? 0) + 1); }
+    for (const f of files) {
+      if (!isAttachment(f.path)) continue;
+      const name = f.path.slice(f.path.lastIndexOf('/') + 1);
+      const r = rank(name);
+      // Nome repetido em outra pasta: o link leva o caminho, para achar o arquivo certo.
+      if (r >= 0) out.push({ path: f.path, title: name, link: (names.get(name.toLowerCase()) ?? 0) > 1 ? f.path : name, file: true, rank: r + (embed ? 0 : 3) });
     }
     return out.sort((a, b) => a.rank - b.rank).slice(0, 8);
-  }, [suggest, notes, tab.path, props.aliases]);
+  }, [suggest, notes, files, tab.path, props.aliases]);
+  const embed = useMemo(() => embedResolver(files), [files]);
   const fileMedia = useCallback((target: string) => ({ root: tab.root, path: target }), [tab.root]);
 
   const title = titleOf(tab.path);
@@ -365,12 +393,12 @@ export default function AthenaNote(props: Props) {
               <button type="button" title="Tarefa" onClick={() => format('- [ ] ', '', true)}>☐</button>
               <button type="button" title="Link para nota" onClick={() => format('[[', ']]')}>[[ ]]</button>
               <button type="button" title="Tag" onClick={() => format('#')}>#</button>
-              {suggestions.length > 0 && <ul className="link-suggest" role="listbox" aria-label="Notas para o link">{suggestions.map((n, k) => <li key={`${n.path}|${n.alias ?? ''}`} role="option" aria-selected={k === Math.min(highlight, suggestions.length - 1)}><button type="button" tabIndex={-1} onMouseDown={e => { e.preventDefault(); pick(n.title, n.alias); }}>{n.alias ?? n.title}<small>{n.alias ? `↳ ${n.title}` : folderOf(n.path)}</small></button></li>)}</ul>}
+              {suggestions.length > 0 && <ul className="link-suggest" role="listbox" aria-label="Notas para o link">{suggestions.map((n, k) => <li key={`${n.path}|${n.alias ?? ''}`} role="option" aria-selected={k === Math.min(highlight, suggestions.length - 1)}><button type="button" tabIndex={-1} onMouseDown={e => { e.preventDefault(); pick(n.link ?? n.title, n.alias); }}>{n.alias ?? n.title}<small>{n.alias ? `↳ ${n.title}` : folderOf(n.path)}</small></button></li>)}</ul>}
             </div>
             <Suspense fallback={<div className="athena-visual-editor" aria-busy="true" />}>
               <AthenaEditor editor={editor} root={tab.root} value={note.body} readOnly={pasting}
               autoFocus={renaming === null && !note.body.trim()} onChange={typed} onPaste={pasteImage}
-              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} />
+              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} onCaret={caretMoved} embed={embed} media={files} />
             </Suspense>
           </div>
         : <>
@@ -381,7 +409,7 @@ export default function AthenaNote(props: Props) {
                   : <span key={v} className="property-chip">{v}</span>)
                 : <span className="property-empty">vazio</span>}</dd></div>)}
             </dl>}
-            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} media={fileMedia} onAttachment={props.onAttachment} onWebError={props.onError} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
+            {note.body.trim() ? <Markdown text={note.body} onNoteLink={props.onFollow} media={fileMedia} onAttachment={props.onAttachment} onWebError={props.onError} embed={embed} /> : <p className="athena-empty">Nota vazia. Clique no lápis para escrever.</p>}
             {backlinks.length > 0 && <section className="athena-backlinks"><h2>Mencionada em</h2>{backlinks.map(b => <button key={b.path} className="link-button" onClick={() => props.onOpen(b.path)}>{b.title}</button>)}</section>}
           </>}
     </article>

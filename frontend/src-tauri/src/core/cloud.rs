@@ -463,16 +463,30 @@ pub fn parse_responses(event: &Value) -> Step {
     match event["type"].as_str() {
         Some("response.output_text.delta") => Step::Text(event["delta"].as_str().unwrap_or("").into()),
         Some("response.completed") => Step::Done,
-        Some("response.failed") => Step::Fail(chatgpt_error(event["response"]["error"]["code"].as_str().unwrap_or(""))),
+        Some("response.failed") => Step::Fail(format!("{}{}", chatgpt_error(event["response"]["error"]["code"].as_str().unwrap_or("")), resets(&event["response"]["error"]))),
         Some("response.incomplete") => Step::Fail("A resposta do ChatGPT ficou incompleta".into()),
         Some("error") => Step::Fail(chatgpt_error(event["code"].as_str().or_else(|| event["error"]["code"].as_str()).unwrap_or(""))),
         _ => Step::Skip,
     }
 }
+/// Quando a cota volta, se o ChatGPT disser ("resets_in_seconds" ou "resets_at").
+fn resets(error: &Value) -> String {
+    let seconds = error["resets_in_seconds"].as_i64()
+        .or_else(|| error["resets_at"].as_i64().map(|at| at - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)));
+    match seconds {
+        Some(s) if s > 0 && s < 3600 => format!(" Volta em cerca de {} min.", (s + 59) / 60),
+        Some(s) if s >= 3600 && s < 72 * 3600 => format!(" Volta em cerca de {} h.", (s + 1799) / 3600),
+        Some(s) if s >= 72 * 3600 => format!(" Volta em cerca de {} dias.", (s + 43199) / 86400),
+        _ => String::new(),
+    }
+}
+
 /// Mensagens claras para os erros do plano do ChatGPT.
 pub fn chatgpt_error(code: &str) -> String {
     match code {
-        "subscription_sharing_usage_limit_exceeded" => "O limite de uso do seu plano do ChatGPT acabou por agora. Veja em Gerenciar uso ou responda neste computador.".into(),
+        // O "Entrar com ChatGPT" usa a cota do plano para outros apps (a mesma do Codex), separada do
+        // chat no site do ChatGPT, que continua funcionando.
+        "subscription_sharing_usage_limit_exceeded" => "Acabou, por agora, a cota do seu plano do ChatGPT para outros apps — é a mesma do Codex, separada do chat no site (que continua funcionando). Ela volta quando o limite do Codex renovar (veja em Gerenciar uso). Enquanto isso, responda neste computador.".into(),
         "subscription_sharing_user_not_eligible" => "Sua conta do ChatGPT não pode usar o plano em outros apps.".into(),
         "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => "O plano do ChatGPT está indisponível agora. Tente de novo em instantes.".into(),
         "subscription_sharing_invalid_user" => "O acesso ao ChatGPT expirou. Entre de novo em Configurações.".into(),
@@ -484,9 +498,9 @@ pub fn chatgpt_error(code: &str) -> String {
 /// Erro HTTP antes do streaming, em linguagem simples.
 pub fn http_error(status: u16, body: &str) -> String {
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let code = parsed["error"]["code"].as_str().unwrap_or("");
-    if code.starts_with("subscription_sharing") {
-        return chatgpt_error(code);
+    let code = parsed["error"]["code"].as_str().or_else(|| parsed["error"]["type"].as_str()).unwrap_or("");
+    if code.starts_with("subscription_sharing") || code == "usage_limit_reached" {
+        return format!("{}{}", chatgpt_error(if code == "usage_limit_reached" { "subscription_sharing_usage_limit_exceeded" } else { code }), resets(&parsed["error"]));
     }
     match status {
         401 => "A plataforma não aceitou a credencial. Confira a chave ou entre de novo.".into(),
@@ -786,10 +800,13 @@ mod tests {
         assert_eq!(parse_anthropic(&json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}})), Step::Fail("Overloaded".into()));
         assert_eq!(parse_responses(&json!({"type":"response.output_text.delta","delta":"Tudo"})), Step::Text("Tudo".into()));
         assert_eq!(parse_responses(&json!({"type":"response.completed"})), Step::Done);
-        assert!(matches!(parse_responses(&json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}})), Step::Fail(m) if m.contains("limite de uso")));
+        assert!(matches!(parse_responses(&json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}})), Step::Fail(m) if m.contains("cota do seu plano")));
         assert!(matches!(parse_responses(&json!({"type":"response.incomplete"})), Step::Fail(_)));
         assert!(http_error(401, "").contains("credencial"));
         assert!(http_error(429, r#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#).contains("plano do ChatGPT"));
+        let limite = http_error(429, r#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","resets_in_seconds":7000}}"#);
+        assert!(limite.contains("mesma do Codex") && limite.contains("Volta em cerca de 2 h"), "{limite}");
+        assert!(http_error(429, r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":600}}"#).contains("10 min"));
     }
     #[test]
     fn model_lists_per_platform() {

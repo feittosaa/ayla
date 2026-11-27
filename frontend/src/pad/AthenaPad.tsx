@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { type LanguageSupport } from '@codemirror/language';
@@ -47,6 +47,9 @@ export default function AthenaPad() {
   const [panel, setPanel] = useState<'prefs' | 'notes' | null>(null);
   const [closing, setClosing] = useState<Closing>(null);
   const [conflict, setConflict] = useState<string | null>(null);
+  /** Documento novo sendo salvo nas notas da Athena: só o nome é perguntado. */
+  const [naming, setNaming] = useState<{ id: string; name: string } | null>(null);
+  const namingDone = useRef<((ok: boolean) => void) | null>(null);
   const [cursor, setCursor] = useState({ line: 1, col: 1, selected: 0 });
   const [printing, setPrinting] = useState<string | null>(null);
   const [look, setLook] = useState<Appearance>(DEFAULT_APPEARANCE);
@@ -148,7 +151,8 @@ export default function AthenaPad() {
   // Salvar: grava e confere se o arquivo mudou no disco desde que foi aberto.
   async function save(id: string, force = false): Promise<boolean> {
     const tab = tabOf(id); if (!tab) return false;
-    if (!tab.path && !tab.note) return saveAs(id);
+    // Documento novo: vai direto para as notas da Athena ("Salvar como…" escolhe outro lugar).
+    if (!tab.path && !tab.note) return saveToAthena(id);
     const text = textOf(id);
     try {
       const stamp = tab.note
@@ -162,6 +166,29 @@ export default function AthenaPad() {
       if (/mudou/i.test(message)) setConflict(id); else setError(message);
       return false;
     }
+  }
+  function saveToAthena(id: string): Promise<boolean> {
+    const tab = tabOf(id); if (!tab) return Promise.resolve(false);
+    namingDone.current?.(false);
+    setNaming({ id, name: /^Novo documento( \d+)?$/.test(tab.title) ? '' : tab.title.replace(/\.(md|txt)$/i, '') });
+    return new Promise(resolve => { namingDone.current = resolve; });
+  }
+  function cancelNaming() { setNaming(null); namingDone.current?.(false); namingDone.current = null; }
+  async function confirmName(event: FormEvent) {
+    event.preventDefault();
+    if (!naming) return;
+    const { id } = naming; const title = naming.name.trim().replace(/[\\/]/g, ' ').trim(); const tab = tabOf(id);
+    if (!title || !tab) return;
+    try {
+      const text = textOf(id);
+      const path = await native<string>('athena_create', { root: 'ayla', folder: null, title, empty: true });
+      const stamp = await native<number>('athena_write', { root: 'ayla', path, content: text, expected: null });
+      saved.current.set(id, Text.of(text.split('\n')));
+      const updated: Tab = { ...tab, path: null, note: { root: 'ayla', path }, title: path.split('/').pop()!.replace(/\.md$/i, ''), modified: stamp, language: 'Markdown', missing: false, changedOnDisk: false };
+      patchTab(id, updated); await loadLanguage(updated); if (id === activeRef.current) applyConfig(id);
+      refreshDirty(); setNaming(null); setNotice(`Salva nas notas da Athena como “${updated.title}”.`);
+      namingDone.current?.(true); namingDone.current = null;
+    } catch (e) { setError(errorText(e)); }
   }
   async function saveAs(id: string): Promise<boolean> {
     const tab = tabOf(id); if (!tab) return false;
@@ -489,6 +516,14 @@ export default function AthenaPad() {
     <main className="pad-editor" ref={host} onClick={() => setMenu(null)} />
 
     {panel === 'prefs' && <Preferences settings={settings} set={set} onClose={() => setPanel(null)} />}
+    {naming && <div className="pad-dialog-backdrop" onClick={cancelNaming}>
+      <form className="pad-dialog" role="dialog" aria-modal="true" aria-labelledby="pad-name-title" onSubmit={e => void confirmName(e)} onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancelNaming(); } }}>
+        <div className="pad-dialog-head"><h2 id="pad-name-title">Salvar na Athena</h2><button type="button" className="pad-icon" aria-label="Cancelar" onClick={cancelNaming}><CloseIcon size={16} /></button></div>
+        <input className="pad-search" autoFocus placeholder="Nome da nota" aria-label="Nome da nota" maxLength={120} value={naming.name} onChange={e => setNaming({ ...naming, name: e.target.value })} />
+        <p className="pad-hint">Fica nas notas da Athena, na Ayla. Para outro lugar, use Salvar como… (Ctrl+Shift+S).</p>
+        <div className="pad-dialog-actions"><button type="button" onClick={cancelNaming}>Cancelar</button><button className="primary" disabled={!naming.name.trim()}>Salvar</button></div>
+      </form>
+    </div>}
     {panel === 'notes' && <NotesPicker onPick={note => void openNote(note)} onClose={() => setPanel(null)} />}
     {printing !== null && <pre className="pad-print">{printing}</pre>}
   </div>;
@@ -527,7 +562,7 @@ function Preferences({ settings, set, onClose }: { settings: Settings; set: (c: 
 /** Notas da Athena (e dos projetos da Ayla), sem os cofres externos, com busca pelo título ou caminho. */
 function NotesPicker({ onPick, onClose }: { onPick: (note: NoteNode) => void; onClose: () => void }) {
   const [notes, setNotes] = useState<NoteNode[] | null>(null); const [query, setQuery] = useState(''); const [error, setError] = useState('');
-  useEffect(() => { void native<{ graph: { nodes: NoteNode[] } }>('athena_overview').then(o => setNotes(o.graph.nodes.filter(n => !n.root.startsWith('vault:')).sort((a, b) => a.title.localeCompare(b.title, 'pt-BR')))).catch(e => setError(errorText(e))); }, []);
+  useEffect(() => { void native<{ graph: { nodes: NoteNode[] } }>('athena_overview').then(o => setNotes(o.graph.nodes.filter(n => !n.root.startsWith('vault:')).sort((a, b) => a.title.localeCompare(b.title, 'pt-BR', { numeric: true, sensitivity: 'base' })))).catch(e => setError(errorText(e))); }, []);
   const term = query.trim().toLocaleLowerCase('pt-BR');
   const shown = (notes ?? []).filter(n => !term || `${n.title} ${n.path}`.toLocaleLowerCase('pt-BR').includes(term)).slice(0, 200);
   return <div className="pad-dialog-backdrop" onClick={onClose}>

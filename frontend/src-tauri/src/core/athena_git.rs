@@ -249,6 +249,21 @@ pub struct Outcome {
     pub message: String,
 }
 
+/// A lixeira (`.trash/`, notas apagadas) nunca vai para o GitHub: entra no `.gitignore` do cofre
+/// (ou da Athena) e sai do repositório o que já tinha sido enviado, ficando só neste computador.
+pub fn keep_trash_out(root: &Path) -> Result<(), String> {
+    let file = root.join(".gitignore");
+    let current = std::fs::read_to_string(&file).unwrap_or_default();
+    let ignored = current.lines().map(str::trim).any(|l| matches!(l, ".trash" | ".trash/" | "/.trash" | "/.trash/"));
+    if !ignored {
+        let joint = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+        std::fs::write(&file, format!("{current}{joint}# Lixeira (notas apagadas): fica só neste computador\n.trash/\n"))
+            .map_err(|_| "Não foi possível atualizar o .gitignore")?;
+    }
+    run(root, &["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".trash"])?;
+    Ok(())
+}
+
 /// Commit das mudanças, puxar (se configurado) e enviar. Em conflito, desfaz o merge/rebase em
 /// andamento e avisa, sem perder nada do que está na pasta.
 pub fn sync(root: &Path, settings: &Settings, now: chrono::NaiveDateTime) -> Result<Outcome, String> {
@@ -256,6 +271,7 @@ pub fn sync(root: &Path, settings: &Settings, now: chrono::NaiveDateTime) -> Res
         return Err("Esta pasta não é um repositório Git.".into());
     }
     let mut outcome = Outcome::default();
+    keep_trash_out(root)?;
     let changed: Vec<String> = run(root, &["status", "--porcelain"])?.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect();
     if !changed.is_empty() {
         run(root, &["add", "-A"])?;
@@ -342,6 +358,26 @@ mod tests {
     }
 
     #[test]
+    fn lixeira_sai_do_repositorio_e_fica_no_computador() {
+        let root = temp();
+        let git = |args: &[&str]| assert!(Command::new("git").current_dir(&root).args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{args:?}");
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "teste@ayla.local"]);
+        git(&["config", "user.name", "Teste"]);
+        std::fs::create_dir_all(root.join(".trash")).unwrap();
+        std::fs::write(root.join(".trash/NPC.md"), "x\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".obsidian\n.trash/NPC.md").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "com lixeira"]);
+        keep_trash_out(&root).unwrap();
+        keep_trash_out(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join(".gitignore")).unwrap(), ".obsidian\n.trash/NPC.md\n# Lixeira (notas apagadas): fica só neste computador\n.trash/\n", "mantém o que havia, uma vez só");
+        assert!(!run(&root, &["ls-files"]).unwrap().contains(".trash/"), "sai do repositório");
+        assert!(root.join(".trash/NPC.md").is_file(), "continua na lixeira deste computador");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn segue_as_configuracoes_do_obsidian_git() {
         let root = temp();
         assert_eq!(settings(&root), Settings::default());
@@ -385,8 +421,11 @@ mod tests {
             quiet(dir, &["checkout", "-q", "-b", "main"]);
         }
         std::fs::write(vault.join("Nota.md"), "um\n").unwrap();
+        std::fs::create_dir_all(vault.join(".trash")).unwrap();
+        std::fs::write(vault.join(".trash/Apagada.md"), "x\n").unwrap();
         let first = sync(&vault, &Settings::default(), at()).unwrap();
-        assert_eq!((first.committed, first.pushed), (1, true), "{}", first.message);
+        assert_eq!((first.committed, first.pushed), (2, true), "a nota e o .gitignore, sem a lixeira: {}", first.message);
+        assert!(!run(&vault, &["ls-files"]).unwrap().contains(".trash") && vault.join(".trash/Apagada.md").is_file());
         let clean = status(&vault);
         assert_eq!((clean.changes, clean.ahead, clean.behind, clean.upstream), (0, 0, 0, true));
         assert!(clean.last_commit.is_some_and(|c| c.at > 0));

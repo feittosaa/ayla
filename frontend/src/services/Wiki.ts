@@ -13,22 +13,52 @@ export const isAttachment = (target: string) => { const clean = target.split('#'
 const windows = () => typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
 /** Endereço de um arquivo guardado na Ayla (anexo do chat ou imagem gerada), pelo id. */
 export const storedUrl = (id: string, thumb = false) => `${windows() ? 'http://iris-file.localhost/' : 'iris-file://localhost/'}${encodeURIComponent(id)}${thumb ? '?miniatura' : ''}`;
+/** Data de alteração conhecida de cada anexo (pelo caminho e pelo nome do arquivo): entra no endereço,
+ * para a imagem trocada no lugar (recorte na Iris, outro programa) não continuar a antiga do cache. */
+const mediaVersions = new Map<string, number>();
+const versionKey = (root: string, target: string) => `${root}|${target.split('#')[0].trim().toLowerCase()}`;
+export function setMediaVersions(root: string, files: { path: string; modified: number }[]) {
+  for (const file of files) {
+    const name = file.path.slice(file.path.lastIndexOf('/') + 1);
+    for (const key of [versionKey(root, file.path), versionKey(root, name)]) mediaVersions.set(key, Math.max(mediaVersions.get(key) ?? 0, file.modified));
+  }
+}
+export const mediaVersion = (root: string, target: string) => mediaVersions.get(versionKey(root, target));
 /** Endereço de um anexo de uma raiz (servido pelo núcleo, lido da pasta da nota). */
-export const attachmentUrl = (root: string, target: string, thumb = false) => `${windows() ? 'http://athena-file.localhost/' : 'athena-file://localhost/'}${encodeURIComponent(root)}/${encodeURIComponent(target)}${thumb ? '?miniatura' : ''}`;
+export const attachmentUrl = (root: string, target: string, thumb = false) => {
+  const version = mediaVersion(root, target);
+  const query = [thumb ? 'miniatura' : '', version ? `v=${version}` : ''].filter(Boolean).join('&');
+  return `${windows() ? 'http://athena-file.localhost/' : 'athena-file://localhost/'}${encodeURIComponent(root)}/${encodeURIComponent(target)}${query ? `?${query}` : ''}`;
+};
 
 /** Sintaxe do Obsidian em Markdown comum: [[nota]], [[nota|apelido]], [[nota#seção]], ![[foto.png]]
  * e ![[foto.png|300]] (imagem, com largura), ![[livro.pdf]] (PDF na nota) e #tag. Código em bloco ou em linha fica como está. */
-export function wikiToMarkdown(text: string) {
+export function wikiToMarkdown(text: string, embed?: (name: string) => string | undefined) {
   return text.split(/(```[\s\S]*?```|`[^`\n]*`)/g).map((part, i) => i % 2 ? part : part
     .replace(/(!?)\[\[([^\]\n|#]+)(#[^\]\n|]*)?(?:\|([^\]\n]+))?\]\]/g, (_match: string, bang: string, target: string, section: string | undefined, alias: string | undefined) => {
-      const clean = target.trim();
+      const typed = target.trim();
+      const clean = (bang && embed?.(typed)) || typed;
       // ![[foto.png|300]] ou |300x200: tamanho, como no Obsidian (não é apelido).
       const size = bang && alias && /^\d+(x\d+)?$/.test(alias.trim()) ? alias.trim() : '';
-      const label = (size ? clean : alias || `${clean}${section || ''}`).replace(/[[\]"]/g, '');
+      const label = (size ? typed : alias || `${typed}${section || ''}`).replace(/[[\]"]/g, '');
       return bang && isAttachment(clean) ? `![${label}](${WIKI}${encodeURIComponent(clean)}${size ? ` "${size}"` : ''})` : `[${label}](${WIKI}${encodeURIComponent(clean)})`;
     })
     .replace(/(^|[ \t])#([\p{L}\p{N}_/-]*\p{L}[\p{L}\p{N}_/-]*)/gmu, (_match: string, space: string, tag: string) => `${space}[#${tag}](${TAG}${encodeURIComponent(tag.toLowerCase())})`)
   ).join('');
+}
+
+/** `![[Casco]]` sem extensão: o anexo da raiz com esse nome (imagem primeiro), se houver um só.
+ * O Obsidian pede a extensão; aqui o nome basta, para a imagem aparecer como se espera. */
+export function embedResolver(files: { path: string }[]) {
+  return (name: string) => {
+    if (isAttachment(name)) return undefined;
+    const wanted = name.trim().toLowerCase();
+    const stem = (path: string) => path.replace(/\.[^./]+$/, '').toLowerCase();
+    const found = files.filter(f => isAttachment(f.path) && (stem(f.path) === wanted || stem(f.path.slice(f.path.lastIndexOf('/') + 1)) === wanted));
+    const images = found.filter(f => IMAGE.test(f.path));
+    const pick = images.length ? images : found;
+    return pick.length === 1 ? pick[0].path : undefined;
+  };
 }
 
 export function imageWidth(title?: string) {

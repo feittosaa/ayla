@@ -10,7 +10,9 @@ export type FichaStatus = { paginas: number; porFicha: number; fichas: { primeir
 /** Ficha aberta (`ficha_abrir`). */
 export type FichaAberta = { mapa: Mapa; valores: Valores; primeira: number; nome: string };
 /** Cartão da conversa: a mudança proposta, para confirmar. A ficha é o PDF do cofre (`root`/`path`) a partir de `primeira`. */
-export type FichaCard = { root: string; path: string; primeira: number; pdf: string; nome: string; valores: Valores; mudancas: { rotulo: string; antes: string; depois: string }[] };
+/** O que aconteceu com o cartão (guardado na resposta, para voltar igual ao reabrir a conversa). */
+export type FichaSituacao = { estado: 'aplicado'; mudouFora?: boolean; renomeado?: string | null; arquivo?: string | null } | { estado: 'cancelado' };
+export type FichaCard = { root: string; path: string; primeira: number; pdf: string; nome: string; valores: Valores; mudancas: { rotulo: string; antes: string; depois: string }[]; situacao?: FichaSituacao };
 
 export const tipos: { id: Tipo['tipo']; label: string }[] = [
   { id: 'linha', label: 'Texto curto' }, { id: 'numero', label: 'Número' }, { id: 'bolinhas', label: 'Pontos (bolinhas)' },

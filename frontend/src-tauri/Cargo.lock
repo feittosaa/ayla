@@ -123,6 +123,7 @@ dependencies = [
  "keyring",
  "log",
  "lopdf",
+ "notify-rust",
  "pdf-extract",
  "pkg-config",
  "reqwest",

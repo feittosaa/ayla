@@ -175,13 +175,80 @@ pub fn collect_imports(sources: &[PathBuf]) -> (Vec<(String, String)>, usize) {
     (out, skipped)
 }
 
+/// Anexo importável (imagem, PDF ou vídeo que a Athena mostra) de até 1 GB.
+pub const MAX_IMPORTED_FILE: u64 = 1024 * 1024 * 1024;
+
+/// Anexos a importar junto das notas (imagens, PDFs e vídeos): caminho relativo de destino (com as
+/// subpastas e a extensão) e o arquivo de origem. Mesmas regras de `collect_imports`: ocultos e
+/// links simbólicos ficam de fora; grandes demais são contados como ignorados.
+pub fn collect_files(sources: &[PathBuf]) -> (Vec<(String, PathBuf)>, usize) {
+    let mut out = Vec::new();
+    let mut skipped = 0;
+    let mut visit = |path: &Path, relative: &Path, out: &mut Vec<(String, PathBuf)>| {
+        if attachment_mime(path).is_none() { return; }
+        if !fs::metadata(path).is_ok_and(|m| m.len() <= MAX_IMPORTED_FILE) { skipped += 1; return; }
+        let mut parts: Vec<String> = relative.components().map(|c| file_name(&c.as_os_str().to_string_lossy())).collect();
+        // `file_name` limpa o nome; a extensão do arquivo volta no fim.
+        if let (Some(last), Some(ext)) = (parts.last_mut(), path.extension()) {
+            let stem = Path::new(last.as_str()).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| last.clone());
+            *last = format!("{}.{}", file_name(&stem), ext.to_string_lossy().to_lowercase());
+        }
+        out.push((parts.join("/"), path.to_path_buf()));
+    };
+    for source in sources {
+        let Ok(meta) = fs::symlink_metadata(source) else { continue };
+        let Some(name) = source.file_name() else { continue };
+        if meta.is_file() { visit(source, Path::new(name), &mut out); continue; }
+        if !meta.is_dir() { continue; }
+        let mut pending = vec![PathBuf::from(name)];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(source.parent().unwrap_or(Path::new("/")).join(&dir)) else { continue };
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                let Ok(kind) = entry.file_type() else { continue };
+                if entry_name.starts_with('.') || kind.is_symlink() { continue; }
+                let relative = dir.join(&entry_name);
+                if kind.is_dir() { pending.push(relative); } else if kind.is_file() { visit(&entry.path(), &relative, &mut out); }
+            }
+            if out.len() >= MAX_NOTES { break; }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    (out, skipped)
+}
+
+/// Copia os anexos coletados para a pasta da raiz, sem sobrescrever ("Foto 2.png"); a cópia passa
+/// por um temporário oculto, então um arquivo pela metade nunca aparece.
+pub fn import_files(root: &Path, folder: &str, files: &[(String, PathBuf)]) -> Result<usize, String> {
+    let folder = safe_folder(folder).ok_or("Pasta inválida")?;
+    let mut count = 0;
+    for (relative, source) in files {
+        let wanted = folder.join(relative);
+        if !wanted.components().all(|c| matches!(c, Component::Normal(part) if !part.to_string_lossy().starts_with('.'))) { continue; }
+        let stem = wanted.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = wanted.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = wanted.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut target = wanted.clone();
+        let mut n = 2;
+        while root.join(&target).exists() { target = parent.join(format!("{stem} {n}.{ext}")); n += 1; }
+        let destination = root.join(&target);
+        fs::create_dir_all(root.join(&parent)).map_err(|_| "Não foi possível criar a pasta")?;
+        let temporary = root.join(&parent).join(format!(".{stem}.{ext}.ayla-tmp"));
+        fs::copy(source, &temporary).and_then(|_| fs::rename(&temporary, &destination))
+            .map_err(|_| { let _ = fs::remove_file(&temporary); format!("Não foi possível copiar {}", relative) })?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Importa as notas coletadas para a pasta da raiz, sem sobrescrever (nomes repetidos ganham " 2").
 pub fn import_into(root: &Path, folder: &str, notes: &[(String, String)]) -> Result<usize, String> {
     let folder = safe_folder(folder).ok_or("Pasta inválida")?;
     let mut count = 0;
     for (relative, content) in notes {
         let base = folder.join(relative);
-        let mut target = base.with_extension("md");
+        // `with_extension` trocaria o ".2" de "Gancho 10.2" e conferiria o nome errado.
+        let mut target = PathBuf::from(format!("{}.md", base.to_string_lossy()));
         let mut n = 2;
         while root.join(&target).exists() {
             target = PathBuf::from(format!("{} {n}.md", base.to_string_lossy()));
@@ -292,6 +359,30 @@ pub fn move_attachment(root: &Path, from: &str, folder: &str) -> Result<String, 
     }
     fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível mover o arquivo")?;
     Ok(relative_string(&to_path))
+}
+
+/// Renomeia um arquivo (imagem, vídeo, PDF ou texto) na mesma pasta, mantendo a extensão, e
+/// atualiza os links das notas para ele (`![[foto.png]]`), como o Obsidian. Devolve o caminho
+/// novo e quantas notas mudaram.
+/// `relink`: atualizar as notas da raiz (pastas da Athena e cofres; não nas pastas de fotos da Iris).
+pub fn rename_attachment(root: &Path, from: &str, name: &str, relink: bool) -> Result<(String, usize), String> {
+    let from_path = safe_folder(from).filter(|p| attachment_mime(p).is_some() || is_txt(p)).ok_or("Arquivo inválido")?;
+    if !root.join(&from_path).is_file() { return Err("Arquivo não encontrado".into()); }
+    let ext = from_path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = name.trim();
+    // "Casco.png" ou só "Casco": a extensão é sempre a do arquivo.
+    let stem = name.strip_suffix(&format!(".{ext}")).or_else(|| name.strip_suffix(&format!(".{}", ext.to_lowercase()))).unwrap_or(name).trim();
+    if stem.is_empty() || file_name(stem) != stem || stem.starts_with('.') {
+        return Err("O nome não pode ter / \\ : * ? \" < > | # ^ [ ] nem começar com ponto".into());
+    }
+    let to_path = from_path.with_file_name(format!("{stem}.{ext}"));
+    if to_path == from_path { return Ok((relative_string(&from_path), 0)); }
+    // Só a caixa mudou ("foto" → "Foto"): o sistema de arquivos pode dizer que já existe.
+    let same_file = to_path.to_string_lossy().to_lowercase() == from_path.to_string_lossy().to_lowercase();
+    if root.join(&to_path).exists() && !same_file { return Err("Já existe um arquivo com esse nome nessa pasta".into()); }
+    fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível renomear o arquivo")?;
+    let changed = if relink { relink_all(root, &[(relative_string(&from_path), relative_string(&to_path))]) } else { 0 };
+    Ok((relative_string(&to_path), changed))
 }
 
 /// Move uma nota (`.md`) ou texto (`.txt`) para uma pasta de outra raiz (de um cofre para a
@@ -589,6 +680,10 @@ pub fn obsidian_vaults() -> Vec<String> {
 const CREATE: &[&str] = &[
     "cria uma nota", "crie uma nota", "criar uma nota", "cria nota", "crie nota", "criar nota", "nova nota",
     "faz uma nota", "faça uma nota", "escreve uma nota", "escreva uma nota",
+    "cria essa nota", "crie essa nota", "criar essa nota", "cria esta nota", "crie esta nota", "criar esta nota",
+    "cria a nota", "crie a nota", "criar a nota", "faz essa nota", "faça essa nota", "faz a nota", "faça a nota",
+    "escreve essa nota", "escreva essa nota", "escreve a nota", "escreva a nota",
+    "monta uma nota", "monte uma nota", "gera uma nota", "gere uma nota",
 ];
 const SAVE_LAST: &[&str] = &[
     "salva isso como nota", "salve isso como nota", "salva como nota", "salve como nota", "salva essa resposta como nota",
@@ -598,7 +693,11 @@ const SAVE_LAST: &[&str] = &[
 
 pub fn note_request(message: &str) -> bool {
     let text = message.to_lowercase();
-    CREATE.iter().chain(SAVE_LAST).any(|t| text.contains(t))
+    // "Não precisa criar essa nota" não é pedido; o "crie essa nota" seguinte, sim.
+    CREATE.iter().chain(SAVE_LAST).any(|t| text.match_indices(t).any(|(at, _)| {
+        let before: String = text[..at].chars().rev().take(24).collect::<Vec<_>>().into_iter().rev().collect();
+        !before.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "não" | "nao" | "nem" | "sem"))
+    }))
 }
 pub fn save_last_request(message: &str) -> bool {
     let text = message.to_lowercase();
@@ -614,10 +713,147 @@ pub fn words() -> Vec<&'static str> {
 pub fn explicit_note(message: &str) -> Option<(String, String)> {
     let (head, body) = message.split_once(':')?;
     let body = body.trim();
-    if body.is_empty() {
+    // Só quando os dois pontos vêm logo depois do pedido (uma fala longa pode ter ":" no meio).
+    if body.is_empty() || head.split_whitespace().count() > 15 || !note_request(head) {
         return None;
     }
     Some((title_from(head), body.to_string()))
+}
+
+/// Pedido longo que pede uma nota com algo a ser criado (um gancho, um roteiro, ideias): a Ayla
+/// responde como sempre (com as notas e, se aceito, a nuvem) e guarda a resposta como nota.
+pub fn writes_note(message: &str) -> bool {
+    note_request(message) && !save_last_request(message) && explicit_note(message).is_none()
+        && message.split_whitespace().count() >= 25
+}
+
+/// Tira do fim da nota as frases de conversa do modelo ("A nota foi salva…", "Criei a nota…").
+pub fn without_chatter(text: &str) -> String {
+    let mut lines: Vec<&str> = text.trim_end().lines().collect();
+    while let Some(last) = lines.last() {
+        let lower = last.trim().to_lowercase();
+        let chatter = lower.is_empty() || lower == "---"
+            || ["a nota foi salva", "nota foi criada", "salvei a nota", "salvei como nota", "criei a nota", "a nota está salva", "nota salva"].iter().any(|p| lower.contains(p));
+        if !chatter { break; }
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Citações das respostas ("[nota: Título]") viram links da Athena ("[[Título]]") na nota guardada.
+pub fn citations_as_links(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("[nota: ") {
+        let Some(end) = rest[at..].find(']') else { break };
+        let title = rest[at + 7..at + end].trim();
+        out.push_str(&rest[..at]);
+        if title.is_empty() || title.contains('[') { out.push_str(&rest[at..at + end + 1]); } else { out.push_str(&format!("[[{title}]]")); }
+        rest = &rest[at + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Série numerada pelo título: "Gancho 9" → ("gancho", [9]); "Gancho 2.1 - Fuga" → ("gancho", [2, 1]).
+pub fn series_of(title: &str) -> Option<(String, Vec<u32>)> {
+    let at = title.find(|c: char| c.is_ascii_digit())?;
+    let prefix = super::bases::fold(&title[..at]).trim().to_string();
+    if prefix.chars().count() < 3 || prefix.split(' ').count() > 3 {
+        return None;
+    }
+    let rest = &title[at..];
+    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+    let numbers: Vec<u32> = rest[..end].trim_end_matches('.').split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
+    // Depois do número, só o fim ou um separador ("Gancho 9 - O farol").
+    let after = rest[end..].trim_start();
+    if !(after.is_empty() || after.starts_with(['-', '–', '—', ':', '·', '('])) {
+        return None;
+    }
+    Some((prefix, numbers))
+}
+
+/// O pedido fala do último, anterior ou próximo de algo, ou de continuar de onde parou.
+pub fn asks_sequence(message: &str) -> bool {
+    let text = super::bases::fold(message);
+    [" ultim", " anterior", " proxim", " seguinte", " passad", " de onde ", " continu"].iter().any(|w| text.contains(w))
+}
+
+/// Ordem natural de caminhos ("Ato 10" depois de "Ato 9").
+fn natural(text: &str) -> Vec<(bool, u64, String)> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        let digit = c.is_ascii_digit();
+        let mut part = String::new();
+        while let Some(&n) = chars.peek() {
+            if n.is_ascii_digit() != digit { break; }
+            part.push(n);
+            chars.next();
+        }
+        out.push(if digit { (true, part.parse().unwrap_or(u64::MAX), String::new()) } else { (false, 0, part.to_lowercase()) });
+    }
+    out
+}
+
+/// A nota mais avançada da série que o pedido cita ("o último gancho" → "Ato 1/Gancho 9") e o
+/// título da próxima ("Gancho 10"). `notes`: (raiz, nota). Entre séries de raízes diferentes (duas
+/// campanhas), vale a raiz preferida (`prefer`: a das notas que a busca achou ou citada no pedido),
+/// depois a série com mais notas e, por fim, a mexida por último.
+pub fn latest_in_series(message: &str, notes: &[(&str, &Note)], prefer: &[&str]) -> Option<(usize, String)> {
+    if !asks_sequence(message) {
+        return None;
+    }
+    let text = super::bases::fold(message);
+    let mut groups: std::collections::HashMap<(&str, String), Vec<(usize, Vec<u32>)>> = std::collections::HashMap::new();
+    for (index, (root, note)) in notes.iter().enumerate() {
+        let Some((prefix, numbers)) = series_of(&note.title) else { continue };
+        if text.contains(&format!(" {prefix}")) {
+            groups.entry((root, prefix)).or_default().push((index, numbers));
+        }
+    }
+    let group = groups.into_iter().max_by_key(|((root, _), members)| (prefer.contains(root), members.len(), members.iter().map(|(i, _)| notes[*i].1.modified).max()))?.1;
+    let (index, numbers) = group.into_iter().max_by(|(a, na), (b, nb)| {
+        let folder = |i: usize| natural(notes[i].1.path.rsplit_once('/').map_or("", |(f, _)| f));
+        folder(*a).cmp(&folder(*b)).then(na.cmp(nb))
+    })?;
+    let title = &notes[index].1.title;
+    let name = title[..title.find(|c: char| c.is_ascii_digit()).unwrap_or(0)].trim_end_matches(|c: char| c.is_whitespace() || c == '-' || c == '#');
+    Some((index, format!("{name} {}", numbers[0] + 1)))
+}
+
+/// Nota pedida pelo número ("crie o gancho 10.2"): o último número da série citado no pedido que
+/// ainda não existe vira o título, e a base é a nota da série logo antes dele (o 10.1).
+pub fn named_in_series(message: &str, notes: &[(&str, &Note)], prefer: &[&str]) -> Option<(usize, String)> {
+    let text = super::bases::fold(message);
+    let mut groups: std::collections::HashMap<(&str, String), Vec<(usize, Vec<u32>)>> = std::collections::HashMap::new();
+    for (index, (root, note)) in notes.iter().enumerate() {
+        let Some((prefix, numbers)) = series_of(&note.title) else { continue };
+        if text.contains(&format!(" {prefix} ")) || text.starts_with(&format!("{prefix} ")) {
+            groups.entry((root, prefix)).or_default().push((index, numbers));
+        }
+    }
+    let ((_, prefix), members) = groups.into_iter().max_by_key(|((root, _), members)| (prefer.contains(root), members.len(), members.iter().map(|(i, _)| notes[*i].1.modified).max()))?;
+    // Sem acentos, mas mantendo os pontos ("10.2"), que o `fold` troca por espaço.
+    let plain: String = message.to_lowercase().chars().map(|c| super::bases::fold(&c.to_string()).trim().chars().next().unwrap_or(c)).collect();
+    let pattern = format!("{prefix} ");
+    let named = plain.match_indices(&pattern).filter(|(at, _)| !plain[..*at].ends_with(char::is_alphanumeric)).filter_map(|(at, _)| {
+        let rest = &plain[at + pattern.len()..];
+        let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+        rest[..end].trim_end_matches('.').split('.').map(|n| n.parse::<u32>().ok()).collect::<Option<Vec<u32>>>()
+    }).filter(|numbers| !members.iter().any(|(_, existing)| existing == numbers)).last()?;
+    let (index, _) = members.iter().filter(|(_, numbers)| *numbers < named).max_by(|(a, na), (b, nb)| {
+        let folder = |i: usize| natural(notes[i].1.path.rsplit_once('/').map_or("", |(f, _)| f));
+        folder(*a).cmp(&folder(*b)).then(na.cmp(nb))
+    })?;
+    let title = &notes[*index].1.title;
+    let name = title[..title.find(|c: char| c.is_ascii_digit()).unwrap_or(0)].trim_end_matches(|c: char| c.is_whitespace() || c == '-' || c == '#');
+    Some((*index, format!("{name} {}", named.iter().map(u32::to_string).collect::<Vec<_>>().join("."))))
+}
+
+/// Título da nota escrita pela Ayla: o primeiro título "# " da resposta.
+pub fn heading_of(text: &str) -> Option<String> {
+    text.lines().map(str::trim).find_map(|l| l.strip_prefix("# ")).map(|t| t.trim().trim_matches('*').trim().to_string()).filter(|t| !t.is_empty())
 }
 
 /// Título a partir do pedido: o que vem depois de "sobre", "chamada", "com o título"…
@@ -1100,6 +1336,48 @@ pub fn context_block(chunks: &[(String, String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn pedido_longo_de_nota_vira_resposta_guardada() {
+        let longo = "Oi Ayla, tudo bem? Eu queria que você montasse o próximo gancho da campanha baseado no final do último, de onde a gente parou. Você cria uma nota nova pra mim com esse gancho novo, tá? No fim: eles chegam do outro lado da ilha.";
+        assert!(writes_note(longo), "longo, com dois pontos no meio da fala");
+        assert!(explicit_note(longo).is_none());
+        assert_eq!(explicit_note("cria uma nota sobre Compras: leite, pão").map(|(_, b)| b).as_deref(), Some("leite, pão"));
+        assert!(!writes_note("cria uma nota sobre Compras: leite, pão") && !writes_note("cria uma nota chamada Ideias"));
+        assert!(!writes_note(&format!("{longo} Salva isso como nota.")), "salvar a resposta anterior continua igual");
+        assert_eq!(heading_of("Intro\n\n# **Gancho 3 — A ilha**\n\ntexto").as_deref(), Some("Gancho 3 — A ilha"));
+        assert_eq!(heading_of("sem título"), None);
+        let note = |path: &str, modified: i64| Note { path: path.into(), title: path.rsplit('/').next().unwrap().trim_end_matches(".md").into(), modified, bytes: 1 };
+        let rpg = [note("Ganchos/Ato 1/Gancho 2.1.md", 5), note("Ganchos/Ato 1/Gancho 9.md", 9), note("Ganchos/Ato 1/Gancho 10 - Rascunho.md", 3),
+            note("Ganchos/Ato 2/Ato 2 - Prelúdio.md", 8), note("Players/Bartholomew Roberts.md", 10), note("Ganchos/Ato 1/Gancho 8.md", 7)];
+        let outra = [note("Sessões/Gancho 30.md", 1)];
+        let mut all: Vec<(&str, &Note)> = rpg.iter().map(|n| ("vault:rpg", n)).collect();
+        all.extend(outra.iter().map(|n| ("vault:outra", n)));
+        let pedido = "monta o próximo gancho do RPG baseado no final do último, de onde a gente parou";
+        let (i, next) = latest_in_series(pedido, &all, &[]).unwrap();
+        assert_eq!((all[i].1.path.as_str(), next.as_str()), ("Ganchos/Ato 1/Gancho 10 - Rascunho.md", "Gancho 11"), "a série com mais notas");
+        let (i, _) = latest_in_series(pedido, &all, &["vault:outra"]).unwrap();
+        assert_eq!(all[i].1.path, "Sessões/Gancho 30.md", "a campanha que a busca apontou");
+        assert!(latest_in_series("monta um gancho de RPG sobre piratas", &all, &[]).is_none(), "sem falar de último ou próximo");
+        assert!(latest_in_series("qual o último capítulo?", &all, &[]).is_none(), "série que não existe");
+        // Pedido real (falado): o 10.1 já existe; ela pede o 10.2 e diz para não criar o 10.1.
+        let dividido = [note("Ganchos/Ato 1/Gancho 9.md", 9), note("Ganchos/Ato 1/Gancho 10.1.md", 10), note("Ganchos/Ato 1/Gancho 2.2.md", 2)];
+        let partes: Vec<(&str, &Note)> = dividido.iter().map(|n| ("vault:rpg", n)).collect();
+        let fala = "Vamos lá, coisas importantes. Primeiro, não precisa criar essa nota 10.1, você pode apagar ela e não precisa alterar o gancho 10 também. Deixa já do jeito que está. O que eu quero é que você crie um gancho 10.2, que vai ser depois dele. Que esse gancho 10.2 que vai ter a parte do especial de Natal. Eu quero que você crie essa nota.";
+        assert!(writes_note(fala), "\"crie essa nota\" pede a nota");
+        let (i, title) = named_in_series(fala, &partes, &[]).unwrap();
+        assert_eq!((partes[i].1.path.as_str(), title.as_str()), ("Ganchos/Ato 1/Gancho 10.1.md", "Gancho 10.2"), "o número pedido, com a nota anterior como base");
+        assert!(named_in_series("quero mudar o gancho 9 e o gancho 10.1", &partes, &[]).is_none(), "só números que já existem");
+        assert!(!note_request("não precisa criar essa nota"), "negado não é pedido");
+        assert!(!note_request("nem cria a nota agora, só me explica"));
+        assert_eq!(series_of("Gancho 2.1"), Some(("gancho".into(), vec![2, 1])));
+        assert_eq!(series_of("Ato 2 - Prelúdio"), Some(("ato".into(), vec![2])));
+        assert_eq!(series_of("Bartholomew Roberts"), None);
+        assert_eq!(series_of("Top 10 filmes"), None, "número no meio de um nome não é série");
+        assert_eq!(citations_as_links("Como no farol [nota: Gancho 2 - O farol]. Fim [nota: ]"), "Como no farol [[Gancho 2 - O farol]]. Fim [nota: ]");
+        assert_eq!(without_chatter("# Gancho\n\nTexto.\n\n---\nA nota foi salva com o título **Gancho**.\n"), "# Gancho\n\nTexto.");
+        assert_eq!(without_chatter("# Gancho\n\nA nota foi salva no começo, mas isto fica.\nFim."), "# Gancho\n\nA nota foi salva no começo, mas isto fica.\nFim.");
+    }
+
+    #[test]
     fn aliases_from_properties() {
         assert_eq!(super::aliases("---\naliases:\n  - Kael\n  - \"Kûarasy\"\ntags: [npc]\n---\n# Kael"), ["Kael", "Kûarasy"]);
         assert_eq!(super::aliases("---\naliases:\n- Kael\n---\n"), ["Kael"]);
@@ -1180,6 +1458,24 @@ mod tests {
     }
 
     #[test]
+    fn renomear_imagem_atualiza_os_links_das_notas() {
+        let root = temp();
+        fs::create_dir_all(root.join("Imagens/Feras")).unwrap();
+        fs::write(root.join("Imagens/Feras/Volcanic Beast.png"), b"png").unwrap();
+        fs::write(root.join("Imagens/Feras/Outra.png"), b"png").unwrap();
+        fs::write(root.join("Fera.md"), "# Fera\n![[Volcanic Beast.png|300]]\n![](Imagens/Feras/Volcanic%20Beast.png)\n`![[Volcanic Beast.png]]`\n").unwrap();
+        let (novo, notas) = rename_attachment(&root, "Imagens/Feras/Volcanic Beast.png", "Casco de Cinzas", true).unwrap();
+        assert_eq!((novo.as_str(), notas), ("Imagens/Feras/Casco de Cinzas.png", 1));
+        assert!(root.join("Imagens/Feras/Casco de Cinzas.png").is_file() && !root.join("Imagens/Feras/Volcanic Beast.png").exists());
+        assert_eq!(fs::read_to_string(root.join("Fera.md")).unwrap(), "# Fera\n![[Casco de Cinzas.png|300]]\n![](Imagens/Feras/Casco%20de%20Cinzas.png)\n`![[Volcanic Beast.png]]`\n", "código fica como está");
+        assert_eq!(rename_attachment(&root, "Imagens/Feras/Casco de Cinzas.png", "Casco.png", true).unwrap().0, "Imagens/Feras/Casco.png", "a extensão digitada não dobra");
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "Outra", true).is_err(), "não sobrescreve");
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "../fora", true).is_err());
+        assert!(rename_attachment(&root, "Imagens/Feras/Casco.png", "a/b", true).is_err());
+        assert!(rename_attachment(&root, "Fera.md", "Outra", true).is_err(), "nota renomeia pelo caminho dela");
+    }
+
+    #[test]
     fn txt_abre_e_importacao_traz_txt_e_md_como_notas() {
         let root = temp();
         let outside = temp();
@@ -1217,6 +1513,27 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias.md")).unwrap(), "já existia", "não sobrescreve");
         assert_eq!(fs::read_to_string(root.join("Importadas/Antigas/Ideias 2.md")).unwrap(), "# Ideias\n[[Link]]");
         assert!(root.join("Importadas/Antigas/Viagens/2019/Roma.md").is_file());
+        // Nome com ponto: "Gancho 10.2" não vira "Gancho 10" nem "Gancho 10.2 2" à toa.
+        fs::write(root.join("Importadas/Gancho 10.md"), "outro").unwrap();
+        assert_eq!(import_into(&root, "Importadas", &[("Gancho 10.2".into(), "novo".into())]).unwrap(), 1);
+        assert_eq!(fs::read_to_string(root.join("Importadas/Gancho 10.2.md")).unwrap(), "novo");
+        assert!(!root.join("Importadas/Gancho 10.2 2.md").exists());
+        // Imagens, PDFs e vídeos entram como estão, com as subpastas; o resto (e o oculto) fica de fora.
+        fs::write(src.join("Viagens/mapa.pdf"), b"%PDF").unwrap();
+        fs::write(src.join("Fera 10.2.PNG"), b"png2").unwrap();
+        fs::write(src.join("planilha.xlsx"), b"x").unwrap();
+        fs::write(src.join(".git/oculto.png"), b"x").unwrap();
+        let (files, big) = collect_files(&[src.clone()]);
+        assert_eq!(files.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["Antigas/Fera 10.2.png", "Antigas/Viagens/mapa.pdf", "Antigas/foto.png"]);
+        assert_eq!(big, 0);
+        fs::write(root.join("Importadas/Antigas/foto.png"), b"ja existia").unwrap();
+        assert_eq!(import_files(&root, "Importadas", &files).unwrap(), 3);
+        assert_eq!(fs::read(root.join("Importadas/Antigas/foto.png")).unwrap(), b"ja existia", "não sobrescreve");
+        assert_eq!(fs::read(root.join("Importadas/Antigas/foto 2.png")).unwrap(), b"png");
+        assert_eq!(fs::read(root.join("Importadas/Antigas/Fera 10.2.png")).unwrap(), b"png2");
+        assert!(root.join("Importadas/Antigas/Viagens/mapa.pdf").is_file());
+        assert!(fs::read_dir(root.join("Importadas/Antigas")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".ayla-tmp")));
+        assert!(import_files(&root, "../fora", &files).is_err());
         assert_eq!(fs::read_to_string(src.join("Ideias.md")).unwrap(), "# Ideias\n[[Link]]", "original intacto");
         let (single, _) = collect_imports(&[src.join("Viagens/acentos.txt")]);
         assert_eq!(single[0].0, "acentos");
@@ -1401,3 +1718,4 @@ mod tests {
         assert!(context_block(&[("Ideias".into(), "livro".into(), "/n/Ideias.md".into())]).unwrap().contains("[nota: Ideias]\nlivro"));
     }
 }
+

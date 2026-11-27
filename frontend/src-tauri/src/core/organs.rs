@@ -933,7 +933,7 @@ pub async fn organ_open_separate(app: tauri::AppHandle, organ: tauri::State<'_, 
     if let Some(window) = app.get_webview_window(SEPARATE_WINDOW) {
         let _ = window.unminimize();
         let _ = window.show();
-        let _ = window.set_focus();
+        let _ = crate::desktop::focus(&window);
         return Ok(());
     }
     let url = tauri::Url::parse(PAGE_URL).map_err(|_| "Endereço inválido")?;

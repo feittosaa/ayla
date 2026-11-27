@@ -38,7 +38,7 @@
 .calendar-form h4 { margin: 0; font-size: 14px; }
 .calendar-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
 .calendar-form input:not([type=checkbox]), .calendar-form select { font: inherit; color: var(--ayla-text); background: var(--ayla-bg); border: 1px solid var(--ayla-border); border-radius: 6px; padding: 6px 8px; color-scheme: inherit; }
-.calendar-form .calendar-check { flex-direction: row; align-items: center; gap: 8px; color: var(--ayla-text); }
+.calendar-form .calendar-check { flex-direction: row; align-items: center; gap: 8px; color: var(--ayla-text); width: fit-content; cursor: pointer; }
 .calendar-check input { accent-color: var(--ayla-accent); width: 16px; height: 16px; }
 .calendar-row { display: flex; gap: 8px; }
 .calendar-row label { flex: 1; min-width: 0; }
