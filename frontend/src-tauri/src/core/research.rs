@@ -26,7 +26,7 @@ pub fn private_or_local(message: &str) -> bool {
     let text = words(message);
     let any = |terms: &[&str]| terms.iter().any(|term| text.contains(term));
     policy::suspect_content(message) || organs::finance_question(message) || super::fichas::pedido(message)
-        || athena::note_request(message) || reminders::is_request(message)
+        || athena::note_request(message) || reminders::is_request(message) || super::rotinas::pedido(message)
         || iris::comparison_question(message)
         || any(&[" que criei ", " eu criei ", " que escrevi ", " que conversamos ", " nas notas ",
             " no cofre ", " na pasta ", " no projeto ", " athena ", " iris ", " obsidian ",
@@ -96,9 +96,10 @@ pub async fn automatic_route(state: &super::services::Core, prefs: &super::prefe
     let Ok(model) = super::models::choose(&models, super::models::Capability::Text, state.budget(prefs), prefs.context_tokens, None)
         else { return AutoRoute::Ask };
     let Some(found) = understand(state, &model, prefs, json!(message), cancel).await else { return AutoRoute::Ask };
-    // A agenda é dado da Athena: fica neste computador em qualquer modo. Designs são montados pelo
+    // A agenda é dado da Athena: fica neste computador em qualquer modo. Pedidos ao computador
+    // (Hand) também. Designs são montados pelo
     // modelo local e guardados na Iris.
-    let route = if found.offline || found.agenda || found.design { AutoRoute::Local } else { match found.privacy {
+    let route = if found.offline || found.agenda || found.design || found.computador { AutoRoute::Local } else { match found.privacy {
         Privacy::Search => AutoRoute::Search,
         // Pedido público com link: só a pesquisa na web abre a página.
         Privacy::Public if has_link(message) => AutoRoute::Search,
@@ -128,6 +129,14 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
     if super::understand::guard(&message) {
         return Ok(json!({"route": "local", "search": false}));
     }
+    // Pedido ao Hand ("tira um print", "organiza meus Downloads"): feito neste computador, sem modelo.
+    if super::hand::pedido(&message).is_some() {
+        return Ok(json!({"route": "local", "search": false}));
+    }
+    // Resposta à pergunta do Hand ("pela Ayla"): neste computador.
+    if super::services::hand::segue_hand(&state, conversation.as_deref(), edit_of, regenerate, &message) {
+        return Ok(json!({"route": "local", "search": false}));
+    }
     // Mudança na ficha de que a resposta anterior tratou: fica neste computador, como as fichas.
     if super::services::segue_ficha(&state, conversation.as_deref(), edit_of, regenerate, &message) {
         return Ok(json!({"route": "local", "search": false}));
@@ -138,6 +147,8 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
     let search = route == AutoRoute::Search || suggests_web_search(&message);
     // O pedido usa notas da Athena: elas só vão junto se estiverem tranquilas e a pessoa aceitar.
     let plan = state.understood.lock().ok().and_then(|kept| kept.clone()).filter(|(m, _)| *m == message).map(|(_, plan)| plan);
+    // Pedido ao computador (Hand): sem notas junto, neste computador.
+    if plan.as_ref().is_some_and(|p| p.computador) { return Ok(json!({"route": "local", "search": false})); }
     if let Some(plan) = plan {
         use super::note_offer::{offer, Offer};
         let skip = super::note_offer::sibling_paths(&state, conversation.as_deref(), edit_of, regenerate);

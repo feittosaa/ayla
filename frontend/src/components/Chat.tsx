@@ -8,7 +8,9 @@ import { asksForImage, asksAboutScreen } from '../services/Intent';
 import ImageResults from './ImageResults';
 import ChatDesigns from './ChatDesigns';
 import ChatFicha from './ChatFicha';
+import ChatHand, { type HandCard } from './ChatHand';
 import type { FichaCard } from '../services/Ficha';
+import BrandMark from './BrandMark';
 import { ArrowUpIcon, CloseIcon, CopyIcon, DatabaseIcon, FileIcon, ImageIcon, LayoutIcon, MicIcon, ChevronLeftIcon, ChevronRightIcon, PaperclipIcon, PencilIcon, RefreshIcon, ScreenIcon, SidebarIcon, SlidersIcon, StopIcon } from './Icons';
 import Markdown from './Markdown';
 import FilePreview, { AttachmentThumb } from './FilePreview';
@@ -49,7 +51,7 @@ const fitHeight = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.st
 /** Editar uma pergunta (nova versão dela) ou gerar outra resposta: `id` da pergunta; `cut`, a
  * posição a partir da qual a tela troca; `files`, os anexos da pergunta original. */
 type Branch = { kind: 'edit' | 'regenerate'; id: number; text: string; cut: number; files: FileInfo[] };
-const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha, created: m.extras.created ?? m.created } : m;
+const withExtras = (m: Message): Message => m.extras ? { ...m, images: m.extras.images ?? m.images, sources: m.extras.sources ?? m.sources, designs: m.extras.designs ?? m.designs, ficha: m.extras.ficha ?? m.ficha, hand: m.extras.hand ?? m.hand, created: m.extras.created ?? m.created } : m;
 
 /** Setas para alternar entre as versões de uma mensagem (‹ 2/3 ›). */
 function Versions({ message, disabled, onPick }: { message: Message; disabled: boolean; onPick: (id: number) => void }) {
@@ -82,6 +84,8 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   const [imageChoice, setImageChoice] = useState<boolean | null>(null);
   /** Botão "Criar design": a mensagem vira um design na Iris, montado neste computador. */
   const [designing, setDesigning] = useState(false);
+  // "Usar o computador": a mensagem vai para o Hand (plano para aprovar), neste computador.
+  const [handing, setHanding] = useState(false);
   const [titleDraft, setTitleDraft] = useState<string | null>(null);
   // O modo escolhido vale para as próximas conversas até ser trocado.
   const [source, setSource] = useState<ResponseSource>(snapshot.preferences.response_source || (snapshot.preferences.usage_mode === 'hybrid' ? 'auto' : 'local'));
@@ -135,7 +139,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     return () => { current = false; };
   }, [canResearch, input]);
   const research = canResearch && decision?.draft === input && decision.search;
-  const cloud = !organLocal && !designing && destination === 'cloud';
+  const cloud = !organLocal && !designing && !handing && destination === 'cloud';
   const searchAvailable = provider === 'chatgpt' || provider === 'openai';
   // Consultar a lista só quando a pessoa abrir a escolha do modelo.
   function loadCloudModels() {
@@ -156,7 +160,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     .reduce((sum, entry) => sum + (entry && !entry.installed ? entry.download_bytes : 0), 0);
   // Criar imagem só quando a pessoa pede: botão ou frase explícita ("gere uma imagem de…").
   const asksImage = asksForImage(input);
-  const image = !projectContext && !designing && (imageChoice ?? asksImage) && mode !== 'local_only';
+  const image = !projectContext && !designing && !handing && (imageChoice ?? asksImage) && mode !== 'local_only';
   // Referências: memórias públicas relevantes, listadas na revisão; só as marcadas vão junto.
   const [references, setReferences] = useState<Reference[]>([]); const [dropped, setDropped] = useState<string[]>([]);
   const reviewing = cloud && !pendingRoute && !research && !image && input.trim().length >= 3;
@@ -365,7 +369,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     // Automático: a Ayla classifica neste computador antes do envio e pergunta quando houver dúvida.
     let autoRoute: ChatRequest['auto_route'] = null;
     // Sem internet, o Automático responde neste computador.
-    const automaticCloud = destination === 'auto' && !designing && Boolean(provider) && !sent.length && !organLocal && sensitivity !== 'sensitive'
+    const automaticCloud = destination === 'auto' && !designing && !handing && Boolean(provider) && !sent.length && !organLocal && sensitivity !== 'sensitive'
       && (mode !== 'per_conversation' || Boolean(current.cloud_consent)) && navigator.onLine;
     // Gerar de novo/editar: a nota da versão anterior não conta como "o último".
     const versionOf = { conversation: current.id, editOf: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null };
@@ -390,8 +394,9 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
       if (check.notes.length) { await holdFor({ message, search: false, notes: check.notes, kept: check.kept, manual: true }); return; }
       if (check.notice) setRouteNotice(check.notice);
     }
-    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: branch ? [] : sent.map(file => file.id), edit_of: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null, sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing, notes: offered.map(note => note.path) };
+    const request: ChatRequest = { id, conversation: current.id, message, personality_preview: cloud ? snapshot.system_prompt : null, capability: kind === 'auto' ? null : kind, model: destination === 'auto' ? null : model || null, attachments: branch ? [] : sent.map(file => file.id), edit_of: branch?.kind === 'edit' ? branch.id : null, regenerate: branch?.kind === 'regenerate' ? branch.id : null, sensitivity, reviewed, request_cloud: cloud, automatic: destination === 'auto', auto_route: autoRoute, web_search: Boolean(research && cloud), cloud_model: cloud ? cloudModel || null : null, effort: destination === 'local' ? null : effort || null, references: cloud ? kept : [], bases: bases.map(b => b.id), design: designing, hand: handing, notes: offered.map(note => note.path) };
     if (designing) setDesigning(false);
+    if (handing) setHanding(false);
     if (bases.length) onBasesUsed?.();
     let receivedText = false;
     try {
@@ -400,6 +405,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
         if (event.type === 'routing') { setRouting(event.text || ''); setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, notice: event.text || '' } : m)); }
         if (event.type === 'images') setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, images: { query: event.query ?? '', items: event.items ?? [], links: event.links ?? [] } } : m));
         if (event.type === 'note_created') { const item = (event as unknown as { item?: CreatedNote }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, created: [...(m.created ?? []), item] } : m)); }
+        if (event.type === 'hand') { const item = (event as unknown as { item?: HandCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, hand: item } : m)); }
         if (event.type === 'ficha') { const item = (event as unknown as { item?: FichaCard }).item; if (item) setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, ficha: item } : m)); }
         if (event.type === 'designs') { const items = (event as unknown as { items?: DesignCard[] }).items ?? []; setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, designs: items } : m)); }
         if (event.type === 'suggestion') setError(event.text || 'A Ayla sugeriu revisar o pedido para cloud.');
@@ -557,6 +563,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
                   {m.content ? <Markdown text={m.content} /> : busy && i === messages.length - 1 ? <p className="thinking" role="status">{status || 'Pensando…'}</p> : null}
                   {m.attachments?.map(file => <FilePreview key={file.id} file={file} />)}
                   {m.designs?.length ? <ChatDesigns items={m.designs} /> : null}
+                  {m.hand ? <ChatHand item={m.hand} /> : null}
                   {m.ficha ? <ChatFicha item={m.ficha} conversa={conversationId} onOpen={onOpenNote} /> : null}
                   {m.images && <ImageResults results={m.images} project={project?.id ?? null} onError={setError} />}
                   {m.created?.length && onOpenNote ? <p className="message-created">{m.created.map(item => <button key={item.note} type="button" className="file-chip link-chip" title={item.note} onClick={() => onOpenNote(item.note)}><FileIcon size={14} />Abrir “{item.title}” na Athena</button>)}</p> : null}
@@ -649,14 +656,15 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
               <button type="button" className="chip-remove" aria-label={`Tirar a base ${base.name}`} disabled={busy} onClick={() => onRemoveBase?.(base.id)}><CloseIcon size={14} /></button></li>)}
           </ul>}
           <textarea ref={field} rows={1} aria-label="Mensagem" value={input} readOnly={listening !== 'idle'} disabled={busy}
-            placeholder={listening === 'recording' ? 'Fale; o texto aparece aqui…' : image ? 'Descreva a imagem que você quer…' : designing ? 'Descreva o design: tipo (post, story, cartaz…), textos e estilo…' : 'Fale com a Ayla…'}
+            placeholder={listening === 'recording' ? 'Fale; o texto aparece aqui…' : image ? 'Descreva a imagem que você quer…' : designing ? 'Descreva o design: tipo (post, story, cartaz…), textos e estilo…' : handing ? 'Diga o que fazer no computador (ex.: põe os wallpapers da Iris na pasta Wallpapers)…' : 'Fale com a Ayla…'}
             onChange={e => { setInput(e.target.value); setReviewed(false); }} onPaste={paste}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (canSend) void send(); } }} />
           <div className="composer-actions">
             <button type="button" className="icon-button" aria-label="Anexar arquivos" title="Anexar arquivos (ou arraste e cole)" disabled={busy || cloud || adding || listening !== 'idle'} onClick={() => { void native<string[]>('pick_files').then(paths => attachPaths(paths)).catch(e => setError(errorText(e))); }}><PaperclipIcon /></button>
             <button type="button" className="icon-button" aria-label="Mostrar uma parte da tela" title="Mostrar uma parte da tela à Ayla (fica neste computador)" disabled={busy || cloud || adding || listening !== 'idle'} onClick={() => { void captureScreen().then(file => { if (file) setAttachments(prev => [...prev, file]); }); }}><ScreenIcon /></button>
-            <button type="button" className="icon-button" aria-label="Criar design" title="Criar design na Iris (post, story, cartaz…), montado neste computador" aria-pressed={designing} disabled={busy || listening !== 'idle'} onClick={() => { setDesigning(d => !d); setImageChoice(false); setReviewed(false); }}><LayoutIcon /></button>
-            {mode !== 'local_only' && <button type="button" className="icon-button" aria-label="Criar imagem" title="Criar imagem (pela nuvem, depois da sua revisão)" aria-pressed={image} disabled={busy || listening !== 'idle'} onClick={() => { setImageChoice(!image); setDesigning(false); setReviewed(false); }}><ImageIcon /></button>}
+            <button type="button" className="icon-button" aria-label="Criar design" title="Criar design na Iris (post, story, cartaz…), montado neste computador" aria-pressed={designing} disabled={busy || listening !== 'idle'} onClick={() => { setDesigning(d => !d); setHanding(false); setImageChoice(false); setReviewed(false); }}><LayoutIcon /></button>
+            <button type="button" className="icon-button" aria-label="Usar o computador" title="Usar o computador (Hand): a Ayla mostra os passos e só faz depois da sua aprovação" aria-pressed={handing} disabled={busy || listening !== 'idle'} onClick={() => { setHanding(h => !h); setDesigning(false); setImageChoice(false); setReviewed(false); }}><BrandMark name="hand" size={18} /></button>
+            {mode !== 'local_only' && <button type="button" className="icon-button" aria-label="Criar imagem" title="Criar imagem (pela nuvem, depois da sua revisão)" aria-pressed={image} disabled={busy || listening !== 'idle'} onClick={() => { setImageChoice(!image); setDesigning(false); setHanding(false); setReviewed(false); }}><ImageIcon /></button>}
             <button type="button" className="icon-button" aria-label="Ajustes desta resposta" aria-expanded={options} aria-controls="response-options" onClick={() => setOptions(o => !o)}><SlidersIcon /></button>
             <span className="spacer" />
             {canHear && !cloud && <button type="button" className={listening === 'recording' ? 'round-button accent' : 'round-button'} aria-label={listening === 'recording' ? 'Terminar de falar' : 'Falar com a Ayla'} aria-pressed={listening === 'recording'} disabled={busy || listening === 'transcribing'} onClick={() => void listen_()}>{listening === 'recording' ? <StopIcon /> : <MicIcon />}</button>}
@@ -665,7 +673,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
               : <button type="submit" className="round-button accent" aria-label="Enviar" disabled={!canSend}><ArrowUpIcon size={18} /></button>}
           </div>
         </form>
-        <p className="composer-note">{image ? 'A imagem será criada na nuvem depois da sua revisão e ficará guardada nesta conversa.' : designing ? 'A Ayla monta o design neste computador e guarda na Iris › Designs. Para pedidos públicos, pode buscar fotos em bancos livres (só os termos saem).' : destination === 'auto' ? (provider === 'chatgpt' ? <>Automático · Plano do ChatGPT · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Pedidos públicos podem usar a nuvem. Dados pessoais ficam neste computador.') : cloud ? (snapshot.preferences.cloud_provider === 'chatgpt' ? <>Usando o seu plano do ChatGPT, depois da sua revisão · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Esta resposta usará a nuvem depois da sua revisão.') : organLocal ? 'A Ayla atende este pedido neste computador.' : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
+        <p className="composer-note">{image ? 'A imagem será criada na nuvem depois da sua revisão e ficará guardada nesta conversa.' : handing ? 'Hand: a Ayla mostra o que vai fazer no computador e só faz depois que você aprovar. Fica neste computador.' : designing ? 'A Ayla monta o design neste computador e guarda na Iris › Designs. Para pedidos públicos, pode buscar fotos em bancos livres (só os termos saem).' : destination === 'auto' ? (provider === 'chatgpt' ? <>Automático · Plano do ChatGPT · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Pedidos públicos podem usar a nuvem. Dados pessoais ficam neste computador.') : cloud ? (snapshot.preferences.cloud_provider === 'chatgpt' ? <>Usando o seu plano do ChatGPT, depois da sua revisão · <button type="button" className="link-button" onClick={() => void native('open_link', { url: 'https://chatgpt.com/settings/usage' }).catch(e => setError(errorText(e)))}>Gerenciar uso</button></> : 'Esta resposta usará a nuvem depois da sua revisão.') : organLocal ? 'A Ayla atende este pedido neste computador.' : 'Respostas geradas neste computador. Nada vai para a nuvem sem a sua revisão.'}</p>
       </div>
     </main>
   </>;

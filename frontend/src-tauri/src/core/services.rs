@@ -1,3 +1,7 @@
+pub mod hand;
+pub mod hand_sistema;
+pub mod rotinas;
+pub mod design_doc;
 pub mod project_sources;
 use super::{
     cloud::{self, Api, Login, Secret},
@@ -1199,6 +1203,10 @@ pub struct ChatRequest {
     /// Botão "Criar design": esta mensagem vira um design na Iris, sem depender do entendimento.
     #[serde(default)]
     pub design: bool,
+    /// Opção "Usar o computador": esta mensagem vai para o Hand (plano para aprovar), sem
+    /// depender do entendimento.
+    #[serde(default)]
+    pub hand: bool,
     /// Editar: id da pergunta que ganha uma nova versão com este texto.
     #[serde(default)]
     pub edit_of: Option<i64>,
@@ -1218,6 +1226,7 @@ pub struct ChatRequest {
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
 /// Pedido para a resposta virar nota: o modelo escreve a nota inteira, pronta para guardar.
+const NO_ACTIONS: &str = "\n\nNesta resposta você só escreve texto: não mexe no computador, nos arquivos nem no sistema da pessoa. Nunca diga que fez, definiu, moveu, abriu, apagou ou mudou algo no computador. Se ela pedir uma ação dessas, diga que ainda não fez e que ela pode pedir de novo marcando \"Usar o computador\" (ícone do Hand, embaixo da caixa de mensagem) para você mostrar os passos antes.";
 const NOTE_WRITING: &str = "\n\nA pessoa pediu que esta resposta vire uma nota na Athena; a Ayla guarda a nota sozinha depois. Escreva a nota completa em Markdown, começando por um título com \"# \", com o conteúdo pedido (crie o que ela pediu, usando as notas dela como base quando houver). Não diga que vai criar ou que criou a nota e não escreva frases de conversa antes ou depois. Escreva conteúdo novo, seguindo o que a pessoa pediu: não copie o texto de notas existentes nem de respostas anteriores (use-os só como base para continuar a história).";
 
 /// Guarda a resposta como nota: na pasta da nota em que se baseou (no cofre ou projeto dela) ou,
@@ -2760,6 +2769,8 @@ fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: V
             Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
             Some("designs") => kept["designs"] = event["items"].clone(),
             Some("ficha") => kept["ficha"] = event["item"].clone(),
+            // Cartão do Hand (captura, busca, plano, programa ou comando).
+            Some("hand") => kept["hand"] = event["item"].clone(),
             // Ficha criada pela resposta (não aparece; lembra qual é para o próximo pedido).
             Some("ficha_ref") => kept["ficha_ref"] = event["item"].clone(),
             // Nota criada pela resposta: botão para abri-la na Athena.
@@ -5011,6 +5022,15 @@ pub async fn chat(
     let extras=std::sync::Mutex::new(json!({}));
     let mut result=async{
         let prefs=state.prefs()?;
+        // Rotinas ("checa o preço a cada 1 hora", "bom dia quando eu abrir o PC"): montadas pelo
+        // modelo local, neste computador, e chegam desligadas para a pessoa ativar.
+        if !project_context && request.attachments.is_empty() && !request.hand {
+            if let Some(reply) = rotinas::rotina_conversa(&state, &request.message, &events, &extras).await? {
+                metric_model = "rotinas".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         // Lembretes: criados neste computador e confirmados com data e hora, sem passar pela nuvem.
         if !project_context && reminders::is_request(&request.message)&&request.attachments.is_empty(){
             let now=reminders::now_local();
@@ -5141,6 +5161,16 @@ pub async fn chat(
             let _=events.send(json!({"type":"token","text":reply}));
             return Ok(());
         }
+        // Hand: pedidos claros ao computador ("tira um print", "organiza meus Downloads"), sem
+        // modelo e sempre neste computador (nada vai para a nuvem, em qualquer modo).
+        if request.attachments.is_empty() {
+            let anteriores_hand: Vec<Value> = state.store.lock().map_err(|_| "Dados ocupados")?.recent_extras(&request.conversation, request.placement.parent, 4).unwrap_or_default();
+            if let Some(reply) = hand::hand_conversa(&state, &request.message, request.hand, &anteriores_hand, &events, &extras).await? {
+                metric_model = "hand".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         use super::research::AutoRoute;
         let auto_route = if request.automatic && prefs.usage_mode != UsageMode::LocalOnly
             && (prefs.usage_mode != UsageMode::PerConversation || consent)
@@ -5218,6 +5248,16 @@ pub async fn chat(
             }.await;
             planned.unwrap_or_else(Understanding::unknown)
         };
+        // Hand: o entendimento reconheceu um pedido para fazer algo no computador (o que a leitura
+        // rápida, antes, não pegou). Vira plano para aprovar, neste computador.
+        if !project_context && !use_cloud && !request.design && plan.computador && request.attachments.is_empty() {
+            let anteriores_hand: Vec<Value> = state.store.lock().map_err(|_| "Dados ocupados")?.recent_extras(&request.conversation, request.placement.parent, 4).unwrap_or_default();
+            if let Some(reply) = hand::hand_conversa(&state, &request.message, true, &anteriores_hand, &events, &extras).await? {
+                metric_model = "hand".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         // Designs: pelo botão "Criar design" ou quando o entendimento reconhece o pedido.
         if !project_context && (request.design||(!use_cloud&&plan.design)){
             // Fotos de bancos livres só num pedido público: o Automático já o classificou assim ao
@@ -5276,6 +5316,8 @@ pub async fn chat(
         let mut system=prefs.system_prompt().to_string();
         // A nota é uma entrega só: sem o formato de opções ordenadas das respostas comuns.
         system.push_str(if writing_note { NOTE_WRITING } else { OPTIONS_GUIDE });
+        // Só o Hand age no computador (com cartão para aprovar); a conversa nunca diz que agiu.
+        system.push_str(NO_ACTIONS);
         if !use_cloud{
             system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você vê a agenda da pessoa (calendário da Athena, com eventos, lembretes e avisos) quando ela pergunta, e cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
             let project = {

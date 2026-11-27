@@ -2,7 +2,9 @@ import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, ty
 import { errorText, formatBytes, native, nativeTask, taskId } from '../services/Desktop';
 import { OPEN_DESIGN_EVENT, clampSide, defaultName, draftOf, formatOf, formats, takePendingDesign, templates, type DesignSummary, type Format, type Template } from '../services/Design';
 import { loadPackFonts, resetPackFonts } from '../services/DesignFonts';
-import { PlusIcon, TrashIcon } from './Icons';
+import { FileIcon, PlusIcon, TrashIcon } from './Icons';
+import { documentoDe } from '../services/DesignDocument';
+import { mediaUrl, type MediaRef } from '../services/Media';
 import type { Opening } from './IrisDesignEditor';
 
 const IrisDesignEditor = lazy(() => import('./IrisDesignEditor'));
@@ -12,6 +14,44 @@ class EditorGuard extends Component<{ onError: (message: string) => void; childr
   static getDerivedStateFromError() { return { failed: true }; }
   componentDidCatch(error: unknown) { this.props.onError(`O editor de designs falhou: ${errorText(error)}`); }
   render() { return this.state.failed ? null : this.props.children; }
+}
+
+type LibraryItem = { key: string; name: string; place: string; kind: string; source: string; file?: string; root?: string | null; path?: string };
+const EDITABLE = /\.(pdf|png|jpe?g|jfif|webp)$/i;
+
+/** Escolher um PDF ou imagem da Athena ou da Iris para editar por cima. */
+function DocumentPicker({ close, choose }: { close: () => void; choose: (item: LibraryItem) => Promise<void> }) {
+  const [items, setItems] = useState<LibraryItem[] | null>(null);
+  const [query, setQuery] = useState('');
+  const [kind, setKind] = useState<'' | 'pdf' | 'image'>('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => { void native<{ items: LibraryItem[] }>('iris_library').then(r => setItems(r.items.filter(i => (i.kind === 'pdf' || i.kind === 'image') && EDITABLE.test(i.name)))).catch(e => setError(errorText(e))); }, []);
+  const q = query.trim().toLowerCase();
+  const shown = (items ?? []).filter(i => (!kind || i.kind === kind) && (!q || `${i.name} ${i.place}`.toLowerCase().includes(q))).slice(0, 120);
+  return <div className="dialog-backdrop" onClick={() => !busy && close()}>
+    <div className="dialog design-picker" role="dialog" aria-modal="true" aria-labelledby="design-picker-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape' && !busy) close(); }}>
+      <h2 id="design-picker-title">Editar um PDF ou imagem</h2>
+      <p className="design-hint">Da Athena e da Iris. O que você adicionar fica por cima; "Salvar no arquivo" grava no próprio arquivo, com uma cópia do original nos backups.</p>
+      <div className="design-picker-bar">
+        <input className="organ-search" type="search" autoFocus value={query} placeholder="Buscar pelo nome ou pasta" aria-label="Buscar arquivo" onChange={e => setQuery(e.target.value)} />
+        <div className="design-sources" role="tablist" aria-label="Tipo">
+          {([['', 'Todos'], ['pdf', 'PDFs'], ['image', 'Imagens']] as const).map(([k, l]) => <button key={k} role="tab" aria-selected={kind === k} className={kind === k ? 'active' : ''} onClick={() => setKind(k)}>{l}</button>)}
+        </div>
+      </div>
+      {error && <p role="alert" className="app-error">{error}</p>}
+      {items === null && !error ? <p className="design-hint" role="status">Reunindo os arquivos…</p>
+        : !shown.length ? <p className="design-hint">Nenhum arquivo encontrado.</p>
+        : <ul className="design-picker-list">{shown.map(item => <li key={item.key}>
+            <button disabled={Boolean(busy)} onClick={async () => { setBusy(item.key); setError(''); try { await choose(item); } catch (e) { setError(errorText(e)); setBusy(''); } }}>
+              {item.kind === 'image' ? <img src={mediaUrl((item.file ? { file: item.file } : { root: item.root ?? '', path: item.path ?? '' }) as MediaRef, true)} alt="" loading="lazy" /> : <span className="design-picker-pdf"><FileIcon size={22} /><small>PDF</small></span>}
+              <span><b>{item.name}</b><small>{item.place}</small></span>
+              {busy === item.key && <small role="status">Abrindo…</small>}
+            </button>
+          </li>)}</ul>}
+      <div className="row-actions dialog-actions"><button className="ghost-button" disabled={Boolean(busy)} onClick={close}>Cancelar</button></div>
+    </div>
+  </div>;
 }
 
 const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -35,6 +75,7 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
   const [custom, setCustom] = useState({ width: 1200, height: 800 });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [picking, setPicking] = useState(false);
   const job = useRef<string | null>(null);
 
   const load = useCallback(() => native<{ designs: DesignSummary[]; pack: boolean; packBytes: number }>('design_list').then(result => {
@@ -118,6 +159,17 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
   return <div className="designs">
     {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
     {notice && <p role="status" className="design-notice">{notice} <button className="link-button" onClick={() => setNotice('')}>OK</button></p>}
+    <section aria-label="Editar um arquivo">
+      <h2>Editar um arquivo</h2>
+      <button className="design-format design-open-file" onClick={() => setPicking(true)}>
+        <span className="design-picker-pdf"><FileIcon size={26} /></span><b>Abrir um PDF ou imagem</b><small>Da Athena ou da Iris: escreva, marque e adicione imagens por cima, e grave no próprio arquivo</small>
+      </button>
+    </section>
+    {picking && <DocumentPicker close={() => setPicking(false)} choose={async item => {
+      const documento = await documentoDe(item);
+      setPicking(false); setNotice('');
+      setOpening({ name: documento.nome.replace(/\.[^.]+$/, ''), width: 1200, height: 800, documento });
+    }} />}
     <section aria-label="Novo design">
       <h2>Criar um design</h2>
       <div className="design-formats">

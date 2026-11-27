@@ -1,0 +1,224 @@
+/* Hand: mesmo esqueleto dos órgãos (lateral organ-sidebar, barra organ-bar), com a lateral no jeito
+   da Ayla principal e um ar de terminal (fonte mono, prompt, comentários com #): aqui se mexe na
+   raiz do computador. As cores continuam as da Ayla. */
+.hand-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.hand-title { margin: 0 8px; font-size: 14px; font-weight: 600; color: var(--ayla-text); }
+.hand-content { flex: 1; overflow: auto; padding: 18px 22px 40px; }
+.hand-panel { display: flex; flex-direction: column; gap: 12px; max-width: 920px; }
+.hand-sections { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; }
+.hand-privacy { padding: 8px 14px; margin-top: auto; font-size: 12px; }
+.hand-search { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hand-search .organ-search, .hand-command { flex: 1; min-width: 220px; }
+.hand-command { font-family: var(--ayla-mono, ui-monospace, monospace); }
+.hand-inline { display: inline-flex; align-items: center; gap: 6px; color: var(--ayla-text-soft); font-size: 13px; }
+.hand-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--ayla-border-soft); }
+.hand-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 4px; border-bottom: 1px solid var(--ayla-border-soft); }
+.hand-list li.gone { opacity: .5; }
+.hand-name { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.hand-name b { font-weight: 500; overflow-wrap: anywhere; }
+.hand-name small { color: var(--ayla-text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.hand-plan { border: 1px solid var(--ayla-border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--ayla-panel); }
+.hand-plan header { display: flex; flex-direction: column; gap: 2px; }
+.hand-plan header small { color: var(--ayla-text-soft); font-size: 12px; }
+.hand-steps { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.hand-steps li { display: flex; gap: 8px; align-items: baseline; }
+.hand-steps li > span:last-child { overflow-wrap: anywhere; color: var(--ayla-text); }
+.hand-verb { flex: none; min-width: 92px; color: var(--ayla-text-soft); font-size: 12px; }
+.hand-verb.danger { color: var(--ayla-danger, #e5484d); }
+.hand-done { color: var(--ayla-accent); font-size: 13px; }
+.hand-run { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--ayla-border-soft); }
+.hand-run code { font-size: 13px; }
+.hand-run pre { margin: 0; padding: 10px; border-radius: 8px; background: var(--ayla-panel); max-height: 360px; overflow: auto; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hand-run pre.hand-stderr { color: var(--ayla-text-soft); }
+.hand-batch { border-bottom: 1px solid var(--ayla-border-soft); padding: 8px 0; }
+.hand-batch summary { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.hand-batch summary small { color: var(--ayla-text-soft); font-size: 12px; flex: 1; }
+.hand-batch .hand-steps { margin-top: 8px; }
+.chat-hand { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
+.chat-hand > p.hand-name { margin: 0; }
+.hand-control { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--ayla-border-soft); }
+.hand-control h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--ayla-text-soft); }
+.hand-control .hand-search input:not(.hand-number) { flex: 1; min-width: 220px; }
+.hand-number { width: 80px; }
+.hand-task-plan { margin: 0; padding-left: 20px; font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
+.hand-task-done { border-top: 1px solid var(--ayla-border-soft); padding-top: 6px; }
+.hand-task-running { align-items: center; justify-content: space-between; }
+.hand-task-running span { color: var(--ayla-accent); font-size: 13px; }
+.hand-task-question p { margin: 0 0 6px; }
+.hand-wallpaper { display: flex; flex-direction: column; gap: 8px; }
+.hand-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; max-height: 320px; overflow: auto; padding: 2px; }
+.hand-thumb { padding: 0; border: 2px solid transparent; border-radius: 8px; overflow: hidden; background: var(--ayla-panel); cursor: pointer; aspect-ratio: 16 / 9; display: block; }
+.hand-thumb.chosen { border-color: var(--ayla-accent); }
+.hand-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hand-thumb.single { width: min(320px, 100%); cursor: default; }
+.hand-thumb-empty { display: block; width: 100%; height: 100%; }
+
+/* ── Ar de terminal ─────────────────────────────────────────────────────────────────────── */
+.hand { --hand-mono: var(--ayla-font-mono); --hand-term: var(--ayla-code); }
+.hand .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.app-shell .hand-new { justify-content: flex-start; font-family: var(--hand-mono); font-size: 13.5px; border: 1px solid var(--ayla-border-soft); }
+.app-shell .hand-new.active { border-color: var(--ayla-accent); box-shadow: inset 3px 0 0 var(--ayla-accent); }
+.hand-prompt { color: var(--ayla-accent); font-weight: 700; letter-spacing: -1px; }
+.hand-sections { gap: 2px; padding: 0; }
+.app-shell .hand-tool { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; }
+.app-shell .hand-tool small { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-faint); opacity: .75; }
+.app-shell .hand-tool[aria-current=page] { box-shadow: inset 3px 0 0 var(--ayla-accent); }
+.app-shell .hand-tool[aria-current=page] small { color: var(--ayla-accent); opacity: 1; }
+.hand-privacy { font-family: var(--hand-mono); font-size: 11.5px; }
+.hand-privacy::before, .hand-content .panel-muted:not([role])::before { content: '# '; color: var(--ayla-accent); opacity: .7; font-family: var(--hand-mono); }
+.hand .organ-bar { gap: 10px; }
+.hand-title { display: flex; align-items: center; gap: 0; font-family: var(--hand-mono); font-weight: 500; font-size: 13px; color: var(--ayla-text-soft); }
+.hand-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hand-caret { display: inline-block; width: 8px; height: 15px; margin-left: 4px; background: var(--ayla-accent); animation: hand-blink 1.1s steps(1) infinite; }
+@keyframes hand-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hand-caret { animation: none; } }
+.hand-heading { margin-left: auto; margin-right: 10px; font-size: 13px; color: var(--ayla-text-faint); }
+.hand-content { background: linear-gradient(var(--ayla-window), var(--ayla-window)); }
+.hand-content code, .hand-command, .hand-keys, .hand-verb, .hand-run code, .hand-step-text, .hand-pkg-list { font-family: var(--hand-mono); }
+.hand-plan, .hand-run pre { background: var(--hand-term); }
+.hand-plan { border-radius: calc(8px * var(--ayla-round, 1)); }
+.hand-content input:not([type=checkbox]):not([type=radio]), .hand-content select { font-family: var(--hand-mono); font-size: 13px; }
+.hand-content .organ-search { font-family: var(--hand-mono); }
+
+/* Opções (busca, filtros) como chips de marcar */
+.hand-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.hand-options-label { margin: 0 4px 0 0; padding: 0; font-family: var(--hand-mono); font-size: 12px; color: var(--ayla-text-faint); float: left; }
+.hand-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ayla-text-soft); margin-right: 10px; cursor: pointer; }
+.hand-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 0 10px; border: 1px solid var(--ayla-border); border-radius: calc(6px * var(--ayla-round, 1)); font-size: 12.5px; color: var(--ayla-text-soft); cursor: pointer; user-select: none; }
+.hand-chip input { position: absolute; opacity: 0; pointer-events: none; }
+.hand-chip:hover { background: var(--ayla-hover); }
+.hand-chip.on { border-color: var(--ayla-accent); color: var(--ayla-text); background: var(--ayla-accent-ring); }
+.hand-chip:has(input:focus-visible) { outline: 2px solid var(--ayla-accent); outline-offset: 1px; }
+.hand-progress { margin: 0; font-family: var(--hand-mono); font-size: 12.5px; color: var(--ayla-accent); }
+
+/* Programas: grade com ícones e o cartão do hover */
+.hand-programs { max-width: none; }
+.hand-app-grid-wrap { position: relative; }
+.hand-app-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; }
+.app-shell .hand-app { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px 10px; min-height: 112px; border: 1px solid transparent; border-radius: calc(10px * var(--ayla-round, 1)); background: none; color: var(--ayla-text-soft); }
+.app-shell .hand-app:hover, .app-shell .hand-app:focus-visible { background: var(--ayla-hover); border-color: var(--ayla-border-soft); color: var(--ayla-text); }
+.hand-app-icon { width: 48px; height: 48px; display: grid; place-items: center; flex: none; }
+.hand-app-icon img { width: 48px; height: 48px; object-fit: contain; }
+.hand-app-letter { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; background: var(--hand-term); border: 1px solid var(--ayla-border); font-family: var(--hand-mono); font-size: 18px; color: var(--ayla-accent); }
+.hand-app-name { font-size: 12.5px; line-height: 1.3; text-align: center; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.hand-app-info { position: absolute; z-index: 5; width: 300px; margin-left: 6px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--ayla-border-strong); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--hand-term); box-shadow: 0 10px 30px #0008; font-size: 13px; }
+.hand-app-info.left { transform: translateX(calc(-100% - 12px)); }
+.hand-app-info header { display: flex; flex-direction: column; gap: 2px; }
+.hand-app-info header small { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-faint); overflow-wrap: anywhere; }
+.hand-app-info p { margin: 0; line-height: 1.45; }
+.hand-app-remove span { color: var(--ayla-accent); font-weight: 600; }
+.hand-app-cascade { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-faint); }
+.hand-app-cascade.big { color: var(--ayla-error); }
+.app-shell .danger-text { color: var(--ayla-error); }
+.dialog.hand-dialog { width: min(560px, 100%); display: flex; flex-direction: column; gap: 10px; }
+.hand-dialog h2 { margin: 0; font-size: 17px; }
+.hand-dialog p { margin: 0; }
+.hand-pkg-list { list-style: none; margin: 0; padding: 8px 10px; max-height: 180px; overflow: auto; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; border-radius: 8px; background: var(--hand-term); clear: both; }
+.dialog-actions { justify-content: flex-end; flex-wrap: wrap; }
+
+/* Atalhos */
+.hand-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--ayla-border-soft); }
+.app-shell .hand-tab { min-height: 34px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--ayla-text-soft); font-family: var(--hand-mono); font-size: 13px; }
+.app-shell .hand-tab.on { color: var(--ayla-text); border-bottom-color: var(--ayla-accent); }
+.hand-bind-group h3 { margin: 10px 0 4px; font-family: var(--hand-mono); font-size: 12px; font-weight: 500; color: var(--ayla-text-faint); }
+.hand-bind-group h3::before { content: '## '; color: var(--ayla-accent); opacity: .7; }
+.hand-binds { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--ayla-border-soft); }
+.hand-binds > li { display: grid; grid-template-columns: minmax(150px, 230px) 1fr auto; align-items: center; gap: 4px 12px; padding: 7px 4px; border-bottom: 1px solid var(--ayla-border-soft); }
+.hand-binds > li.off { opacity: .55; }
+.hand-binds > li.off .hand-keys kbd { text-decoration: line-through; }
+.hand-keys { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.hand-keys kbd { padding: 1px 6px; border: 1px solid var(--ayla-border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--hand-term); font-family: var(--hand-mono); font-size: 12px; color: var(--ayla-text); }
+.hand-bind-what { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.hand-bind-what b { font-weight: 500; font-size: 13.5px; overflow-wrap: anywhere; }
+.hand-bind-what small { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hand-badge { align-self: center; display: inline-flex; align-items: center; height: 20px; line-height: 1; font-family: var(--hand-mono); font-size: 11px; padding: 0 7px; border-radius: 5px; border: 1px solid var(--ayla-border); color: var(--ayla-text-faint); white-space: nowrap; }
+.hand-badge.ayla { border-color: var(--ayla-accent); color: var(--ayla-accent); }
+.hand-bind-edit { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; padding: 8px 0 4px; }
+.hand-combo { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.hand-key-input { width: 120px; }
+.hand-listening { border-color: var(--ayla-accent) !important; color: var(--ayla-accent) !important; }
+.hand-conflict { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; }
+.hand-new-bind { gap: 10px; }
+.hand-dispatcher { flex: 0 1 180px !important; min-width: 140px !important; }
+
+/* Macros */
+.hand-macro-editor { gap: 10px; }
+.hand-macro-steps { margin: 0; padding: 0 0 0 26px; display: flex; flex-direction: column; gap: 4px; font-family: var(--hand-mono); font-size: 12.5px; }
+.hand-macro-steps li { padding: 4px 0; }
+.hand-macro-steps li > * { vertical-align: middle; }
+.hand-macro-steps li { display: list-item; }
+.hand-macro-steps li > .hand-verb { display: inline-block; min-width: 96px; }
+.hand-macro-steps li > input { width: min(360px, 60%); }
+.hand-macro-steps li > .row-actions { display: inline-flex; float: right; gap: 2px; }
+.hand-macro-steps .icon-button { width: 28px; height: 28px; min-height: 28px; }
+.hand-add-steps { flex-wrap: wrap; }
+.hand-recording { margin: 0; color: var(--ayla-error); font-family: var(--hand-mono); font-size: 12.5px; }
+.hand-recording::before { content: '● '; animation: hand-blink 1s steps(1) infinite; }
+.hand-macro-key { display: flex; flex-direction: column; gap: 6px; }
+.hand-app-tag { font-family: var(--hand-mono); font-size: 10.5px; color: var(--ayla-accent); }
+.hand-app-usage { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-soft); }
+.hand-bind-summary .hand-bind-members { grid-column: 1 / -1; margin: 4px 0 0 18px; border-top: 0; }
+.hand-bind-summary .hand-bind-members > li { padding: 5px 4px; }
+.hand-folder-icon { color: var(--ayla-accent); flex: none; }
+.hand-repo { font-size: 12.5px; color: var(--ayla-text-soft); overflow-wrap: anywhere; flex: 1; }
+.hand-dot-row { flex-wrap: wrap; }
+.hand-dot-row code { font-size: 12.5px; overflow-wrap: anywhere; }
+.hand-diff { flex-basis: 100%; margin: 4px 0 0; padding: 10px; max-height: 320px; overflow: auto; border-radius: 8px; background: var(--hand-term); font-family: var(--hand-mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hand-diff .add { color: #7ee2a8; }
+.hand-diff .del { color: var(--ayla-error); }
+
+/* Rotinas */
+.hand-routines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--ayla-border-soft); }
+.hand-routines > li { padding: 10px 4px; border-bottom: 1px solid var(--ayla-border-soft); display: flex; flex-direction: column; gap: 8px; }
+.hand-routines > li.off .hand-bind-what { opacity: .6; }
+.hand-routine-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hand-routine-head .hand-bind-what { flex: 1; min-width: 220px; }
+.hand-routine-head .hand-bind-what small { white-space: normal; }
+.hand-spark { width: 140px; height: 34px; color: var(--ayla-accent); flex: none; }
+.hand-switch { position: relative; display: inline-flex; width: 36px; height: 20px; flex: none; cursor: pointer; }
+.hand-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.hand-switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--ayla-border-strong); transition: background 120ms; }
+.hand-switch span::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--ayla-text); transition: transform 120ms; }
+.hand-switch input:checked + span { background: var(--ayla-accent); }
+.hand-switch input:checked + span::after { transform: translateX(16px); background: var(--ayla-on-accent); }
+.hand-switch input:focus-visible + span { outline: 2px solid var(--ayla-accent); outline-offset: 2px; }
+.hand-routine-log { list-style: none; margin: 0 0 0 48px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; border-radius: 8px; background: var(--hand-term); max-height: 240px; overflow: auto; font-size: 12.5px; }
+.hand-routine-log li { display: grid; grid-template-columns: 120px 90px 1fr; gap: 8px; align-items: baseline; }
+.hand-routine-log li code { font-size: 11.5px; color: var(--ayla-text-faint); }
+.hand-routine-log li span { font-family: var(--hand-mono); font-size: 11.5px; color: var(--ayla-text-faint); }
+.hand-routine-log li.fired span { color: var(--ayla-accent); }
+.hand-routine-log li small { color: var(--ayla-text-soft); overflow-wrap: anywhere; }
+.hand-routine-editor { gap: 10px; }
+.hand-step-title { margin: 6px 0 0; font-family: var(--hand-mono); font-size: 12.5px; font-weight: 600; color: var(--ayla-text-soft); display: flex; align-items: center; gap: 8px; }
+.hand-step-title::before { content: '$'; color: var(--ayla-accent); }
+.hand-cond-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.hand-cond-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hand-cond-list .hand-verb { min-width: 110px; }
+.hand-cond-list .hand-command { min-width: 240px; flex: 1; }
+.hand-grow { flex: 1; min-width: 220px; }
+.hand-time { width: 110px; }
+.hand-bind-state { color: var(--ayla-error) !important; }
+
+/* Dotfiles */
+.hand-dot-group h3 { margin: 8px 0 4px; font-family: var(--hand-mono); font-size: 12px; font-weight: 500; color: var(--ayla-text-faint); }
+.hand-dot-group h3::before { content: '## '; color: var(--ayla-accent); opacity: .7; }
+.hand-dot-group h3 small { color: var(--ayla-text-faint); margin-left: 4px; }
+.hand-dot-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--ayla-border-soft); }
+.hand-dot-files > li { position: relative; border-bottom: 1px solid var(--ayla-border-soft); }
+.app-shell .hand-dot-file { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 8px; border: 0; border-radius: 0; background: none; color: var(--ayla-text); text-align: left; }
+.app-shell .hand-dot-file:hover, .app-shell .hand-dot-file:focus-visible { background: var(--ayla-hover); }
+.hand-dot-file svg { flex: none; color: var(--ayla-text-faint); }
+.hand-dot-file.apagado .hand-dot-path { text-decoration: line-through; color: var(--ayla-text-soft); }
+.hand-dot-file.fora svg, .hand-dot-file.novo svg { color: var(--ayla-accent); }
+.hand-dot-path { font-family: var(--hand-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.hand-dot-warn { display: inline-flex; color: var(--ayla-error); }
+.hand-dot-warn svg { color: var(--ayla-error) !important; }
+.hand-dot-tip { display: none; position: absolute; z-index: 5; left: 28px; top: calc(100% - 2px); width: min(420px, 90%); padding: 10px 12px; border: 1px solid var(--ayla-border-strong); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--hand-term); box-shadow: 0 10px 30px #0008; font-size: 13px; pointer-events: none; }
+.hand-dot-tip p { margin: 0; line-height: 1.45; }
+.hand-dot-tip-warn { margin-top: 6px !important; color: var(--ayla-error); }
+.hand-dot-files > li:hover .hand-dot-tip, .hand-dot-file:focus-visible + .hand-dot-tip { display: block; }
+.dialog.hand-file-dialog { width: min(980px, 94vw); max-width: none; max-height: 88vh; display: flex; flex-direction: column; gap: 10px; }
+.hand-file-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.hand-file-head h2 { margin: 0; font-family: var(--hand-mono); font-size: 14px; overflow-wrap: anywhere; }
+.hand-file-head small { color: var(--ayla-text-faint); font-size: 12.5px; }
+.hand-file-text { max-height: none; flex: 1; min-height: 120px; overflow: auto; margin: 0; }
