@@ -8,7 +8,9 @@ import './AthenaCalendar.css';
 
 /** Uma ocorrência num dia (os itens que repetem aparecem em cada dia). */
 type Item = { id: string; text: string; date: string; time: string | null; repeat: string; notify: boolean; past: boolean; start_date: string; repeat_label: string; alerts: number[] };
-type Range = { items: Item[]; notes: string[] };
+type Holiday = { data: string; nome: string; tipo: 'nacional' | 'estadual' | 'municipal' | 'facultativo' };
+type Range = { items: Item[]; notes: string[]; holidays?: Holiday[] };
+const HOLIDAY_KIND: Record<Holiday['tipo'], string> = { nacional: 'Feriado nacional', estadual: 'Feriado estadual', municipal: 'Feriado municipal', facultativo: 'Ponto facultativo' };
 /** Data e hora como digitadas (DD/MM/AAAA e HH:MM, 24 h); convertidas ao salvar. */
 type Draft = { id: string | null; text: string; date: string; allDay: boolean; time: string; repeat: string; alerts: Alert[] };
 const UNITS: [AlertUnit, string][] = [['na-hora', 'Na hora do evento'], ['minutos', 'Minutos antes'], ['horas', 'Horas antes'], ['dias', 'Dias antes']];
@@ -20,12 +22,17 @@ const iso = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.
 const parse = (text: string) => { const [y, m, d] = text.split('-').map(Number); return new Date(y, m - 1, d); };
 const longDay = (text: string) => parse(text).toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
 
-/** Seis semanas (segunda a domingo) que cobrem o mês de `month`. */
-function monthGrid(month: Date): string[] {
+/** Segunda-feira da primeira semana do mês de `month` (início da grade de seis semanas). */
+function monthStart(month: Date): Date {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
-  const start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7));
+  return new Date(first.getFullYear(), first.getMonth(), 1 - ((first.getDay() + 6) % 7));
+}
+/** Seis semanas (segunda a domingo) a partir de `start`. */
+function weeksFrom(start: Date): string[] {
   return Array.from({ length: 42 }, (_, i) => iso(new Date(start.getFullYear(), start.getMonth(), start.getDate() + i)));
 }
+/** Quanto a roda precisa andar para descer uma semana (o touchpad manda passos pequenos). */
+const WHEEL_STEP = 60;
 
 /** Calendário da Athena: notas do dia (só as da Athena), eventos e lembretes, com repetições. */
 /** Campo de data ou hora com máscara que deixa o cursor onde a pessoa clicou ou digitou. */
@@ -47,12 +54,33 @@ function MaskedInput({ value, max, format, onValue, ...rest }: { value: string; 
 
 export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => void; onOpenDay: (date: string) => void }) {
   const today = iso(new Date());
-  const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  // A grade começa numa segunda e mostra seis semanas; a roda do mouse desce ou sobe uma semana.
+  const [start, setStart] = useState(() => monthStart(new Date()));
   const [selected, setSelected] = useState(today);
   const [data, setData] = useState<Range>({ items: [], notes: [] });
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState('');
-  const days = useMemo(() => monthGrid(month), [month]);
+  const days = useMemo(() => weeksFrom(start), [start]);
+  // O mês do título é o do meio da grade (o que ocupa a maior parte dela).
+  const month = useMemo(() => { const mid = parse(days[20]); return new Date(mid.getFullYear(), mid.getMonth(), 1); }, [days]);
+  const grid = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = grid.current;
+    if (!el) return;
+    let acc = 0;
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+      e.preventDefault();
+      // Roda com "linhas" (mouse comum) vale um passo por dente.
+      acc += e.deltaMode === 1 ? Math.sign(e.deltaY) * WHEEL_STEP : e.deltaY;
+      const weeks = Math.trunc(acc / WHEEL_STEP);
+      if (!weeks) return;
+      acc -= weeks * WHEEL_STEP;
+      setStart(s => new Date(s.getFullYear(), s.getMonth(), s.getDate() + weeks * 7));
+    };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, []);
 
   const load = useCallback(() => {
     void native<Range>('calendar_range', { from: days[0], to: days[days.length - 1] }).then(setData).catch(e => setError(errorText(e)));
@@ -71,13 +99,15 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
     return map;
   }, [data.items]);
   const notes = useMemo(() => new Set(data.notes), [data.notes]);
-  const step = (delta: number) => setMonth(m => new Date(m.getFullYear(), m.getMonth() + delta, 1));
-  const goToday = () => { const d = new Date(); setMonth(new Date(d.getFullYear(), d.getMonth(), 1)); setSelected(today); };
-  const pick = (date: string) => {
-    setSelected(date); setDraft(null);
-    const d = parse(date);
-    if (d.getMonth() !== month.getMonth() || d.getFullYear() !== month.getFullYear()) setMonth(new Date(d.getFullYear(), d.getMonth(), 1));
-  };
+  const holidays = useMemo(() => {
+    const map = new Map<string, Holiday[]>();
+    for (const h of data.holidays ?? []) map.set(h.data, [...(map.get(h.data) ?? []), h]);
+    return map;
+  }, [data.holidays]);
+  const step = (delta: number) => setStart(monthStart(new Date(month.getFullYear(), month.getMonth() + delta, 1)));
+  const goToday = () => { setStart(monthStart(new Date())); setSelected(today); };
+  // A grade é contínua: escolher um dia não pula de mês (ele já está à vista).
+  const pick = (date: string) => { setSelected(date); setDraft(null); };
 
   const newDraft = (reminder: boolean, date = selected): Draft => ({ id: null, text: '', date: showDate(date), allDay: !reminder, time: reminder ? '09:00' : '', repeat: 'none', alerts: reminder ? [{ unit: 'na-hora', amount: 1 }] : [] });
   const edit = (item: Item) => setDraft({ id: item.id, text: item.text, date: showDate(item.start_date), allDay: !item.time, time: item.time ?? '', repeat: item.repeat, alerts: [...item.alerts].sort((a, b) => b - a).map(alertFrom) });
@@ -113,24 +143,28 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
     </header>
     {error && <p role="alert" className="app-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
     <div className="calendar-body">
-      <div className="calendar-month" role="grid" aria-label={label}>
+      <div className="calendar-month" role="grid" aria-label={label} ref={grid}>
         {WEEK.map(name => <span key={name} className="calendar-weekday" role="columnheader">{name}</span>)}
         {days.map(date => {
           const items = byDay.get(date) ?? [];
+          const dayHolidays = holidays.get(date) ?? [];
+          const official = dayHolidays.some(h => h.tipo !== 'facultativo');
           const outside = parse(date).getMonth() !== month.getMonth();
           return <button key={date} role="gridcell" aria-selected={date === selected} aria-current={date === today ? 'date' : undefined}
-            className={['calendar-day', outside ? 'outside' : '', date === selected ? 'selected' : '', date === today ? 'today' : ''].join(' ')}
-            aria-label={`${longDay(date)}${notes.has(date) ? ', com nota do dia' : ''}${items.length ? `, ${items.length} ${items.length === 1 ? 'item' : 'itens'}` : ''}`}
+            className={['calendar-day', outside ? 'outside' : '', date === selected ? 'selected' : '', date === today ? 'today' : '', official ? 'holiday' : ''].join(' ')}
+            aria-label={`${longDay(date)}${dayHolidays.map(h => `, ${h.nome} (${HOLIDAY_KIND[h.tipo].toLowerCase()})`).join('')}${notes.has(date) ? ', com nota do dia' : ''}${items.length ? `, ${items.length} ${items.length === 1 ? 'item' : 'itens'}` : ''}`}
             onClick={() => pick(date)} onDoubleClick={() => { pick(date); setDraft(newDraft(false, date)); }}>
             <span className="calendar-number">{parse(date).getDate()}{notes.has(date) && <FileIcon size={11} />}</span>
-            {items.slice(0, 3).map((item, k) => <span key={`${item.id}-${k}`} className={['calendar-chip', item.notify ? 'reminder' : '', item.past ? 'past' : ''].join(' ')}>{item.time && <b>{item.time}</b>}{item.text}</span>)}
-            {items.length > 3 && <span className="calendar-more">+{items.length - 3}</span>}
+            {dayHolidays.map(h => <span key={h.nome} className={`calendar-chip holiday ${h.tipo}`} title={`${h.nome} · ${HOLIDAY_KIND[h.tipo]}`}>{h.nome}</span>)}
+            {items.slice(0, Math.max(1, 3 - dayHolidays.length)).map((item, k) => <span key={`${item.id}-${k}`} className={['calendar-chip', item.notify ? 'reminder' : '', item.past ? 'past' : ''].join(' ')}>{item.time && <b>{item.time}</b>}{item.text}</span>)}
+            {items.length > Math.max(1, 3 - dayHolidays.length) && <span className="calendar-more">+{items.length - Math.max(1, 3 - dayHolidays.length)}</span>}
           </button>;
         })}
       </div>
 
       <aside className="calendar-day-panel" aria-label={longDay(selected)}>
         <h3>{longDay(selected)}</h3>
+        {(holidays.get(selected) ?? []).map(h => <p key={h.nome} className={`calendar-holiday ${h.tipo}`}><b>{h.nome}</b><small>{HOLIDAY_KIND[h.tipo]}</small></p>)}
         <button className="calendar-note" onClick={() => onOpenDay(selected)}>
           <FileIcon size={15} />{notes.has(selected) ? 'Abrir a nota do dia' : 'Criar a nota do dia'}
         </button>

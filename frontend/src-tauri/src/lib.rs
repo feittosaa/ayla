@@ -284,6 +284,16 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             });
+            // Rotinas (Hand › Rotinas): conferidas a cada 20 s; a primeira volta, logo depois de
+            // entrar na sessão, dispara as de "ao ligar o PC".
+            let routines = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                loop {
+                    core::services::rotinas::rotinas_tick(&routines).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                }
+            });
             app.manage(core::organs::Organ::moneta(&directory));
             app.manage(core);
             app.manage(core::pad::Pad::default());
@@ -463,6 +473,60 @@ pub fn run() {
             core::services::ficha_previa,
             core::services::ficha_aplicar,
             core::services::ficha_cancelar,
+            core::services::hand::hand_estado,
+            core::services::hand::hand_pastas,
+            core::services::hand::hand_capturar,
+            core::services::hand::hand_buscar,
+            core::services::hand::hand_planejar,
+            core::services::hand::hand_aplicar,
+            core::services::hand::hand_historico,
+            core::services::hand::hand_desfazer,
+            core::services::hand::hand_programas,
+            core::services::hand::hand_abrir_programa,
+            core::services::hand::hand_abrir,
+            core::services::hand::hand_comando,
+            core::services::hand::hand_janelas,
+            core::services::hand::hand_focar,
+            core::services::hand::hand_fechar,
+            core::services::hand::hand_digitar,
+            core::services::hand::hand_teclas,
+            core::services::hand::hand_clicar,
+            core::services::hand::hand_rolar,
+            core::services::hand::hand_cursor,
+            core::services::hand::hand_tarefa_planejar,
+            core::services::hand::hand_tarefa_executar,
+            core::services::hand::hand_tarefa_responder,
+            core::services::hand::hand_tarefa_parar,
+            core::services::hand::hand_papel_de_parede,
+            core::services::hand::hand_miniatura,
+            core::services::hand_sistema::hand_programas_grade,
+            core::services::hand_sistema::hand_programas_avaliar,
+            core::services::hand_sistema::hand_icone,
+            core::services::hand_sistema::hand_programa_previa,
+            core::services::hand_sistema::hand_programa_desinstalar,
+            core::services::hand_sistema::hand_atalhos,
+            core::services::hand_sistema::hand_atalho_mudar,
+            core::services::hand_sistema::hand_macros,
+            core::services::hand_sistema::hand_macro_salvar,
+            core::services::hand_sistema::hand_macro_apagar,
+            core::services::hand_sistema::hand_macro_rodar,
+            core::services::hand_sistema::hand_gravar_comecar,
+            core::services::hand_sistema::hand_gravar_parar,
+            core::services::hand_sistema::hand_dotfiles_estado,
+            core::services::hand_sistema::hand_dotfiles_conteudo,
+            core::services::hand_sistema::hand_dotfiles_explicar,
+            core::services::hand_sistema::hand_dotfiles_sincronizar,
+            core::services::rotinas::rotinas_lista,
+            core::services::design_doc::design_documento,
+            core::services::feriados::feriados_estado,
+            core::services::feriados::feriados_buscar,
+            core::services::design_doc::design_documento_base,
+            core::services::design_doc::design_documento_atual,
+            core::services::design_doc::design_documento_gravar,
+            core::services::rotinas::rotina_salvar,
+            core::services::rotinas::rotina_ativar,
+            core::services::rotinas::rotina_apagar,
+            core::services::rotinas::rotina_testar,
             core::services::backups_abrir,
             core::services::iris_editor,
             core::services::conversation_discard_empty,
@@ -513,6 +577,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 desktop::clear_rules();
                 if let Some(core) = app.try_state::<Core>() {
+                    core::services::hand::hand_encerrar(&core);
                     core.shutdown();
                 }
                 // O contêiner da Moneta acompanha a Ayla; a versão separada continua como está.

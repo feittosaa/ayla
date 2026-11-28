@@ -1,5 +1,6 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type { FichaCard } from './Ficha';
+import type { HandCard } from '../components/ChatHand';
 
 export type Profile = 'light' | 'moderate' | 'maximum';
 export type Capability = 'text' | 'reasoning' | 'vision' | 'transcription' | 'speech' | 'embedding';
@@ -12,6 +13,8 @@ export type Preferences = {
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
   athena_folder: string; athena_vaults: string[]; athena_git: boolean;
+  /** Athena › Calendários: feriados e onde a pessoa mora (estado e cidade). */
+  calendar?: { feriados: boolean; uf: string; cidade: string };
   response_source: '' | 'local' | 'auto' | 'cloud';
   hidden_sources?: string[];
   appearance: { mode: 'escuro' | 'claro' | 'sistema'; accent: string; dark_background: string; light_background: string; roundness: number; opacity: number; icon_ayla: number; icon_athena: number };
@@ -42,7 +45,7 @@ export type FileKind = 'image' | 'gif' | 'pdf' | 'text' | 'audio' | 'video';
 export type FileInfo = { id: string; name: string; kind: FileKind; bytes: number; created_at: number; conversation_id: string | null; project_id: string | null; message_id: number | null };
 export const fileLabels: Record<FileKind, string> = { image: 'Imagem', gif: 'GIF', pdf: 'PDF', text: 'Texto', audio: 'Áudio', video: 'Vídeo' };
 export type ReplyOrigin = 'cloud' | 'cloud_search';
-export type Message = { id?: number; versions?: number[]; origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; ficha?: FichaCard; created?: CreatedNote[]; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[]; ficha?: FichaCard; created?: CreatedNote[] } | null };
+export type Message = { id?: number; versions?: number[]; origin?: ReplyOrigin | null; role: 'user' | 'assistant'; content: string; complete: boolean; attachments?: FileInfo[]; sources?: Source[]; images?: ImageResults; designs?: DesignCard[]; ficha?: FichaCard; hand?: HandCard; created?: CreatedNote[]; notice?: string; extras?: { images?: ImageResults; sources?: Source[]; designs?: DesignCard[]; ficha?: FichaCard; hand?: HandCard; created?: CreatedNote[] } | null };
 /** Nota que a Ayla criou na resposta (caminho completo, para abrir na Athena). */
 export type CreatedNote = { title: string; note: string };
 /** Design criado pela Ayla na resposta (guardado na Iris › Designs). */
@@ -52,13 +55,13 @@ export type ImageItem = { provider: string; id: string; thumb: string; full: str
 export type ImageResults = { query: string; items: ImageItem[]; links: { name: string; url: string }[] };
 /** Arquivo usado pela Iris numa resposta, com as páginas dos trechos. */
 export type Source = { id: string; name: string; pages: number[]; date?: string; url?: string; note?: string };
-export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'ficha' | 'note_created' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
+export type TaskEvent = { type: 'token' | 'download' | 'suggestion' | 'routing' | 'memory' | 'memory_error' | 'status' | 'sources' | 'origin' | 'images' | 'designs' | 'ficha' | 'hand' | 'note_created' | 'progress'; origin?: ReplyOrigin; percent?: number; done?: number; name?: string; text?: string; received?: number; total?: number; facts?: Fact[]; files?: Source[] } & Partial<ImageResults>;
 export type CapabilityRequest = { id: string; text: string; sensitivity: Sensitivity; reviewed: boolean; request_cloud: boolean; cloud_model: string | null };
 /** Esforço de raciocínio: na nuvem vai para a plataforma; neste computador escolhe entre resposta direta e raciocínio. */
 export type Effort = '' | 'low' | 'medium' | 'high';
 /** Memória pública que pode acompanhar um envio à nuvem, se continuar marcada na revisão. */
 export type Reference = { id: string; content: string };
-export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; edit_of?: number | null; regenerate?: number | null; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean; notes?: string[] };
+export type ChatRequest = Omit<CapabilityRequest, 'text'> & { conversation: string; message: string; edit_of?: number | null; regenerate?: number | null; personality_preview: string | null; web_search: boolean; automatic: boolean; auto_route?: 'local' | 'cloud' | 'search' | null; capability: Capability | null; model: string | null; attachments: string[]; effort: Effort | null; references: Reference[]; bases?: string[]; design?: boolean; hand?: boolean; notes?: string[] };
 /** Nota da Athena oferecida para ir junto à nuvem (o caminho é a chave da busca). */
 export type OfferedNote = { title: string; path: string; cut: boolean };
 /** Nota encontrada que fica neste computador por parecer sensível. */

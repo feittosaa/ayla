@@ -298,6 +298,17 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
         action.connect_activate(move |_, _| { let _ = sender.send(mode); });
         instance.add_action(&action);
     }
+    // Hand: o atalho global (`ayla --hand-parar`) para a tarefa em andamento na Ayla aberta.
+    let stop = gio::SimpleAction::new("hand-stop", None);
+    stop.connect_activate(|_, _| { crate::core::hand_agent::parar(); });
+    instance.add_action(&stop);
+    // Macros por atalho (`ayla --macro <id>`): roda na Ayla aberta.
+    let macro_action = gio::SimpleAction::new("hand-macro", Some(webkit2gtk::glib::VariantTy::STRING));
+    macro_action.connect_activate(|_, parameter| {
+        let Some(id) = parameter.and_then(|p| p.str()).map(str::to_string) else { return };
+        tauri::async_runtime::spawn(rodar_macro_do_atalho(id));
+    });
+    instance.add_action(&macro_action);
     let action = gio::SimpleAction::new("open-files", Some(webkit2gtk::glib::VariantTy::STRING));
     let sender = tx.clone();
     action.connect_activate(move |_, parameter| {
@@ -306,8 +317,16 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
     });
     instance.add_action(&action);
     instance.register(gio::Cancellable::NONE).map_err(|e| e.to_string())?;
+    let hand_stop = std::env::args().nth(1).as_deref() == Some("--hand-parar");
+    let macro_id = (std::env::args().nth(1).as_deref() == Some("--macro")).then(|| std::env::args().nth(2)).flatten();
     if instance.is_remote() {
-        if let Some(request) = open {
+        if let Some(id) = &macro_id {
+            instance.activate_action("hand-macro", Some(&id.to_variant()));
+            if let Some(bus) = instance.dbus_connection() { bus.flush_sync(gio::Cancellable::NONE).map_err(|e| e.to_string())?; }
+        } else if hand_stop {
+            instance.activate_action("hand-stop", None);
+            if let Some(bus) = instance.dbus_connection() { bus.flush_sync(gio::Cancellable::NONE).map_err(|e| e.to_string())?; }
+        } else if let Some(request) = open {
             let text = serde_json::to_string(&request).map_err(|e| e.to_string())?;
             instance.activate_action("open-files", Some(&text.to_variant()));
             if let Some(bus) = instance.dbus_connection() { bus.flush_sync(gio::Cancellable::NONE).map_err(|e| e.to_string())?; }
@@ -317,11 +336,27 @@ pub fn register(launch: Launch, open: Option<OpenRequest>) -> Result<Option<(gio
         }
         return Ok(None);
     }
+    // Sem a Ayla aberta, não há tarefa para parar.
+    if hand_stop { return Ok(None); }
+    // Macro com a Ayla fechada: roda aqui mesmo, sem janela, e sai.
+    if let Some(id) = macro_id {
+        tauri::async_runtime::block_on(rodar_macro_do_atalho(id));
+        crate::core::hand_input::parar_mouse(&data_root().join("hand"));
+        return Ok(None);
+    }
     if let Some(request) = open {
         // Primeira instância aberta pela Athena: `Launch::Athena` mostra só a janela dela.
         enqueue(request);
     }
     Ok(Some((instance, rx)))
+}
+
+/// Macro pedida por um atalho do Hyprland: espera soltar as teclas do atalho e roda.
+async fn rodar_macro_do_atalho(id: String) {
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    if let Err(error) = crate::core::services::hand_sistema::rodar_macro(data_root().join("hand"), id).await {
+        let _ = notify_rust::Notification::new().appname("Ayla").summary("A macro não rodou").body(&error).icon(&notification_icon()).timeout(5000).show();
+    }
 }
 
 #[derive(Default)]

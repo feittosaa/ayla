@@ -1,10 +1,11 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Markdown from './Markdown';
 import type { EditorView } from '@codemirror/view';
 import MediaView from './MediaView';
 import { errorText, native } from '../services/Desktop';
 import { base64 } from '../services/Audio';
-import { attachmentUrl, changeBanner, embedResolver, folderOf, frontmatter, isAttachment, titleOf, type Banner as BannerSettings } from '../services/Wiki';
+import { findAll } from '../services/Find';
+import { attachmentUrl, changeBanner, embedResolver, folderOf, frontmatter, isAttachment, removeBanner, setAliases, titleOf, type Banner as BannerSettings } from '../services/Wiki';
 
 const AthenaEditor = lazy(() => import('./AthenaEditor'));
 /** Link sendo digitado antes do cursor ("[[Bo|"): o que já foi escrito e onde começa. */
@@ -49,11 +50,74 @@ function BannerPicker({ root, rootName, images, onPick, onClose }: {
   </div>;
 }
 
-function Banner({ url, settings, onChange }: {
+/** Apelidos da nota (`aliases`, como no Obsidian): criar, editar (clique) e remover (dois passos). */
+function NoteAliases({ aliases, onChange }: { aliases: string[]; onChange: (next: string[]) => void }) {
+  const [draft, setDraft] = useState<{ index: number; value: string } | null>(null);
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [problem, setProblem] = useState('');
+  function commit() {
+    if (!draft) return;
+    const value = draft.value.replace(/\s+/g, ' ').trim();
+    setDraft(null);
+    if (!value || value === aliases[draft.index]) return;
+    if (aliases.some((alias, i) => i !== draft.index && alias.toLowerCase() === value.toLowerCase())) { setProblem(`“${value}” já é um apelido desta nota.`); return; }
+    setProblem('');
+    onChange(draft.index < 0 ? [...aliases, value] : aliases.map((alias, i) => i === draft.index ? value : alias));
+  }
+  const field = (index: number) => <input className="alias-input" autoFocus value={draft?.value ?? ''} maxLength={120}
+    aria-label={index < 0 ? 'Novo apelido' : `Editar o apelido ${aliases[index]}`} placeholder="Apelido"
+    onChange={event => setDraft({ index, value: event.target.value })} onBlur={commit}
+    onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commit(); } if (event.key === 'Escape') setDraft(null); }} />;
+  return <div className="note-aliases" role="group" aria-label="Apelidos">
+    <span className="note-aliases-label">Apelidos</span>
+    <div className="note-aliases-list">
+      {aliases.map((alias, index) => draft?.index === index ? <span key={alias}>{field(index)}</span>
+        : removing === index ? <span key={alias} className="property-chip alias-chip removing">
+            Remover “{alias}”?
+            <button type="button" className="alias-confirm" onClick={() => { setRemoving(null); onChange(aliases.filter((_, i) => i !== index)); }}>Remover</button>
+            <button type="button" className="alias-action" aria-label="Cancelar" onClick={() => setRemoving(null)}>×</button>
+          </span>
+        : <span key={alias} className="property-chip alias-chip">
+            <button type="button" className="alias-name" title="Editar apelido" onClick={() => { setRemoving(null); setProblem(''); setDraft({ index, value: alias }); }}>{alias}</button>
+            <button type="button" className="alias-action" aria-label={`Remover o apelido ${alias}`} title="Remover" onClick={() => { setDraft(null); setRemoving(index); }}>×</button>
+          </span>)}
+      {draft?.index === -1 ? field(-1)
+        : <button type="button" className="alias-add" onClick={() => { setRemoving(null); setProblem(''); setDraft({ index: -1, value: '' }); }}>+ Apelido</button>}
+    </div>
+    {problem && <p className="alias-problem" role="alert">{problem}</p>}
+  </div>;
+}
+
+/** Ctrl+F na nota: caixa no canto superior direito com o total, anterior/próxima e fechar. */
+function NoteFind({ query, count, current, input, onQuery, onStep, onClose }: {
+  query: string; count: number; current: number; input: { current: HTMLInputElement | null };
+  onQuery: (value: string) => void; onStep: (delta: number) => void; onClose: () => void;
+}) {
+  return <div className="note-find-anchor"><div className="note-find" role="search" aria-label="Buscar nesta nota">
+    <input ref={input} type="search" value={query} placeholder="Buscar na nota" aria-label="Buscar na nota" autoFocus
+      onChange={event => onQuery(event.target.value)}
+      onKeyDown={event => {
+        if (event.key === 'Enter') { event.preventDefault(); onStep(event.shiftKey ? -1 : 1); }
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
+      }} />
+    <span className="note-find-count" role="status">{query.trim() ? count ? `${current + 1} de ${count}` : 'Nada' : ''}</span>
+    <button type="button" className="icon-button" aria-label="Anterior" title="Anterior (Shift+Enter)" disabled={!count} onClick={() => onStep(-1)}>↑</button>
+    <button type="button" className="icon-button" aria-label="Próxima" title="Próxima (Enter)" disabled={!count} onClick={() => onStep(1)}>↓</button>
+    <button type="button" className="icon-button" aria-label="Fechar a busca" title="Fechar (Esc)" onClick={onClose}>×</button>
+  </div></div>;
+}
+
+/** Nota que recebeu o último clique: o Ctrl+F vale para ela quando o foco não está em nenhuma. */
+let lastNote: HTMLElement | null = null;
+
+function Banner({ url, settings, onChange, onReplace, onRemove }: {
   url: string; settings: BannerSettings; onChange?: (key: 'banner_height' | 'banner_y', value: number) => void;
+  /** Escolher outra imagem / tirar o banner (só ao editar). */
+  onReplace?: () => void; onRemove?: () => void;
 }) {
   const [failed, setFailed] = useState(false);
   const [adjusting, setAdjusting] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const frame = useRef<HTMLDivElement>(null);
   const drag = useRef<{ y: number; height: number } | null>(null);
   const [dragHeight, setDragHeight] = useState<number>();
@@ -92,7 +156,14 @@ function Banner({ url, settings, onChange }: {
     </div>
     {adjusting && onChange && <div className="note-banner-controls" role="group" aria-label="Ajustes do banner">
       <label>Posição vertical <input type="range" min="0" max="100" value={Math.round(settings.y)} onChange={event => onChange('banner_y', Number(event.currentTarget.value))} /> <output>{Math.round(settings.y)}%</output></label>
-      <button type="button" className="ghost-button" onClick={() => setAdjusting(false)}>Fechar</button>
+      {onReplace && <button type="button" className="ghost-button" aria-haspopup="dialog" onClick={() => { setRemoving(false); onReplace(); }}>Trocar imagem</button>}
+      {onRemove && (removing
+        ? <span className="note-banner-remove" role="group" aria-label="Confirmar remoção do banner">Remover o banner?
+            <button type="button" className="danger-action" onClick={() => { setRemoving(false); setAdjusting(false); onRemove(); }}>Remover</button>
+            <button type="button" className="ghost-button" onClick={() => setRemoving(false)}>Cancelar</button>
+          </span>
+        : <button type="button" className="ghost-button danger" onClick={() => setRemoving(true)}>Remover banner</button>)}
+      <button type="button" className="ghost-button" onClick={() => { setRemoving(false); setAdjusting(false); }}>Fechar</button>
     </div>}
   </section>;
 }
@@ -133,6 +204,36 @@ type Props = {
   register: (flush: (() => Promise<void>) | null) => void;
 };
 
+/** Onde a pessoa parou em cada nota, para voltar ali ao reabrir (pedido do usuário, 28/11/2026): rolagem,
+ * cursor e a distância do cursor ao topo da área da nota. Fica só neste computador (armazenamento da
+ * janela, as 300 notas mais recentes); a cópia em memória evita reler o armazenamento a cada troca. */
+type Position = { top: number; caret?: number; offset?: number };
+const POSITIONS = 'athena-note-positions';
+let positions: Map<string, Position> | null = null;
+let persist: ReturnType<typeof setTimeout> | null = null;
+function allPositions() {
+  if (!positions) {
+    positions = new Map();
+    try {
+      const saved = JSON.parse(localStorage.getItem(POSITIONS) ?? '{}') as Record<string, Position | number>;
+      for (const [key, value] of Object.entries(saved ?? {})) {
+        const position = typeof value === 'number' ? { top: value } : value;
+        if (position && Number.isFinite(position.top)) positions.set(key, position);
+      }
+    } catch { /* posições ilegíveis: começa do topo */ }
+  }
+  return positions;
+}
+function savePosition(key: string, position: Position) {
+  const all = allPositions(); all.delete(key); all.set(key, position);
+  for (const old of [...all.keys()].slice(0, Math.max(0, all.size - 300))) all.delete(old);
+  if (persist) clearTimeout(persist);
+  persist = setTimeout(() => {
+    persist = null;
+    try { localStorage.setItem(POSITIONS, JSON.stringify(Object.fromEntries(all))); } catch { /* armazenamento cheio: só não lembra */ }
+  }, 300);
+}
+
 /** Uma nota aberta numa aba: leitura (banner, título, propriedades, Markdown) ou edição com
  * gravação automática. Grava o que estiver pendente ao trocar de aba ou fechar. */
 export default function AthenaNote(props: Props) {
@@ -147,6 +248,56 @@ export default function AthenaNote(props: Props) {
   /** Sugestão destacada: Enter ou Tab a escolhe; as setas mudam o destaque (como no Obsidian). */
   const [highlight, setHighlight] = useState(0);
   const editor = useRef<EditorView | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const positionKey = `${tab.root}|${tab.path}`;
+  const [finding, setFinding] = useState<{ query: string; current: number; step: number } | null>(null);
+  const findInput = useRef<HTMLInputElement>(null);
+  const [viewMatches, setViewMatches] = useState<Range[]>([]);
+  const loaded = content !== null;
+  /** Guarda a tela e o cursor desta nota (com o cursor, também onde ele aparecia na tela). */
+  const remember = useCallback(() => {
+    const box = scroller.current; if (!box?.isConnected) return;
+    const view = editor.current; const position: Position = { top: Math.round(box.scrollTop) };
+    if (view) {
+      const caret = view.state.selection.main.head; position.caret = caret;
+      const at = view.coordsAtPos(caret);
+      if (at) position.offset = Math.round(at.top - box.getBoundingClientRect().top);
+    }
+    savePosition(positionKey, position);
+  }, [positionKey]);
+  /** Até a nota assentar (banner, imagens, editor carregado sob demanda; até 3 s), recoloca a tela onde estava: pelo cursor quando
+   * há editor (o cursor volta à mesma altura), senão pela rolagem. Para quando a pessoa mexe. */
+  const restoring = useRef<{ until: number; caretSet: boolean } | null>(null);
+  const settle = useCallback(() => {
+    const box = scroller.current; const saved = allPositions().get(positionKey); const state = restoring.current;
+    if (!box || !saved || !state || performance.now() > state.until) { restoring.current = null; return; }
+    const view = editor.current;
+    if (view && saved.caret !== undefined) {
+      const caret = Math.min(saved.caret, view.state.doc.length);
+      if (!state.caretSet) { state.caretSet = true; view.dispatch({ selection: { anchor: caret } }); view.contentDOM.focus({ preventScroll: true }); box.scrollTop = saved.top; }
+      const at = view.coordsAtPos(caret);
+      if (at && saved.offset !== undefined) box.scrollTop += at.top - box.getBoundingClientRect().top - saved.offset;
+      else box.scrollTop = saved.top;
+    } else box.scrollTop = saved.top;
+    requestAnimationFrame(settle);
+  }, [positionKey]);
+  useEffect(() => {
+    const box = scroller.current; if (!box || !loaded) return;
+    if (allPositions().has(positionKey)) { restoring.current = { until: performance.now() + 3000, caretSet: false }; requestAnimationFrame(settle); }
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const userMoved = () => { restoring.current = null; };
+    const onScroll = () => { if (restoring.current) return; if (pending) clearTimeout(pending); pending = setTimeout(remember, 200); };
+    const events = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const;
+    for (const name of events) box.addEventListener(name, userMoved, { passive: true });
+    box.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      if (pending) clearTimeout(pending); restoring.current = null;
+      for (const name of events) box.removeEventListener(name, userMoved);
+      box.removeEventListener('scroll', onScroll);
+    };
+  }, [positionKey, loaded, remember, settle]);
+  // Ao sair da nota (outra nota, outra aba, fechar), guarda antes de o editor e a página sumirem.
+  useLayoutEffect(() => () => { if (!restoring.current) remember(); }, [remember]);
   const stamp = useRef<number | null>(null); const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dirty = useRef(false); const latest = useRef('');
   const saving = useRef<Promise<void> | null>(null);
@@ -254,7 +405,8 @@ export default function AthenaNote(props: Props) {
         const expected = stamp.current;
         if (expected === null) return;
         const result = await native<{ content: string; modified: number }>('athena_set_banner', {
-          root: tab.root, path: tab.path, content: latest.current, expected, image,
+          // Outra imagem: a posição da anterior não serve; a altura fica.
+          root: tab.root, path: tab.path, content: removeBanner(latest.current, ['banner_y']), expected, image,
         });
         apply(result);
         events.current.onStatus('Salva');
@@ -289,9 +441,11 @@ export default function AthenaNote(props: Props) {
     change(text.slice(0, text.length - prior.length) + body.replace(/\n/g, newline));
     setSuggest(linkAt(body, caret));
     setHighlight(0);
+    if (!restoring.current) remember();
   }
   // Cursor levado para fora do link (clique ou setas, sem Enter): a lista fecha. Só digitar a abre.
   function caretMoved(caret: number) {
+    if (!restoring.current) remember();
     setSuggest(current => {
       if (!current) return current;
       const next = linkAt(editor.current?.state.doc.toString() ?? '', caret);
@@ -331,6 +485,68 @@ export default function AthenaNote(props: Props) {
   }
 
   const note = useMemo(() => frontmatter(content ?? ''), [content]);
+  // Busca: no editor, no texto da nota (o editor só desenha o que está na tela); no modo Ver, no
+  // texto mostrado, destacado sem mexer no HTML (CSS Custom Highlight).
+  const findQuery = finding?.query ?? '';
+  const editMatches = useMemo(() => tab.editing && findQuery.trim() ? findAll(editor.current?.state.doc.toString() ?? note.body.replace(/\r\n/g, '\n'), findQuery) : [],
+    [tab.editing, findQuery, note.body]);
+  useEffect(() => {
+    if (tab.editing || !findQuery.trim()) { setViewMatches([]); return; }
+    const page = scroller.current?.querySelector('article.note-page'); if (!page) return;
+    const ranges: Range[] = [];
+    const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT, { acceptNode: node =>
+      node.parentElement?.closest('.note-find, .note-aliases, input, textarea, button, script, style') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    for (let node = walker.nextNode(); node && ranges.length < 2000; node = walker.nextNode()) {
+      for (const [from, to] of findAll((node as Text).data, findQuery, 2000 - ranges.length)) {
+        const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to); ranges.push(range);
+      }
+    }
+    setViewMatches(ranges);
+  }, [tab.editing, findQuery, content]);
+  const findCount = tab.editing ? editMatches.length : viewMatches.length;
+  const findCurrent = finding && findCount ? Math.min(finding.current, findCount - 1) : 0;
+  useEffect(() => {
+    const registry = typeof CSS !== 'undefined' && 'highlights' in CSS ? CSS.highlights : null;
+    if (!registry || tab.editing || !viewMatches.length) return;
+    registry.set('athena-find', new Highlight(...viewMatches));
+    registry.set('athena-find-current', new Highlight(viewMatches[findCurrent]));
+    return () => { registry.delete('athena-find'); registry.delete('athena-find-current'); };
+  }, [tab.editing, viewMatches, findCurrent]);
+  // Modo Ver: leva a ocorrência atual a um terço da altura da nota.
+  const findStep = finding?.step;
+  useEffect(() => {
+    const box = scroller.current; const range = viewMatches[findCurrent];
+    if (tab.editing || !box || !range) return;
+    const at = range.getBoundingClientRect(); const frame = box.getBoundingClientRect();
+    if (at.top < frame.top + 60 || at.bottom > frame.bottom - 20) box.scrollTop += at.top - frame.top - box.clientHeight / 3;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findStep, viewMatches]);
+  const editorFind = useMemo(() => tab.editing && finding && editMatches.length ? { matches: editMatches, current: findCurrent, step: finding.step } : null,
+    [tab.editing, finding, editMatches, findCurrent]);
+  function closeFind() { setFinding(null); if (tab.editing) editor.current?.focus(); }
+  function stepFind(delta: number) {
+    setFinding(state => state && findCount ? { ...state, current: (Math.min(state.current, findCount - 1) + delta + findCount) % findCount, step: state.step + 1 } : state);
+  }
+  // Ctrl+F: na nota com o foco ou, sem foco em nenhuma, na última clicada (ou na única visível).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'f') return;
+      const box = scroller.current; if (!box || !box.offsetParent) return;
+      const focused = document.activeElement;
+      const owner = focused instanceof HTMLElement ? focused.closest('.note-scroll') : null;
+      const visible = [...document.querySelectorAll<HTMLElement>('.note-scroll')].filter(n => n.offsetParent);
+      const mine = owner ? owner === box : (lastNote && visible.includes(lastNote) ? lastNote === box : visible[0] === box);
+      if (!mine) return;
+      event.preventDefault();
+      const picked = tab.editing ? (() => { const v = editor.current; if (!v) return ''; const r = v.state.selection.main; return v.state.sliceDoc(r.from, r.to); })()
+        : (window.getSelection()?.toString() ?? '');
+      const seed = picked && !picked.includes('\n') && picked.length <= 80 ? picked : '';
+      setFinding(state => ({ query: seed || state?.query || '', current: 0, step: (state?.step ?? 0) + 1 }));
+      requestAnimationFrame(() => { findInput.current?.focus(); findInput.current?.select(); });
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [tab.editing]);
   // Pelo título ou por um apelido (sem diferenciar acentos); o apelido vira o texto do link.
   // Anexos (imagens, PDFs) também entram, com a extensão, como no Obsidian; depois de "![[", vêm primeiro.
   const { files } = props;
@@ -372,9 +588,13 @@ export default function AthenaNote(props: Props) {
   }
   if (failed) return <div className="note-scroll"><article className="note-page"><h1 className="note-title">{title}</h1><p role="alert" className="app-error">{failed}</p></article></div>;
   if (content === null) return <div className="note-scroll" aria-busy="true" />;
-  return <div className="note-scroll" onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
+  return <div className="note-scroll" ref={scroller} onPointerDown={event => { lastNote = event.currentTarget; }} onDoubleClick={() => { if (!tab.editing) props.onEditing(true); }}>
+    {finding && <NoteFind query={finding.query} count={findCount} current={findCurrent} input={findInput}
+      onQuery={value => setFinding(state => ({ query: value, current: 0, step: (state?.step ?? 0) + 1 }))} onStep={stepFind} onClose={closeFind} />}
     {note.banner ? <Banner key={note.banner.target} url={attachmentUrl(tab.root, note.banner.target)} settings={note.banner.height || !props.bannerHeight ? note.banner : { ...note.banner, height: props.bannerHeight }}
-      onChange={tab.editing && !pasting ? (key, value) => change(changeBanner(latest.current, key, value)) : undefined} />
+      onChange={tab.editing && !pasting ? (key, value) => change(changeBanner(latest.current, key, value)) : undefined}
+      onReplace={tab.editing && !pasting ? () => setChoosingBanner(true) : undefined}
+      onRemove={tab.editing && !pasting ? () => change(removeBanner(latest.current)) : undefined} />
       : <div className="note-banner-margin">
         <button type="button" className="ghost-button" disabled={pasting} aria-haspopup="dialog" onClick={() => setChoosingBanner(true)}>Adicionar banner</button>
       </div>}
@@ -383,6 +603,7 @@ export default function AthenaNote(props: Props) {
       {renaming !== null
         ? <form onSubmit={e => { e.preventDefault(); rename(renaming); }}><input className="athena-rename" autoFocus value={renaming} maxLength={120} placeholder="Título" aria-label="Título da nota (também o nome do arquivo)" onFocus={e => e.target.select()} onChange={e => setRenaming(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { renamingNow.current = true; setRenaming(null); props.onTitled?.(); } }} onBlur={() => rename(renaming)} /></form>
         : <h1 className="note-title" title="Clique para renomear" onClick={() => { renamingNow.current = false; setRenaming(title); }}>{title}</h1>}
+      <NoteAliases aliases={note.aliases} onChange={next => change(setAliases(latest.current, next))} />
       {tab.editing
         ? <div className="athena-edit">
             <div className="athena-toolbar" role="toolbar" aria-label="Formatação">
@@ -398,7 +619,7 @@ export default function AthenaNote(props: Props) {
             <Suspense fallback={<div className="athena-visual-editor" aria-busy="true" />}>
               <AthenaEditor editor={editor} root={tab.root} value={note.body} readOnly={pasting}
               autoFocus={renaming === null && !note.body.trim()} onChange={typed} onPaste={pasteImage}
-              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} onCaret={caretMoved} embed={embed} media={files} />
+              onBlur={() => { setTimeout(() => setSuggest(null), 150); void flush(); }} onEscape={() => setSuggest(null)} onSuggestKey={suggestKey} onLink={follow} onCaret={caretMoved} onReady={() => { if (restoring.current) restoring.current.caretSet = false; }} embed={embed} media={files} find={editorFind} />
             </Suspense>
           </div>
         : <>

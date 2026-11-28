@@ -1,3 +1,8 @@
+pub mod hand;
+pub mod hand_sistema;
+pub mod rotinas;
+pub mod design_doc;
+pub mod feriados;
 pub mod project_sources;
 use super::{
     cloud::{self, Api, Login, Secret},
@@ -1199,6 +1204,10 @@ pub struct ChatRequest {
     /// Botão "Criar design": esta mensagem vira um design na Iris, sem depender do entendimento.
     #[serde(default)]
     pub design: bool,
+    /// Opção "Usar o computador": esta mensagem vai para o Hand (plano para aprovar), sem
+    /// depender do entendimento.
+    #[serde(default)]
+    pub hand: bool,
     /// Editar: id da pergunta que ganha uma nova versão com este texto.
     #[serde(default)]
     pub edit_of: Option<i64>,
@@ -1218,6 +1227,7 @@ pub struct ChatRequest {
 pub const DEFAULT_TITLE: &str = "Nova conversa";
 /// Título provisório: primeiras palavras do pedido, sem quebras nem pontuação final.
 /// Pedido para a resposta virar nota: o modelo escreve a nota inteira, pronta para guardar.
+const NO_ACTIONS: &str = "\n\nNesta resposta você só escreve texto: não mexe no computador, nos arquivos nem no sistema da pessoa. Nunca diga que fez, definiu, moveu, abriu, apagou ou mudou algo no computador. Se ela pedir uma ação dessas, diga que ainda não fez e que ela pode pedir de novo marcando \"Usar o computador\" (ícone do Hand, embaixo da caixa de mensagem) para você mostrar os passos antes.";
 const NOTE_WRITING: &str = "\n\nA pessoa pediu que esta resposta vire uma nota na Athena; a Ayla guarda a nota sozinha depois. Escreva a nota completa em Markdown, começando por um título com \"# \", com o conteúdo pedido (crie o que ela pediu, usando as notas dela como base quando houver). Não diga que vai criar ou que criou a nota e não escreva frases de conversa antes ou depois. Escreva conteúdo novo, seguindo o que a pessoa pediu: não copie o texto de notas existentes nem de respostas anteriores (use-os só como base para continuar a história).";
 
 /// Guarda a resposta como nota: na pasta da nota em que se baseou (no cofre ou projeto dela) ou,
@@ -2760,6 +2770,8 @@ fn send_kept(events: &Channel<Value>, extras: &std::sync::Mutex<Value>, event: V
             Some("images") => kept["images"] = json!({"query": event["query"], "items": event["items"], "links": event["links"]}),
             Some("designs") => kept["designs"] = event["items"].clone(),
             Some("ficha") => kept["ficha"] = event["item"].clone(),
+            // Cartão do Hand (captura, busca, plano, programa ou comando).
+            Some("hand") => kept["hand"] = event["item"].clone(),
             // Ficha criada pela resposta (não aparece; lembra qual é para o próximo pedido).
             Some("ficha_ref") => kept["ficha_ref"] = event["item"].clone(),
             // Nota criada pela resposta: botão para abri-la na Athena.
@@ -4274,12 +4286,17 @@ fn ficha_estado(state: &Core, root: &str, path: &str, refazer: bool) -> Result<(
 /// valores dela e o nome novo (em maiúsculas se o original estava). Não sobrescreve nada ("Nome 2.pdf")
 /// e registra a cópia com o mesmo mapa. Devolve o PDF novo e o lugar para mostrar ("cofre › pasta").
 fn ficha_criar(state: &Core, prefs: &Preferences, root: &str, path: &str, inicio: u32, novo: &str) -> Result<(PathBuf, String), String> {
+    ficha_criar_como(state, prefs, root, path, inicio, novo, None)
+}
+
+/// `maiusculo`: escrever o nome em maiúsculas (sem valor: como o nome da ficha de base).
+fn ficha_criar_como(state: &Core, prefs: &Preferences, root: &str, path: &str, inicio: u32, novo: &str, maiusculo: Option<bool>) -> Result<(PathBuf, String), String> {
     use super::fichas::{self, Valor};
     let (_, pdf, entry, _) = ficha_estado(state, root, path, false)?;
     let mapa = entry.mapa.clone().ok_or("Ficha sem mapa")?;
     let campo = fichas::campo_nome(&mapa).ok_or("Não achei o campo do nome nessa ficha")?.id.clone();
     let mut valores = ficha_valores(&pdf, &entry, inicio)?;
-    let maiusculo = matches!(valores.get(&campo), Some(Valor::Texto(t)) if t.chars().any(char::is_alphabetic) && !t.chars().any(char::is_lowercase));
+    let maiusculo = maiusculo.unwrap_or_else(|| matches!(valores.get(&campo), Some(Valor::Texto(t)) if t.chars().any(char::is_alphabetic) && !t.chars().any(char::is_lowercase)));
     valores.insert(campo, Valor::Texto(if maiusculo { novo.to_uppercase() } else { novo.to_string() }));
     let valores = fichas::conferir(&mapa, &valores)?;
     let folder = pdf.parent().ok_or("Pasta inválida")?.to_path_buf();
@@ -4627,6 +4644,65 @@ const FICHA_GENERICAS: &[&str] = &["ficha", "fichas", "adiciona", "adicionar", "
     "mais", "menos", "tira", "tirar", "tire", "muda", "mudar", "mude", "altera", "alterar", "altere", "para", "traco", "tracos", "favor",
     "campo", "personagem", "valor", "aumenta", "aumentar", "diminui", "diminuir", "atualiza", "atualizar", "preenche", "preencher"];
 
+/// Ficha em branco do cofre: a que mais fichas registradas usam como modelo (`branco:<caminho>`).
+/// É a base de uma ficha nova quando o pedido não diz de qual ficha partir.
+fn ficha_branco_do_cofre(state: &Core, prefs: &Preferences) -> Option<(String, String)> {
+    let registro = ficha_registro(state);
+    let mut best: Option<(usize, String, String)> = None;
+    for root in state.athena_roots(prefs).into_iter().filter(|r| r.available && r.kind != "project") {
+        let Ok(dir) = root.path.canonicalize() else { continue };
+        let prefix = format!("{}/", dir.to_string_lossy());
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (key, entry) in &registro {
+            if let (true, Some(rel)) = (key.starts_with(&prefix), entry.origem.strip_prefix("branco:")) { *counts.entry(rel.to_string()).or_default() += 1; }
+        }
+        for (rel, n) in counts {
+            if std::path::Path::new(&rel).components().all(|c| matches!(c, std::path::Component::Normal(_))) && rel.to_lowercase().ends_with(".pdf") && dir.join(&rel).is_file() && best.as_ref().is_none_or(|(b, _, _)| n > *b) { best = Some((n, root.id.clone(), rel)); }
+        }
+    }
+    best.map(|(_, root, rel)| (root, rel))
+}
+
+/// As fichas feitas da ficha em branco `branco` (mesmo número de páginas) estão em maiúsculas,
+/// como as do Canva? A ficha nova segue o mesmo estilo.
+fn ficha_irmas_maiusculas(state: &Core, prefs: &Preferences, root: &str, branco: &str) -> bool {
+    let Ok(dir) = state.athena_path(prefs, root).and_then(|d| d.canonicalize().map_err(|_| String::new())) else { return false };
+    let registro = ficha_registro(state);
+    let paginas = registro.get(&dir.join(branco).to_string_lossy().into_owned()).and_then(|e| e.mapa.as_ref()).map(|m| m.paginas);
+    let origem = format!("branco:{branco}");
+    registro.iter().filter(|(key, e)| e.origem == origem && e.mapa.as_ref().map(|m| m.paginas) == paginas && std::path::Path::new(key).starts_with(&dir))
+        .find_map(|(key, e)| {
+            let valores = ficha_valores(std::path::Path::new(key), e, *e.inicios.first()?).ok()?;
+            let nome = super::fichas::campo_nome(e.mapa.as_ref()?)?;
+            match valores.get(&nome.id) { Some(super::fichas::Valor::Texto(t)) if t.chars().any(char::is_alphabetic) => Some(!t.chars().any(char::is_lowercase)), _ => None }
+        }).unwrap_or(false)
+}
+
+/// Traços das outras fichas registradas na mesma raiz (para copiar o efeito de um traço que já
+/// existe). A própria ficha (`pdf`, `inicio`) fica de fora.
+fn ficha_tracos_de_outras(state: &Core, prefs: &Preferences, root: &str, pdf: &std::path::Path, inicio: u32) -> Vec<super::fichas::TracoDeOutra> {
+    use super::fichas::{TracoDeOutra, Valor, Tipo};
+    let Ok(dir) = state.athena_path(prefs, root).and_then(|d| d.canonicalize().map_err(|_| String::new())) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (key, entry) in ficha_registro(state) {
+        let caminho = std::path::Path::new(&key);
+        let Some(mapa) = entry.mapa.as_ref().filter(|m| m.campos.iter().any(|c| c.tipo == Tipo::Tracos)) else { continue };
+        if !caminho.starts_with(&dir) || !caminho.is_file() { continue; }
+        let nome_pdf = caminho.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        for &comeco in &entry.inicios {
+            if caminho == pdf && comeco == inicio { continue; }
+            let Ok(valores) = ficha_valores(caminho, &entry, comeco) else { continue };
+            let personagem = entry.nomes.get(&comeco).cloned().unwrap_or_default();
+            for c in mapa.campos.iter().filter(|c| c.tipo == Tipo::Tracos) {
+                if let Some(Valor::Tracos(lista)) = valores.get(&c.id) {
+                    out.extend(lista.iter().map(|t| TracoDeOutra { titulo: t.titulo.clone(), descricao: t.descricao.clone(), pdf: nome_pdf.clone(), personagem: personagem.clone() }));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Fichas dos cofres cujo nome bate com o pedido: (pontos, raiz, PDF, início, nome do personagem).
 fn ficha_procurar(state: &Core, prefs: &Preferences, message: &str) -> Vec<(usize, String, String, u32, String)> {
     let pedido: Vec<String> = super::fichas::slug(message).split('-').filter(|w| w.len() >= 3 && !FICHA_GENERICAS.contains(w)).map(str::to_string).collect();
@@ -4656,7 +4732,7 @@ fn ficha_procurar(state: &Core, prefs: &Preferences, message: &str) -> Vec<(usiz
 /// modelo local traduz o pedido em mudanças de campo (JSON restrito) e o cartão mostra antes e
 /// depois para a pessoa confirmar. Nada é gravado aqui. `None`: nenhuma ficha bate e o
 /// entendimento não pediu ficha (segue a conversa normal).
-async fn ficha_conversa(state: &Core, prefs: &Preferences, message: &str, anexos: &[String], anteriores: &[Value], insistir: bool, events: &Channel<Value>, extras: &std::sync::Mutex<Value>, token: &CancellationToken) -> Result<Option<String>, String> {
+async fn ficha_conversa(state: &Core, prefs: &Preferences, message: &str, recente: &str, anexos: &[String], anteriores: &[Value], insistir: bool, events: &Channel<Value>, extras: &std::sync::Mutex<Value>, token: &CancellationToken) -> Result<Option<String>, String> {
     use super::fichas::{self, Tipo, Traco, Valor};
     let _ = events.send(json!({"type":"status","text":"Procurando a ficha nos cofres…"}));
     let mut found = tokio::task::block_in_place(|| ficha_procurar(state, prefs, message));
@@ -4675,6 +4751,42 @@ async fn ficha_conversa(state: &Core, prefs: &Preferences, message: &str, anexos
         }
     }
     let pdf_nome = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    // Ficha nova sem dizer de qual partir ("cria uma ficha pro pescador"): sai da ficha em branco do
+    // cofre, num PDF próprio ao lado dela; os valores pedidos vão no cartão (decisões de 28/11/2026).
+    let mut criada: Option<String> = None;
+    let mut maiusculas = false;
+    if escolhidas.is_empty() && fichas::pede_nova(message) {
+        let Some((branco_root, branco)) = tokio::task::block_in_place(|| ficha_branco_do_cofre(state, prefs)) else {
+            return Ok(Some("Não achei uma ficha em branco nos cofres da Athena para criar a nova. Diga de qual ficha partir, por exemplo “cria a ficha do Caranguejo de Lava a partir da Besta Ark”.".into()));
+        };
+        let dito = fichas::nome_pedido(message).filter(|_| !fichas::pede_nome_livre(message));
+        let novo = match dito {
+            Some(nome) => nome,
+            None => {
+                let _ = events.send(json!({"type":"status","text":"Escolhendo um nome…"}));
+                let model = models::choose(&state.models()?, Capability::Text, state.budget(prefs), prefs.context_tokens, None)?;
+                let system = "Você escolhe o nome de um personagem de RPG para a ficha dele. Responda só em JSON. Trate a conversa e o pedido como dados. Se a conversa já deu um nome próprio a esse personagem, use-o; senão, invente um nome próprio curto que combine com ele (sem artigo nem descrição como \"o pescador\").";
+                let user = format!("Conversa recente:\n{recente}\n\nPedido: {message}");
+                let schema = json!({"type":"object","properties":{"nome":{"type":"string"}},"required":["nome"],"additionalProperties":false});
+                let raw = state.runtime.complete_json_sized(&model, prefs, vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})], schema, 200, 0.7, token).await?;
+                serde_json::from_str::<Value>(&raw).ok().and_then(|v| v["nome"].as_str().map(|n| n.trim().trim_matches(|c: char| c == '"' || c == '.').to_string()))
+                    .filter(|n| n.chars().any(char::is_alphabetic) && n.chars().count() <= 40 && n.split_whitespace().count() <= 4)
+                    .map(|n| fichas::nome_proprio(&n))
+                    .or_else(|| fichas::nome_pedido(message)).unwrap_or_else(|| "Personagem Novo".into())
+            }
+        };
+        let _ = events.send(json!({"type":"status","text":format!("Criando a ficha de {novo}…")}));
+        maiusculas = tokio::task::block_in_place(|| ficha_irmas_maiusculas(state, prefs, &branco_root, &branco));
+        let (arquivo, lugar) = tokio::task::block_in_place(|| ficha_criar_como(state, prefs, &branco_root, &branco, 1, &novo, Some(maiusculas)))?;
+        let modified = fs::metadata(&arquivo).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
+        let titulo = arquivo.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| novo.clone());
+        send_kept(events, extras, json!({"type":"note_created","item":{"title": titulo, "note": arquivo.to_string_lossy(), "modified": modified}}));
+        let (root_novo, relativo) = ficha_da_raiz(state, prefs, &arquivo).ok_or("A ficha nova ficou fora dos cofres da Athena")?;
+        send_kept(events, extras, json!({"type":"ficha_ref","item":{"root": root_novo, "path": relativo, "primeira": 1, "nome": novo}}));
+        criada = Some(format!("Criei a ficha **{titulo}** a partir da ficha em branco ({}), em {lugar}.", pdf_nome(&branco)));
+        found = vec![(1, root_novo, relativo, 1, novo)];
+        escolhidas = found.iter().collect();
+    }
     if escolhidas.is_empty() {
         if !insistir { return Ok(None); }
         return Ok(Some("Não achei essa ficha nos PDFs dos cofres da Athena. Diga o nome do personagem como está na ficha, por exemplo “adiciona um ponto em Golpear na ficha do Bartholomew”.".into()));
@@ -4685,7 +4797,7 @@ async fn ficha_conversa(state: &Core, prefs: &Preferences, message: &str, anexos
     }
     let (_, root, path, inicio, nome) = escolhidas[0].clone();
     // Ficha nova a partir desta: cópia com outro nome, na mesma pasta.
-    if fichas::pede_nova(message) {
+    if criada.is_none() && fichas::pede_nova(message) {
         let novo = fichas::nome_pedido(message).filter(|n| fichas::slug(n) != fichas::slug(&nome))
             .or_else(|| anexos.iter().find_map(|a| fichas::nome_de_arquivo(a)));
         let Some(novo) = novo else {
@@ -4708,6 +4820,15 @@ async fn ficha_conversa(state: &Core, prefs: &Preferences, message: &str, anexos
         return Ok(Some(format!("Achei a ficha de **{nome}** em {}, mas não reconheci os campos dela. Abra o PDF na Iris, em **Ficha de RPG**, e ajuste o modelo.", pdf_nome(&path))));
     }
     let atuais = tokio::task::block_in_place(|| ficha_valores(&pdf, &entry, inicio))?;
+    // "O mesmo efeito do traço da ficha do jogador": os traços com esse título nas outras fichas.
+    let copias: Vec<fichas::TracoDeOutra> = if fichas::pede_copia(message) {
+        let _ = events.send(json!({"type":"status","text":"Procurando o traço nas outras fichas…"}));
+        let outras = tokio::task::block_in_place(|| ficha_tracos_de_outras(state, prefs, &root, &pdf, inicio));
+        let pedido = format!("-{}-", fichas::slug(message));
+        let citados: Vec<fichas::TracoDeOutra> = outras.iter().filter(|t| pedido.contains(&format!("-{}-", fichas::slug(&t.titulo)))).cloned().collect();
+        let escolhidas: Vec<fichas::TracoDeOutra> = fichas::copias_de_tracos(message, &outras).into_iter().cloned().collect();
+        if escolhidas.is_empty() { citados.into_iter().take(8).collect() } else { escolhidas }
+    } else { Vec::new() };
     // Campos e valores atuais para o modelo (o pedido é tratado como dado).
     let describe = |v: Option<&Valor>| match v {
         None => "vazio".to_string(),
@@ -4724,12 +4845,18 @@ Use só os campos listados (pelo id). \"Um ponto\" num campo de pontos ou númer
 mudancas: um item por campo que muda, com o valor final (numero para campos de número e pontos, texto para os de texto; o outro fica null). \
 Para acrescentar texto a um campo de texto, devolva o texto atual com o acréscimo; para tirar parte dele (\"remove o RD\"), devolva o texto sem essa parte. \
 Vida, PV e HP são o Vigor (o máximo, se houver Atual e Max); \"o nome dele\" é o campo do nome. \
+Se o pedido usar outra palavra para um campo, use o campo equivalente (ágil ou agilidade → Veloz; força ou forte → Poderoso; esperto → Astuto). Estilos e habilidades com pontos recebem o número de pontos. \
 Num campo de texto com traços ou habilidades (título em maiúsculas e descrição embaixo), mantenha esse formato ao reescrever. \
 Quando o pedido pede para você criar ou sugerir conteúdo (traços, habilidades, descrições que combinem com a criatura), escreva-o no estilo e no tamanho dos textos que a ficha já tem. \
 adicionar_tracos: traços novos (campo, titulo e descricao; descricao vazia se o pedido não disser). remover_tracos: títulos a tirar. \
 Para trocar traços, ponha os antigos em remover_tracos e os novos em adicionar_tracos (título curto em maiúsculas, como os da ficha). \
 Se o pedido não deixa claro o que mudar, devolva tudo vazio.";
-    let user = format!("Ficha: {nome}\nCampos:\n{}\n\nPedido: {message}", campos.join("\n"));
+    let nova = if criada.is_some() { format!("\nA ficha acabou de ser criada a partir da ficha em branco, já com o nome {nome}: não mude o nome; preencha os campos que o pedido define.") } else { String::new() };
+    let referencia = if copias.is_empty() { String::new() } else {
+        format!("\nTraços com esse nome em outras fichas (para copiar o efeito, use a descrição exatamente como está, no traço de mesmo título, sem criar outro):\n{}",
+            copias.iter().map(|t| format!("- {} ({}, {}): {}", t.titulo, t.pdf, t.personagem, t.descricao)).collect::<Vec<_>>().join("\n"))
+    };
+    let user = format!("Ficha: {nome}{nova}\nCampos:\n{}{referencia}\n\nPedido: {message}", campos.join("\n"));
     let schema = json!({"type":"object","properties":{
         "mudancas":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"campo":{"type":"string"},"numero":{"type":["integer","null"]},"texto":{"type":["string","null"]}},"required":["campo","numero","texto"],"additionalProperties":false}},
         "adicionar_tracos":{"type":"array","maxItems":10,"items":{"type":"object","properties":{"campo":{"type":"string"},"titulo":{"type":"string"},"descricao":{"type":"string"}},"required":["campo","titulo","descricao"],"additionalProperties":false}},
@@ -4817,9 +4944,26 @@ Se o pedido não deixa claro o que mudar, devolva tudo vazio.";
             }
         }
     }
+    // Cópia de traço escolhida por regra (a ficha citada ou a única versão): a descrição fica
+    // igual à da outra ficha, no traço de mesmo título (o modelo costuma reescrever ou duplicar).
+    let unicas = fichas::copias_de_tracos(message, &copias);
+    if !unicas.is_empty() {
+        if let Some(c) = mapa.campos.iter().find(|c| c.tipo == Tipo::Tracos) {
+            let atual = match atuais.get(&c.id) { Some(Valor::Tracos(l)) => l.clone(), _ => Vec::new() };
+            let proposta = match novos.get(&c.id) { Some(Valor::Tracos(l)) => l.clone(), _ => Vec::new() };
+            let lista = fichas::aplicar_copias(&atual, proposta, &unicas);
+            novos.insert(c.id.clone(), Valor::Tracos(lista));
+        }
+    }
+    // Ficha nova cujas irmãs são todas em maiúsculas: os textos dela também.
+    if maiusculas {
+        for c in mapa.campos.iter().filter(|c| matches!(c.tipo, Tipo::Linha | Tipo::Bloco)) {
+            if let Some(Valor::Texto(t)) = novos.get_mut(&c.id) { *t = t.to_uppercase(); }
+        }
+    }
     // Ficha toda em maiúsculas (como as do Canva): os traços novos também.
     for c in mapa.campos.iter().filter(|c| c.tipo == Tipo::Tracos) {
-        let maiusculos = matches!(atuais.get(&c.id), Some(Valor::Tracos(l)) if !l.is_empty() && l.iter().all(|t| !format!("{}{}", t.titulo, t.descricao).chars().any(char::is_lowercase)));
+        let maiusculos = maiusculas || matches!(atuais.get(&c.id), Some(Valor::Tracos(l)) if !l.is_empty() && l.iter().all(|t| !format!("{}{}", t.titulo, t.descricao).chars().any(char::is_lowercase)));
         if let (true, Some(Valor::Tracos(lista))) = (maiusculos, novos.get_mut(&c.id)) {
             for t in lista.iter_mut() { t.titulo = t.titulo.to_uppercase(); t.descricao = t.descricao.to_uppercase(); }
         }
@@ -4831,13 +4975,14 @@ Se o pedido não deixa claro o que mudar, devolva tudo vazio.";
     if (vigor.is_some() || sem_rd) && !vigor_mudou { fichas::ajustar_vigor(&mapa, &mut novos, vigor, sem_rd); }
     let novos = fichas::conferir(&mapa, &novos)?;
     let mudancas = fichas::diferencas(&mapa, &atuais, &novos);
+    let antes_da_resposta = criada.map(|c| format!("{c}\n\n")).unwrap_or_default();
     if mudancas.is_empty() {
-        return Ok(Some(format!("Não encontrei o que mudar na ficha de **{nome}**. Diga o campo, por exemplo “um ponto em Golpear” ou “adiciona o traço Fôlego: aguenta mais tempo sem ar”.")));
+        return Ok(Some(format!("{antes_da_resposta}Não encontrei o que mudar na ficha de **{nome}**. Diga o campo, por exemplo “um ponto em Golpear” ou “adiciona o traço Fôlego: aguenta mais tempo sem ar”.")));
     }
     let lista: Vec<String> = mudancas.iter().map(|(r, a, d)| if a.is_empty() { format!("- {r}: {d}") } else { format!("- {r}: {a} → {d}") }).collect();
     send_kept(events, extras, json!({"type":"ficha","item":{"root": root, "path": path, "primeira": inicio, "nome": nome, "pdf": pdf_nome(&path), "valores": novos,
         "mudancas": mudancas.iter().map(|(r, a, d)| json!({"rotulo": r, "antes": a, "depois": d})).collect::<Vec<_>>()}}));
-    let mut reply = format!("Mudança proposta na ficha de **{nome}** ({}):\n{}\n\nConfira a prévia e clique em **Aplicar**; o PDF é alterado no mesmo lugar e a versão de antes fica em **Configurações › Backups**.", pdf_nome(&path), lista.join("\n"));
+    let mut reply = format!("{antes_da_resposta}Mudança proposta na ficha de **{nome}** ({}):\n{}\n\nConfira a prévia e clique em **Aplicar**; o PDF é alterado no mesmo lugar e a versão de antes fica em **Configurações › Backups**.", pdf_nome(&path), lista.join("\n"));
     if !avisos.is_empty() { reply.push_str(&format!("\n\n{}", avisos.join(" "))); }
     Ok(Some(reply))
 }
@@ -5011,6 +5156,15 @@ pub async fn chat(
     let extras=std::sync::Mutex::new(json!({}));
     let mut result=async{
         let prefs=state.prefs()?;
+        // Rotinas ("checa o preço a cada 1 hora", "bom dia quando eu abrir o PC"): montadas pelo
+        // modelo local, neste computador, e chegam desligadas para a pessoa ativar.
+        if !project_context && request.attachments.is_empty() && !request.hand {
+            if let Some(reply) = rotinas::rotina_conversa(&state, &request.message, &events, &extras).await? {
+                metric_model = "rotinas".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         // Lembretes: criados neste computador e confirmados com data e hora, sem passar pela nuvem.
         if !project_context && reminders::is_request(&request.message)&&request.attachments.is_empty(){
             let now=reminders::now_local();
@@ -5104,7 +5258,10 @@ pub async fn chat(
                 academic=Some((works,pt,scholar));
             }
         }
-        let (mut context,consent)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,request.placement.parent,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?)};
+        let (mut context,consent,history_turns)={let db=state.store.lock().map_err(|_|"Dados ocupados")?;(db.context(&request.conversation,request.placement.parent,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?,db.consent(&request.conversation).map_err(|_|"Conversa não encontrada")?,
+            db.history_turns(&request.conversation,request.placement.parent,prefs.history_messages,prefs.history_chars).map_err(|_|"Falha ao consultar conversa")?)};
+        // Trocas anteriores que podem ir à nuvem; as retidas ficam neste computador.
+        let (cloud_history,held_turns)=super::research::cloud_history(&history_turns);
         let referenced=request.references.iter().map(|r|r.content.as_str()).collect::<Vec<_>>().join("\n");
         // Athena: "cria uma nota…" e "salva isso como nota" gravam a nota neste computador.
         if !project_context && !writing_note && athena::note_request(&request.message)&&request.attachments.is_empty(){
@@ -5141,6 +5298,16 @@ pub async fn chat(
             let _=events.send(json!({"type":"token","text":reply}));
             return Ok(());
         }
+        // Hand: pedidos claros ao computador ("tira um print", "organiza meus Downloads"), sem
+        // modelo e sempre neste computador (nada vai para a nuvem, em qualquer modo).
+        if request.attachments.is_empty() {
+            let anteriores_hand: Vec<Value> = state.store.lock().map_err(|_| "Dados ocupados")?.recent_extras(&request.conversation, request.placement.parent, 4).unwrap_or_default();
+            if let Some(reply) = hand::hand_conversa(&state, &request.message, request.hand, &anteriores_hand, &events, &extras).await? {
+                metric_model = "hand".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         use super::research::AutoRoute;
         let auto_route = if request.automatic && prefs.usage_mode != UsageMode::LocalOnly
             && (prefs.usage_mode != UsageMode::PerConversation || consent)
@@ -5153,8 +5320,9 @@ pub async fn chat(
                 None => super::research::automatic_route(&state,&prefs,&request.message,&token).await,
             }
         } else { AutoRoute::Local };
-        // Sem a resposta da pessoa, a dúvida fica neste computador.
-        let auto_route = if auto_route == AutoRoute::Ask { AutoRoute::Local } else { auto_route };
+        // Sem a resposta da pessoa, a dúvida fica neste computador. Mensagens anteriores retidas
+        // também pedem a escolha dela (a checagem antes do envio pergunta).
+        let auto_route = if auto_route == AutoRoute::Ask || (held_turns > 0 && request.auto_route.is_none()) { AutoRoute::Local } else { auto_route };
         if token.is_cancelled() { return Err("Resposta interrompida".into()); }
         let use_cloud = if request.automatic { auto_route != AutoRoute::Local }
             else { prefs.usage_mode==UsageMode::CloudOnly || request.request_cloud };
@@ -5218,6 +5386,16 @@ pub async fn chat(
             }.await;
             planned.unwrap_or_else(Understanding::unknown)
         };
+        // Hand: o entendimento reconheceu um pedido para fazer algo no computador (o que a leitura
+        // rápida, antes, não pegou). Vira plano para aprovar, neste computador.
+        if !project_context && !use_cloud && !request.design && plan.computador && request.attachments.is_empty() {
+            let anteriores_hand: Vec<Value> = state.store.lock().map_err(|_| "Dados ocupados")?.recent_extras(&request.conversation, request.placement.parent, 4).unwrap_or_default();
+            if let Some(reply) = hand::hand_conversa(&state, &request.message, true, &anteriores_hand, &events, &extras).await? {
+                metric_model = "hand".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
+                let _ = events.send(json!({"type":"token","text":reply}));
+                return Ok(());
+            }
+        }
         // Designs: pelo botão "Criar design" ou quando o entendimento reconhece o pedido.
         if !project_context && (request.design||(!use_cloud&&plan.design)){
             // Fotos de bancos livres só num pedido público: o Automático já o classificou assim ao
@@ -5233,8 +5411,11 @@ pub async fn chat(
         let anteriores: Vec<Value> = state.store.lock().map_err(|_| "Dados ocupados")?.recent_extras(&request.conversation, request.placement.parent, 6).unwrap_or_default();
         let seguinte = super::fichas::pede_mudanca(&request.message) && anteriores.first().is_some_and(fala_de_ficha);
         if !project_context && !use_cloud && (plan.ficha || super::fichas::pedido(&request.message) || seguinte) {
+            // Conversa recente (neste computador): o nome que ela já deu ao personagem de uma ficha nova.
+            let recente = state.store.lock().map_err(|_| "Dados ocupados")?.context(&request.conversation, request.placement.parent, 6, 6000).unwrap_or_default().iter()
+                .filter_map(|m| Some(format!("{}: {}", if m["role"] == "user" { "Pessoa" } else { "Ayla" }, m["content"].as_str()?.chars().take(1500).collect::<String>()))).collect::<Vec<_>>().join("\n");
             let anexos: Vec<String> = { let db = state.store.lock().map_err(|_| "Dados ocupados")?; request.attachments.iter().filter_map(|id| db.file(id).ok().flatten().map(|f| f.name)).collect() };
-            if let Some(reply) = ficha_conversa(&state, &prefs, &request.message, &anexos, &anteriores, plan.ficha || seguinte, &events, &extras, &token).await? {
+            if let Some(reply) = ficha_conversa(&state, &prefs, &request.message, &recente, &anexos, &anteriores, plan.ficha || seguinte, &events, &extras, &token).await? {
                 metric_model = "fichas".into(); first = Some(start.elapsed().as_millis() as u64); chunks += 1; partial.push_str(&reply);
                 let _ = events.send(json!({"type":"token","text":reply}));
                 return Ok(());
@@ -5276,6 +5457,8 @@ pub async fn chat(
         let mut system=prefs.system_prompt().to_string();
         // A nota é uma entrega só: sem o formato de opções ordenadas das respostas comuns.
         system.push_str(if writing_note { NOTE_WRITING } else { OPTIONS_GUIDE });
+        // Só o Hand age no computador (com cartão para aprovar); a conversa nunca diz que agiu.
+        system.push_str(NO_ACTIONS);
         if !use_cloud{
             system.push_str("\n\nVocê é o aplicativo Ayla, neste computador. Você vê a agenda da pessoa (calendário da Athena, com eventos, lembretes e avisos) quando ela pergunta, e cria lembretes com notificação do sistema quando a pessoa pede (\"me lembra daqui 10 minutos de beber água\", \"me avisa amanhã às 9h\") e notas na Athena (\"cria uma nota sobre…\", \"salva isso como nota\"). Nunca diga que não consegue criar lembretes ou notificações; se faltar o horário ou o assunto, peça o que falta nesse formato.");
             let project = {
@@ -5361,7 +5544,7 @@ pub async fn chat(
                 if request.personality_preview.as_deref()!=Some(prefs.system_prompt()) { return Err("A personalidade mudou. Revise novamente antes de enviar à nuvem.".into()); }
             }
             let effort=match request.effort.as_deref(){None|Some("")=>None,Some(e@("low"|"medium"|"high"))=>Some(e),Some(_)=>return Err("Esforço inválido".into())};
-            // Nunca enviar histórico, anexos ou dados de órgãos; memórias e notas só as revistas ou aceitas acima.
+            // Histórico só as trocas públicas (`cloud_history`); nunca anexos ou dados de órgãos; memórias e notas só as revistas ou aceitas acima.
             let platform=prefs.cloud_platform().ok_or("Escolha uma plataforma em Configurações › Nuvem")?.to_string();
             let (api,base,secret)=state.cloud_secret(&prefs,&platform).await?;
             // Modelo automático por padrão (decisão do usuário, 21/11/2026): o escolhido nos ajustes
@@ -5387,13 +5570,22 @@ pub async fn chat(
                 memory::check_references(&request.references,&facts,project.as_deref())?;
                 if let Some(block)=memory::reference_block(&request.references){instructions.push_str(&block);}
             }
+            // Trocas anteriores públicas acompanham o pedido; nada fica guardado no provedor.
+            if held_turns>0{let _=events.send(json!({"type":"routing","text":format!("{held_turns} {} anterior{} ficou neste computador",if held_turns==1{"troca"}else{"trocas"},if held_turns==1{""}else{"es"})}));}
             origin = Some(if web_search { "cloud_search" } else { "cloud" });
+            let mut searched = false;
             if web_search {
                 let _ = events.send(json!({"type":"status","text":"Pesquisando fontes na web…"}));
-                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &outgoing_message)?;
-                cloud::stream_search(outgoing, &token, super::research::wants_youtube(&request.message), &mut report).await?;
-            } else {
-                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&outgoing_message)?;
+                let outgoing = cloud::search_request(&platform, &secret, &cloud_model, effort, &instructions, &cloud_history, &outgoing_message)?;
+                match cloud::stream_search(outgoing, &token, super::research::wants_youtube(&request.message), &mut report).await {
+                    Ok(_) => searched = true,
+                    // Sem fontes, a nuvem responde mesmo assim, como conversa (decisão do usuário, 27/11/2026).
+                    Err(error) if token.is_cancelled() || !super::research::search_came_empty(&error) => return Err(error),
+                    Err(_) => { origin = Some("cloud"); let _ = events.send(json!({"type":"status","text":"Sem fontes diretas; respondendo pela nuvem…"})); }
+                }
+            }
+            if !searched {
+                let outgoing=cloud::chat_request(api,&base,&secret,&cloud_model,effort,&instructions,&cloud_history,&outgoing_message)?;
                 cloud::stream(outgoing,api,&token,&mut report).await?;
             }
         }else{
@@ -5868,6 +6060,15 @@ impl Core {
         fs::write(&path, &id).map_err(|_| "Não foi possível guardar a identificação deste computador")?;
         Ok(id)
     }
+    /// Modelo da nuvem para tarefas automáticas (rotinas, feriados): o mesmo da conversa no
+    /// Automático — o do provedor próprio ou o padrão da plataforma; senão, o primeiro modelo de
+    /// conversa que a conta oferece (o ChatGPT não tem padrão fixo: os modelos variam por plano).
+    pub(crate) async fn cloud_auto_model(&self, prefs: &Preferences, platform: &str, api: Api, base: &str, secret: &Secret) -> Result<String, String> {
+        let preferred = if platform == "custom" { prefs.cloud_model.clone() } else { cloud::provider(platform).and_then(|p| p.default_model).unwrap_or("").to_owned() };
+        if !preferred.is_empty() { return Ok(preferred); }
+        let catalog = cloud::models(api, base, secret, false).await?;
+        cloud::automatic_model(platform, &catalog).map(str::to_owned)
+    }
     /// API, endereço e credencial para falar com a plataforma (renova o acesso do ChatGPT).
     async fn cloud_secret(&self, prefs: &Preferences, platform: &str) -> Result<(Api, String, Secret), String> {
         if platform == "custom" {
@@ -6325,7 +6526,7 @@ pub struct CalendarItem {
 /// Calendário da Athena entre `from` e `to` (AAAA-MM-DD): eventos e lembretes, e os dias com nota
 /// do dia nas notas da própria Athena (os cofres e projetos ficam de fora).
 #[tauri::command]
-pub fn calendar_range(state: tauri::State<'_, Core>, from: String, to: String) -> Result<Value, String> {
+pub fn calendar_range(app: tauri::AppHandle, state: tauri::State<'_, Core>, from: String, to: String) -> Result<Value, String> {
     let day = |text: &str| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| "Data inválida".to_string());
     let (from, to) = (day(&from)?, day(&to)?);
     if to < from || (to - from).num_days() > 400 {
@@ -6349,7 +6550,9 @@ pub fn calendar_range(state: tauri::State<'_, Core>, from: String, to: String) -
     let notes_dir = state.athena_path(&state.prefs()?, "ayla")?;
     let notes: Vec<String> = from.iter_days().take_while(|d| *d <= to).map(|d| d.format("%Y-%m-%d").to_string())
         .filter(|d| notes_dir.join(format!("{d}.md")).is_file()).collect();
-    Ok(json!({"items": items, "notes": notes}))
+    // Feriados (nacionais, facultativos, do estado e da cidade da pessoa).
+    let holidays = feriados::do_periodo(&app, &state, &state.prefs()?, from, to);
+    Ok(json!({"items": items, "notes": notes, "holidays": holidays}))
 }
 
 /// Cria (sem `id`) ou edita um item do calendário. Com avisos, é um lembrete: cada aviso é uma
@@ -7414,6 +7617,35 @@ mod tests {
         mais.insert("golpear".into(), Valor::Numero(4));
         ficha_gravar(&core, &raiz, "Feras/Casco de Cinzas.pdf", 1, &mais).unwrap();
         assert_eq!(ficha_renomear(&core, &raiz, "Feras/Casco de Cinzas.pdf", 1).unwrap(), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ficha_nova_sem_base_sai_da_ficha_em_branco_do_cofre() {
+        use super::super::fichas::{tests::{ficha_de_teste, poppler}, Valor};
+        if !poppler() { eprintln!("sem poppler-utils: teste pulado"); return; }
+        let root = std::env::temp_dir().join(format!("ayla-fichas-branco-{}", store::id()));
+        let vault = root.join("cofre");
+        fs::create_dir_all(vault.join("Fichas")).unwrap();
+        ficha_de_teste(&vault.join("Fichas/Branca.pdf"), false);
+        ficha_de_teste(&vault.join("Fichas/Jogador.pdf"), true);
+        let core = Core::open(root.join("ayla")).unwrap();
+        let mut prefs = core.prefs().unwrap();
+        prefs.athena_vaults = vec![vault.to_string_lossy().into_owned()];
+        core.preferences.lock().unwrap().save(&prefs).unwrap();
+        // Sem nenhuma ficha registrada ainda, não há ficha em branco conhecida.
+        assert!(ficha_branco_do_cofre(&core, &prefs).is_none());
+        let found = ficha_procurar(&core, &prefs, "um ponto em golpear na ficha do Bartholomew");
+        assert_eq!(found.len(), 1);
+        let (raiz, branca) = ficha_branco_do_cofre(&core, &prefs).expect("a ficha em branco usada como modelo");
+        assert_eq!(branca, "Fichas/Branca.pdf");
+        let (criada, _) = ficha_criar(&core, &prefs, &raiz, &branca, 1, "Tomás Ventania").unwrap();
+        assert_eq!(criada, vault.canonicalize().unwrap().join("Fichas/Tomás Ventania.pdf"));
+        let (_, pdf, entry, _) = ficha_estado(&core, &raiz, "Fichas/Tomás Ventania.pdf", false).unwrap();
+        let valores = ficha_valores(&pdf, &entry, 1).unwrap();
+        assert_eq!(valores["nome"], Valor::Texto("Tomás Ventania".into()));
+        assert!(!matches!(valores.get("golpear"), Some(Valor::Numero(n)) if *n > 0), "a ficha nova começa sem os valores de outra");
+        assert_eq!(fs::read(vault.join("Fichas/Branca.pdf")).unwrap().len() > 0, true);
         let _ = fs::remove_dir_all(&root);
     }
 

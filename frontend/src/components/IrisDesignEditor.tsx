@@ -8,8 +8,10 @@ import { EXTRA, applyTemplate, fillFrom, fitImage, iconFrom, iconParts, withSoft
 import { loadPackFonts } from '../services/DesignFonts';
 import { marginOf, snap, snapLines, type Guides } from '../services/DesignGuides';
 import { CloseIcon, DownloadIcon, ImageIcon, TrashIcon, CopyIcon } from './Icons';
+import { PDF_LAYER, abrir, camada, compor, documentoDe, previa, readDoc, refOf, type Aberto, type DadosDoc, type Documento } from '../services/DesignDocument';
 
-export type Opening = { id?: string; name: string; width: number; height: number; data?: string; template?: Template };
+/** `documento`: PDF ou imagem da Athena/Iris aberto para editar por cima (o design reaberto traz isso em `data`). */
+export type Opening = { id?: string; name: string; width: number; height: number; data?: string; template?: Template; documento?: Documento };
 type Pack = { installed: boolean; bytes: number; progress: string | null; install: () => void };
 type LibraryImage = { key: string; name: string; place: string; file?: string; root?: string | null; path?: string };
 type Panel = 'texto' | 'formas' | 'imagens' | 'icones' | 'desenhar' | 'fundo';
@@ -55,7 +57,19 @@ function Tool({ label, onClick, children, disabled, active }: { label: string; o
 export default function IrisDesignEditor({ opening, pack, onSaved, onExported, onClose }: {
   opening: Opening; pack: Pack; onSaved: () => void; onExported: (message: string) => void; onClose: () => void;
 }) {
-  const { width, height } = opening;
+  // Documento (PDF ou imagem): cada página tem o próprio tamanho; o arquivo aparece como fundo.
+  const [docStart] = useState<DadosDoc | null>(() => opening.documento ? { documento: opening.documento, paginas: [] } : readDoc(opening.data));
+  const docMode = Boolean(docStart);
+  const docRef = useRef<DadosDoc | null>(docStart);
+  const opened = useRef<Aberto | null>(null);
+  const histories = useRef(new Map<number, History>());
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const [backdrop, setBackdrop] = useState<string | null>(null);
+  const [size, setSize] = useState({ width: opening.width, height: opening.height });
+  const { width, height } = size;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
   const host = useRef<HTMLDivElement>(null);
   const element = useRef<HTMLCanvasElement>(null);
   const canvasRef = useRef<Canvas | null>(null);
@@ -116,6 +130,13 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   const dirty = ready && (current !== saved || name !== savedName);
 
   const snapshot = useCallback(() => JSON.stringify(canvasRef.current!.toObject(EXTRA)), []);
+  /** O que vai para o design: o projeto, ou (documento) o arquivo e as páginas com os elementos. */
+  const dataNow = useCallback(() => {
+    const doc = docRef.current; const h = history.current;
+    if (!doc) return h?.value ?? '';
+    if (h && doc.paginas[pageIndexRef.current]) doc.paginas[pageIndexRef.current].objetos = h.value;
+    return JSON.stringify(doc);
+  }, []);
   const commit = useCallback(() => {
     if (restoring.current || commitQueued.current) return;
     commitQueued.current = true;
@@ -124,9 +145,9 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       const canvas = canvasRef.current; const h = history.current;
       if (!canvas || !h || restoring.current) return;
       if (h.push(snapshot())) setNote('');
-      setCurrent(h.value);
+      setCurrent(dataNow());
     });
-  }, [snapshot]);
+  }, [snapshot, dataNow]);
 
   // Página: cria o canvas, carrega o projeto (ou o modelo) e liga os eventos.
   useEffect(() => {
@@ -136,16 +157,17 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     // cria por conta própria.
     const canvas = withSoftwareCanvases(() => {
       element.current!.getContext('2d');
-      return new Canvas(element.current!, { width, height, preserveObjectStacking: true, backgroundColor: '#ffffff', stopContextMenu: true });
+      return new Canvas(element.current!, { width, height, preserveObjectStacking: true, backgroundColor: docMode ? '' : '#ffffff', stopContextMenu: true });
     });
     canvasRef.current = canvas;
     let alive = true;
     void (async () => {
       restoring.current = true;
       try {
-        if (opening.data) await canvas.loadFromJSON(opening.data);
+        if (docRef.current) await openDocument(canvas);
+        else if (opening.data) await canvas.loadFromJSON(opening.data);
         else if (opening.template) applyTemplate(canvas, opening.template);
-      } catch (e) { setError(`Não foi possível abrir o design: ${errorText(e)}`); }
+      } catch (e) { setError(`Não foi possível abrir ${docRef.current ? 'o arquivo' : 'o design'}: ${errorText(e)}`); }
       restoring.current = false;
       if (!alive) return;
       canvas.renderAll();
@@ -154,7 +176,8 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       for (const ms of [60, 250, 600]) setTimeout(() => { if (alive) canvas.renderAll(); }, ms);
       const first = snapshot();
       history.current = new History(first);
-      setCurrent(first); setSaved(first); setReady(true);
+      const data = dataNow();
+      setCurrent(data); setSaved(data); setReady(true);
     })();
     const changed = () => { commit(); refresh(); };
     canvas.on('object:modified', changed);
@@ -172,6 +195,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       target.setCoords();
       const moving = new Set(canvas.getActiveObjects());
       const others = canvas.getObjects().filter(o => !moving.has(o) && o !== target && o.visible).map(o => o.getBoundingRect());
+      const { width, height } = sizeRef.current;
       const result = snap(target.getBoundingRect(), snapLines(width, height, others), 6 / canvas.getZoom());
       if (result.dx || result.dy) { target.set({ left: target.left + result.dx, top: target.top + result.dy }); target.setCoords(); }
       guides.current = result.guides;
@@ -184,6 +208,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       const { x, y } = guides.current;
       if (!x.length && !y.length && !marginsRef.current) return;
       const z = canvas.getZoom(); const v = canvas.viewportTransform;
+      const { width, height } = sizeRef.current;
       ctx.save();
       ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
       ctx.lineWidth = 1 / z;
@@ -200,8 +225,54 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       ctx.stroke();
       ctx.restore();
     });
-    return () => { alive = false; canvasRef.current = null; void canvas.dispose(); };
+    return () => { alive = false; canvasRef.current = null; opened.current?.fechar(); void canvas.dispose(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Abre o arquivo: confere se mudou fora do editor (aí parte da versão nova), desenha as páginas
+   * a partir da cópia intacta e carrega os elementos da 1ª página. */
+  async function openDocument(canvas: Canvas) {
+    const doc = docRef.current!;
+    const atual = await native<string>('design_documento_atual', refOf(doc.documento));
+    if (atual !== doc.documento.gravado) {
+      const known = doc.paginas.some(p => p.objetos && JSON.parse(p.objetos).objects?.length);
+      doc.documento = await documentoDe(doc.documento);
+      doc.paginas = [];
+      if (known) setNote('O arquivo mudou fora do editor: abri a versão atual (o que já estava gravado nele ficou fixo).');
+    }
+    const a = await abrir(doc.documento);
+    opened.current = a;
+    doc.paginas = a.paginas.map((p, i) => ({ largura: p.largura, altura: p.altura, objetos: doc.paginas[i]?.objetos ?? null }));
+    setPageCount(doc.paginas.length);
+    const first = doc.paginas[0];
+    setSize({ width: first.largura, height: first.altura });
+    if (first.objetos) await canvas.loadFromJSON(first.objetos);
+    canvas.backgroundColor = '';
+    setBackdrop(await a.fundo(0));
+  }
+
+  const pageIndexRef = useRef(0);
+  pageIndexRef.current = pageIndex;
+  /** Troca de página: guarda os elementos (e o desfazer) desta e carrega os da outra. */
+  async function goPage(next: number) {
+    const doc = docRef.current; const canvas = canvasRef.current;
+    if (!doc || !canvas || !history.current || next === pageIndex || next < 0 || next >= doc.paginas.length) return;
+    doc.paginas[pageIndex].objetos = history.current.value;
+    histories.current.set(pageIndex, history.current);
+    const page = doc.paginas[next];
+    restoring.current = true;
+    canvas.discardActiveObject();
+    canvas.clear();
+    if (page.objetos) await canvas.loadFromJSON(page.objetos);
+    canvas.backgroundColor = '';
+    restoring.current = false;
+    history.current = histories.current.get(next) ?? new History(snapshot());
+    pageIndexRef.current = next;
+    setPageIndex(next);
+    setSize({ width: page.largura, height: page.altura });
+    canvas.renderAll();
+    setCurrent(dataNow()); refresh();
+    if (opened.current) setBackdrop(await opened.current.fundo(next));
+  }
 
   // Fontes do pacote: registradas e, depois, os textos são medidos de novo.
   useEffect(() => {
@@ -414,9 +485,10 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     restoring.current = true;
     canvas.discardActiveObject();
     await canvas.loadFromJSON(json);
+    if (docMode) canvas.backgroundColor = '';
     restoring.current = false;
     canvas.requestRenderAll();
-    setCurrent(json); refresh();
+    setCurrent(dataNow()); refresh();
   }
   const undo = () => void restore(history.current?.undo() ?? null);
   const redo = () => void restore(history.current?.redo() ?? null);
@@ -471,8 +543,34 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     refresh();
     return url;
   }
+  /** Documento: grava as camadas no arquivo original (com backup) e guarda o design. */
+  async function saveDocument() {
+    const doc = docRef.current!; const a = opened.current;
+    if (!a) return false;
+    setBusy('Gravando no arquivo…'); setError('');
+    let fileError = '';
+    try {
+      dataNow();
+      const extra = doc.documento.tipo === 'pdf'
+        ? { camadas: (await Promise.all(doc.paginas.map(async (p, i) => ({ pagina: i, png: await camada(p, PDF_LAYER) })))).filter(c => c.png) }
+        : { imagem: await compor(a.imagem!, doc.paginas[0]) };
+      const result = await native<{ atual: string }>('design_documento_gravar', { ...refOf(doc.documento), base: doc.documento.base, esperado: doc.documento.gravado, ...extra });
+      doc.documento.gravado = result.atual;
+    } catch (e) { fileError = errorText(e); }
+    try {
+      const data = dataNow();
+      const preview = await previa(await a.fundo(0), doc.paginas[0]);
+      const next = await native<string>('design_save', { id: id ?? null, name, width: doc.paginas[0].largura, height: doc.paginas[0].altura, data, preview });
+      setId(next); setSaved(data); setCurrent(data); setSavedName(name); onSaved();
+    } catch (e) { fileError ||= errorText(e); }
+    finally { setBusy(null); }
+    if (fileError) { setError(`Não foi gravado no arquivo: ${fileError}`); return false; }
+    setNote(`Gravado em ${doc.documento.nome}. O original ficou nos backups da Ayla.`);
+    return true;
+  }
   async function save() {
     if (!canvas || !history.current) return false;
+    if (docMode) return saveDocument();
     setBusy('Salvando…'); setError('');
     try {
       const data = history.current.value;
@@ -577,7 +675,12 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     <header className="design-bar">
       <button className="icon-button" data-tip="Voltar aos designs" aria-label="Voltar aos designs" onClick={() => dirty ? setLeave('close') : onClose()}><CloseIcon size={18} /></button>
       <input className="design-name" value={name} maxLength={120} aria-label="Nome do design" onChange={e => setName(e.target.value)} />
-      <small className="design-size">{width} × {height} px</small>
+      <small className="design-size">{docMode ? `${docRef.current?.documento.nome ?? ''}` : `${width} × ${height} px`}</small>
+      {docMode && pageCount > 1 && <span className="design-pages-nav">
+        <Tool label="Página anterior" onClick={() => void goPage(pageIndex - 1)} disabled={pageIndex === 0 || Boolean(busy)}><span aria-hidden="true">‹</span></Tool>
+        <span>Página {pageIndex + 1} de {pageCount}</span>
+        <Tool label="Próxima página" onClick={() => void goPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1 || Boolean(busy)}><span aria-hidden="true">›</span></Tool>
+      </span>}
       <span className="design-bar-gap" />
       <Tool label="Desfazer (Ctrl+Z)" onClick={undo} disabled={!history.current?.canUndo}><span aria-hidden="true">↶</span></Tool>
       <Tool label="Refazer (Ctrl+Shift+Z)" onClick={redo} disabled={!history.current?.canRedo}><span aria-hidden="true">↷</span></Tool>
@@ -588,8 +691,9 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       </span>
       {busy && <span className="design-status" role="status">{busy}</span>}
       {!busy && ready && <span className="design-status">{note || (dirty ? 'Alterações não salvas' : id ? 'Salvo' : '')}</span>}
-      <button className="ghost-button" disabled={!ready || Boolean(busy)} onClick={() => void save()}>Salvar</button>
-      <span className="design-export">
+      {docMode ? <button className="primary-action" disabled={!ready || Boolean(busy)} title="Grava no arquivo original (uma cópia dele fica nos backups da Ayla)" onClick={() => void save()}>Salvar no arquivo</button>
+        : <button className="ghost-button" disabled={!ready || Boolean(busy)} onClick={() => void save()}>Salvar</button>}
+      {!docMode && <span className="design-export">
         <button className="primary-action" disabled={!ready || Boolean(busy)} aria-haspopup="menu" aria-expanded={exporting} onClick={() => setExporting(v => !v)}><DownloadIcon size={15} /> Exportar</button>
         {exporting && <div className="design-menu" role="menu">
           {(['png', 'jpg', 'pdf'] as const).map(format => <div key={format} className="design-menu-row">
@@ -599,7 +703,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
           </div>)}
           <small>{`PNG e JPG com ${Math.round(width * exportScale(width, height, 'png'))} px de largura; PDF em alta resolução.`}</small>
         </div>}
-      </span>
+      </span>}
     </header>
     {error && <p role="alert" className="app-error design-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
     {leave && <div className="dialog-backdrop design-leave" onPointerDown={e => { if (e.target === e.currentTarget) setLeave(null); }}>
@@ -615,7 +719,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     </div>}
     <div className="design-body">
       <nav className="design-tabs" aria-label="Elementos">
-        {([['texto', 'Texto', 'T'], ['formas', 'Formas', '◆'], ['imagens', 'Imagens', null], ['icones', 'Ícones', '★'], ['desenhar', 'Desenhar', '✎'], ['fundo', 'Fundo', '▦']] as const).map(([key, label, glyph]) =>
+        {([['texto', 'Texto', 'T'], ['formas', 'Formas', '◆'], ['imagens', 'Imagens', null], ['icones', 'Ícones', '★'], ['desenhar', 'Desenhar', '✎'], ['fundo', 'Fundo', '▦']] as const).filter(([key]) => !docMode || key !== 'fundo').map(([key, label, glyph]) =>
           <button key={key} className={panel === key ? 'design-tab active' : 'design-tab'} aria-pressed={panel === key} onClick={() => setPanel(key)}>
             <span aria-hidden="true">{glyph ?? <ImageIcon size={18} />}</span>{label}
           </button>)}
@@ -721,15 +825,23 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       <div className="design-resizer" role="separator" aria-orientation="vertical" aria-label="Largura do painel da esquerda" aria-valuemin={sideLimits.min} aria-valuemax={sideLimits.max} aria-valuenow={sides.left} tabIndex={0}
         onPointerDown={e => resizeSide('left', e)} onKeyDown={e => nudgeSide('left', e)} onDoubleClick={() => setSides(old => ({ ...old, left: 264 }))} />
       <div className={zoom === 'fit' ? 'design-stage fit' : 'design-stage'} ref={host} onPointerDown={e => { if (e.target === e.currentTarget && canvas) { canvas.discardActiveObject(); canvas.requestRenderAll(); refresh(); } }}>
-        <div className="design-page" style={{ width: Math.round(width * scale), height: Math.round(height * scale) }}><canvas ref={element} /></div>
+        <div className={docMode ? 'design-page doc' : 'design-page'} style={{ width: Math.round(width * scale), height: Math.round(height * scale), backgroundImage: backdrop ? `url(${backdrop})` : undefined }}><canvas ref={element} /></div>
       </div>
       <div className="design-resizer" role="separator" aria-orientation="vertical" aria-label="Largura do painel da direita" aria-valuemin={sideLimits.min} aria-valuemax={sideLimits.max} aria-valuenow={sides.right} tabIndex={0}
         onPointerDown={e => resizeSide('right', e)} onKeyDown={e => nudgeSide('right', e)} onDoubleClick={() => setSides(old => ({ ...old, right: 264 }))} />
       <aside className="design-props" aria-label="Propriedades" style={{ width: sides.right }}>
         {!active ? <div className="design-stack">
+          {docMode && <>
+            <p className="sidebar-label">{docRef.current?.documento.tipo === 'pdf' ? 'PDF' : 'Imagem'}</p>
+            <p className="design-hint">O que você adicionar fica por cima do arquivo. "Salvar no arquivo" grava em {docRef.current?.documento.nome}{docRef.current?.documento.tipo === 'pdf' ? ' (o texto do PDF continua selecionável)' : ''}; antes, a Ayla guarda uma cópia do original. Os elementos continuam editáveis aqui em Designs.</p>
+            {pageCount > 1 && <div className="design-page-list" role="list" aria-label="Páginas">{docRef.current!.paginas.map((p, i) => {
+              const edited = i === pageIndex ? Boolean(canvas?.getObjects().length) : Boolean(p.objetos && JSON.parse(p.objetos).objects?.length);
+              return <button key={i} role="listitem" className={i === pageIndex ? 'active' : ''} aria-current={i === pageIndex ? 'page' : undefined} disabled={Boolean(busy)} onClick={() => void goPage(i)}>{i + 1}{edited ? ' •' : ''}</button>;
+            })}</div>}
+          </>}
           <p className="sidebar-label">Página</p>
-          <p className="design-hint">{width} × {height} px. Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar.</p>
-          <label className="design-field">Fundo <input type="color" value={backgroundColor} onChange={e => setBackground(e.target.value)} /></label>
+          <p className="design-hint">{docMode ? 'Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar.' : `${width} × ${height} px. Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar.`}</p>
+          {!docMode && <label className="design-field">Fundo <input type="color" value={backgroundColor} onChange={e => setBackground(e.target.value)} /></label>}
           <label className="design-check"><input type="checkbox" checked={margins} onChange={e => { setMargins(e.target.checked); localStorage.setItem('ayla-design-margens', e.target.checked ? 'sim' : 'nao'); canvas?.requestRenderAll(); }} /> Mostrar margens</label>
           <p className="design-hint">Ao arrastar, os elementos encaixam nas margens, no centro da página e nas bordas dos outros; a linha rosa mostra o alinhamento. As margens não aparecem na exportação.</p>
           <p className="design-hint">Atalhos: Ctrl+Z desfaz, Ctrl+D duplica, Delete apaga, setas movem (Shift: 10 px), Ctrl+S salva.</p>

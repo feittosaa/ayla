@@ -26,7 +26,7 @@ pub fn private_or_local(message: &str) -> bool {
     let text = words(message);
     let any = |terms: &[&str]| terms.iter().any(|term| text.contains(term));
     policy::suspect_content(message) || organs::finance_question(message) || super::fichas::pedido(message)
-        || athena::note_request(message) || reminders::is_request(message)
+        || athena::note_request(message) || reminders::is_request(message) || super::rotinas::pedido(message)
         || iris::comparison_question(message)
         || any(&[" que criei ", " eu criei ", " que escrevi ", " que conversamos ", " nas notas ",
             " no cofre ", " na pasta ", " no projeto ", " athena ", " iris ", " obsidian ",
@@ -37,6 +37,45 @@ pub fn private_or_local(message: &str) -> bool {
             " que te mandei ", " que enviei ", " aqui na conversa ", " que discutimos "])
         || super::memory::explicit_command(message)
         || own_data(&text)
+}
+
+/// Mensagem anterior com dado de fato da pessoa (sensível, finanças, contato, saúde…). Não conta a
+/// intenção do pedido (nota, ficha, lembrete, Athena): isso decide onde responder, não o que é privado.
+fn personal_turn(message: &str) -> bool {
+    let text = words(message);
+    policy::certain_reason(message).is_some() || organs::finance_question(message)
+        || [" confidencial ", " paciente ", " endereco ", " mora na ", " moro ",
+            " telefone ", " chave de api ", " cpf ", " salario ", " diagnostico ", " prontuario "]
+            .iter().any(|term| text.contains(term))
+}
+
+/// A resposta leu dados guardados neste computador: notas ou arquivos (fontes sem link), ficha ou Hand.
+fn private_extras(raw: Option<&str>) -> bool {
+    let Some(extras) = raw.and_then(|r| serde_json::from_str::<Value>(r).ok()) else { return false };
+    ["ficha", "ficha_ref", "hand"].iter().any(|k| !extras[*k].is_null())
+        || extras["sources"].as_array().is_some_and(|list| list.iter().any(|s| s["url"].as_str().is_none_or(str::is_empty)))
+}
+
+/// Trocas anteriores que podem acompanhar um envio à nuvem (decisão do usuário, 27/11/2026).
+/// Vão em pares pergunta/resposta. Um par já respondido na nuvem vai de novo sem conferência (já foi
+/// compartilhado); um par respondido neste computador não pode ter arquivos, notas/arquivos lidos,
+/// ficha, Hand nem dado de fato da pessoa (pelo formato, como em notas; palavras de ficção não contam). Os pares retidos são contados
+/// para a Ayla perguntar antes de enviar sem eles.
+pub fn cloud_history(turns: &[super::store::HistoryTurn]) -> (Vec<(String, String)>, usize) {
+    let (mut sent, mut held) = (Vec::new(), 0);
+    let mut index = 0;
+    while index < turns.len() {
+        // Um par começa na pergunta; uma resposta solta (corte do limite) vale sozinha.
+        let pair: &[super::store::HistoryTurn] = if turns[index].role == "user" && turns.get(index + 1).is_some_and(|t| t.role == "assistant") {
+            &turns[index..index + 2]
+        } else { &turns[index..index + 1] };
+        index += pair.len();
+        let cloud = pair.iter().any(|t| t.role == "assistant" && t.origin.as_deref().is_some_and(|o| o.starts_with("cloud")));
+        // O que já foi compartilhado com a nuvem continua podendo ir.
+        let public = cloud || pair.iter().all(|t| !t.files && !private_extras(t.extras.as_deref()) && !personal_turn(&t.content));
+        if public { sent.extend(pair.iter().map(|t| (t.role.clone(), t.content.clone()))); } else { held += 1; }
+    }
+    (sent, held)
 }
 
 /// "minhas notas", "meu arquivo", "minha conta"…: dados guardados da pessoa.
@@ -96,9 +135,10 @@ pub async fn automatic_route(state: &super::services::Core, prefs: &super::prefe
     let Ok(model) = super::models::choose(&models, super::models::Capability::Text, state.budget(prefs), prefs.context_tokens, None)
         else { return AutoRoute::Ask };
     let Some(found) = understand(state, &model, prefs, json!(message), cancel).await else { return AutoRoute::Ask };
-    // A agenda é dado da Athena: fica neste computador em qualquer modo. Designs são montados pelo
+    // A agenda é dado da Athena: fica neste computador em qualquer modo. Pedidos ao computador
+    // (Hand) também. Designs são montados pelo
     // modelo local e guardados na Iris.
-    let route = if found.offline || found.agenda || found.design { AutoRoute::Local } else { match found.privacy {
+    let route = if found.offline || found.agenda || found.design || found.computador { AutoRoute::Local } else { match found.privacy {
         Privacy::Search => AutoRoute::Search,
         // Pedido público com link: só a pesquisa na web abre a página.
         Privacy::Public if has_link(message) => AutoRoute::Search,
@@ -128,6 +168,14 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
     if super::understand::guard(&message) {
         return Ok(json!({"route": "local", "search": false}));
     }
+    // Pedido ao Hand ("tira um print", "organiza meus Downloads"): feito neste computador, sem modelo.
+    if super::hand::pedido(&message).is_some() {
+        return Ok(json!({"route": "local", "search": false}));
+    }
+    // Resposta à pergunta do Hand ("pela Ayla"): neste computador.
+    if super::services::hand::segue_hand(&state, conversation.as_deref(), edit_of, regenerate, &message) {
+        return Ok(json!({"route": "local", "search": false}));
+    }
     // Mudança na ficha de que a resposta anterior tratou: fica neste computador, como as fichas.
     if super::services::segue_ficha(&state, conversation.as_deref(), edit_of, regenerate, &message) {
         return Ok(json!({"route": "local", "search": false}));
@@ -138,6 +186,8 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
     let search = route == AutoRoute::Search || suggests_web_search(&message);
     // O pedido usa notas da Athena: elas só vão junto se estiverem tranquilas e a pessoa aceitar.
     let plan = state.understood.lock().ok().and_then(|kept| kept.clone()).filter(|(m, _)| *m == message).map(|(_, plan)| plan);
+    // Pedido ao computador (Hand): sem notas junto, neste computador.
+    if plan.as_ref().is_some_and(|p| p.computador) { return Ok(json!({"route": "local", "search": false})); }
     if let Some(plan) = plan {
         use super::note_offer::{offer, Offer};
         let skip = super::note_offer::sibling_paths(&state, conversation.as_deref(), edit_of, regenerate);
@@ -149,6 +199,16 @@ pub async fn automatic_check(state: tauri::State<'_, super::services::Core>, mes
         }
     }
     let name = match route { AutoRoute::Local => "local", AutoRoute::Cloud => "cloud", AutoRoute::Search => "search", AutoRoute::Ask => "ask" };
+    // Trocas anteriores com dado da pessoa: pergunta antes de enviar sem elas.
+    if matches!(route, AutoRoute::Cloud | AutoRoute::Search) {
+        if let Some(conversation) = conversation.as_deref() {
+            let held = state.store.lock().ok().and_then(|db| {
+                let (placement, _) = db.placement(conversation, edit_of, regenerate).ok()?;
+                db.history_turns(conversation, placement.parent, prefs.history_messages, prefs.history_chars).ok()
+            }).map(|turns| cloud_history(&turns).1).unwrap_or(0);
+            if held > 0 { return Ok(json!({"route": "ask", "search": search, "held": held})); }
+        }
+    }
     Ok(json!({"route": name, "search": search}))
 }
 
@@ -173,12 +233,17 @@ pub async fn cloud_notes_check(state: tauri::State<'_, super::services::Core>, m
     })
 }
 
+const SEARCH_EMPTY: &str = "A pesquisa não encontrou fontes diretas para esse pedido. Tente detalhar o que deseja encontrar.";
+const SEARCH_UNFINISHED: &str = "O modelo não concluiu uma pesquisa na web.";
+/// A pesquisa terminou sem fontes: a conversa na nuvem ainda pode responder.
+pub fn search_came_empty(error: &str) -> bool { error == SEARCH_EMPTY || error == SEARCH_UNFINISHED }
+
 // Apenas a saída final de uma pesquisa concluída pode virar resposta na conversa.
 pub fn answer(response: &Value, videos: bool) -> Result<String, String> {
-    let missing = "A pesquisa não encontrou fontes diretas para esse pedido. Tente detalhar o que deseja encontrar.";
+    let missing = SEARCH_EMPTY;
     let items = response["output"].as_array().ok_or(missing)?;
     if !items.iter().any(|item| item["type"] == "web_search_call" && item["status"] == "completed") {
-        return Err("O modelo não concluiu uma pesquisa na web.".into());
+        return Err(SEARCH_UNFINISHED.into());
     }
     let mut paragraphs = Vec::new();
     for part in items.iter().filter(|item| item["type"] == "message")
@@ -255,6 +320,40 @@ fn video_url(url: &reqwest::Url) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn turn(role: &str, content: &str, origin: Option<&str>) -> crate::core::store::HistoryTurn {
+        crate::core::store::HistoryTurn { role: role.into(), content: content.into(), origin: origin.map(str::to_string), extras: None, files: false }
+    }
+
+    #[test]
+    fn cloud_history_keeps_public_pairs_and_counts_held_ones() {
+        let mut with_file = turn("user", "o que acha deste roteiro?", None);
+        with_file.files = true;
+        let mut read_note = turn("assistant", "Segundo a sua nota…", None);
+        read_note.extras = Some(json!({"sources":[{"id":"nota:Gancho.md","name":"Gancho","pages":[]}]}).to_string());
+        let mut created = turn("assistant", "Gancho 10.1 reescrito", None);
+        created.extras = Some(json!({"created":[{"title":"Gancho"}],"sources":[{"id":"w","name":"Site","url":"https://exemplo.org"}]}).to_string());
+        let turns = vec![
+            turn("user", "me ajuda a criar um vilão para a campanha", None), turn("assistant", "Ideias de vilão", Some("cloud")),
+            turn("user", "qual é o meu saldo na Moneta?", None), turn("assistant", "R$ 1.234", None),
+            with_file, turn("assistant", "Gostei do roteiro", None),
+            turn("user", "usa a nota do gancho", None), read_note,
+            // Pedido de nota/ficha sem dado pessoal: a intenção não torna a troca privada.
+            turn("user", "altera o gancho 10.1 pra mim, com um pescador", None), created,
+            turn("user", "meu telefone é 11 98765-4321, decora", None), turn("assistant", "Anotado", None),
+            // Ficção com palavras de segredo, respondida localmente, e resposta da nuvem: vão.
+            turn("user", "a porta secreta tem uma senha mágica", None), turn("assistant", "A senha é o nome do rei", None),
+            turn("user", "e o que eles veem?", None), turn("assistant", "Uma passagem secreta", Some("cloud_search")),
+        ];
+        let (sent, held) = cloud_history(&turns);
+        assert_eq!(held, 4, "finanças, arquivo, nota lida e telefone ficam");
+        assert_eq!(sent.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>(),
+            ["me ajuda a criar um vilão para a campanha", "Ideias de vilão", "altera o gancho 10.1 pra mim, com um pescador", "Gancho 10.1 reescrito",
+             "a porta secreta tem uma senha mágica", "A senha é o nome do rei", "e o que eles veem?", "Uma passagem secreta"]);
+        // Resposta solta (cortada pelo limite) sem dado pessoal também vai.
+        assert_eq!(cloud_history(&[turn("assistant", "Ideias", Some("cloud"))]), (vec![("assistant".into(), "Ideias".into())], 0));
+        assert!(search_came_empty(SEARCH_EMPTY) && search_came_empty(SEARCH_UNFINISHED) && !search_came_empty("HTTP 429"));
+    }
 
     #[test]
     fn public_research_is_general_and_private_tasks_stay_local() {
@@ -414,7 +513,7 @@ mod tests {
     fn research_uses_connected_account_and_requires_search_tool() {
         use crate::core::cloud::{search_request,Secret};
         for (platform, secret) in [("chatgpt", Secret::ChatGpt("fixture".into())), ("openai", Secret::Key("fixture".into()))] {
-            let request = search_request(platform,&secret,"model",Some("low"),"Personalidade revisada","Pedido público").unwrap().build().unwrap();
+            let request = search_request(platform,&secret,"model",Some("low"),"Personalidade revisada",&[],"Pedido público").unwrap().build().unwrap();
             assert_eq!(request.url().as_str(),"https://api.openai.com/v1/responses");
             let body: Value = serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
             assert_eq!(body["tools"][0]["type"], "web_search");
@@ -425,6 +524,6 @@ mod tests {
             assert_eq!(body["input"][0]["content"],"Pedido público");
             assert!(body["instructions"].as_str().unwrap().contains("Personalidade revisada"));
         }
-        assert!(search_request("custom",&Secret::Key("fixture".into()),"model",None,"p","q").is_err());
+        assert!(search_request("custom",&Secret::Key("fixture".into()),"model",None,"p",&[],"q").is_err());
     }
 }

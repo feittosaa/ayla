@@ -53,6 +53,9 @@ pub struct Preferences {
     pub athena_folder: String,
     pub iris_folder: Option<PathBuf>,
     pub iris_folders: Vec<PathBuf>,
+    /// Pastas em que o Hand pode mudar arquivos (mover, renomear, criar, lixeira). `None`: as
+    /// padrão (Downloads, Documentos, Imagens, Área de trabalho). A busca vê a pasta pessoal toda.
+    pub hand_folders: Option<Vec<PathBuf>>,
     /// Cofres (pastas de notas, ex.: do Obsidian) abertos na Athena, além das notas da Athena.
     pub athena_vaults: Vec<String>,
     /// Pastas de livros e mangás conectadas à Biblioteca da Athena (lidas no lugar, sem cópia).
@@ -68,6 +71,23 @@ pub struct Preferences {
     pub hidden_sources: Vec<String>,
     /// Aparência da Ayla: modo, cores, quinas, transparência e ícones.
     pub appearance: Appearance,
+    /// Calendário da Athena: onde a pessoa mora (feriados estaduais e municipais).
+    pub calendar: CalendarPreferences,
+}
+
+/// Configurações › Athena › Calendários.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CalendarPreferences {
+    /// Mostrar feriados (nacionais, estaduais, municipais e pontos facultativos).
+    pub feriados: bool,
+    /// Sigla do estado ("SP"); vazio: só os nacionais.
+    pub uf: String,
+    /// Município (os feriados dele são pesquisados uma vez por ano).
+    pub cidade: String,
+}
+impl Default for CalendarPreferences {
+    fn default() -> Self { Self { feriados: true, uf: String::new(), cidade: String::new() } }
 }
 
 /// Personalização visual (Configurações › Aparência). Vale para a janela, a visão rápida
@@ -181,12 +201,14 @@ impl Default for Preferences {
             athena_folder: String::new(),
             iris_folder: None,
             iris_folders: Vec::new(),
+            hand_folders: None,
             athena_vaults: Vec::new(),
             library_folders: Vec::new(),
             athena_git: true,
             response_source: String::new(),
             hidden_sources: Vec::new(),
             appearance: Appearance::default(),
+            calendar: CalendarPreferences::default(),
         }
     }
 }
@@ -291,6 +313,9 @@ impl Preferences {
             || self.hidden_sources.len() > 200
             || self.hidden_sources.iter().any(|s| s.is_empty() || s.len() > 200 || s.chars().any(char::is_control))
             || !self.appearance.valid()
+            || (!self.calendar.uf.is_empty() && super::feriados::nome_uf(&self.calendar.uf).is_none())
+            || self.calendar.cidade.chars().count() > 80
+            || self.calendar.cidade.chars().any(char::is_control)
         {
             return Err(io::Error::other("Configuração fora dos limites suportados"));
         }
