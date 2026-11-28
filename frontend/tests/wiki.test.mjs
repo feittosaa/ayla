@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TAG, WIKI, attachmentUrl, changeBanner, setMediaVersions, frontmatter, embedResolver, imageWidth, isAttachment, resizedImage, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
+import { TAG, WIKI, attachmentUrl, changeBanner, setMediaVersions, frontmatter, noteAliases, removeBanner, setAliases, embedResolver, imageWidth, isAttachment, resizedImage, storedUrl, wikiToMarkdown } from '../src/services/Wiki.ts';
 
 test('links do Obsidian viram links internos, com apelido e seção', () => {
   assert.equal(wikiToMarkdown('Ver [[Personagens]].'), `Ver [Personagens](${WIKI}Personagens).`);
@@ -27,7 +27,8 @@ test('código fica como está e texto sem links não muda', () => {
 
 test('frontmatter vira propriedades e banner, fora do corpo da nota', () => {
   const note = frontmatter('---\naliases:\n  - Mata\n  - "Bosque"\ntags: [lugar, mapa]\nbanner: imagens/capa.png\nbanner_y: "40"\n---\n\n# Floresta\n');
-  assert.deepEqual(note.properties, [{ key: 'aliases', values: ['Mata', 'Bosque'] }, { key: 'tags', values: ['lugar', 'mapa'] }]);
+  assert.deepEqual(note.properties, [{ key: 'tags', values: ['lugar', 'mapa'] }]);
+  assert.deepEqual(note.aliases, ['Mata', 'Bosque'], 'apelidos à parte, editáveis');
   assert.deepEqual(note.banner, { target: 'imagens/capa.png', y: 40 });
   assert.equal(note.body, '\n# Floresta\n');
 });
@@ -38,7 +39,7 @@ test('banner aceita [[imagem]], posição em porcentagem como o make-md e a fra�
   assert.deepEqual(frontmatter('---\nbanner: capa.jpg\nbanner_y: "1"\n---\nx').banner, { target: 'capa.jpg', y: 1 });
   assert.deepEqual(frontmatter('---\nbanner: capa.jpg\nbanner_y: 1\n---\nx').banner, { target: 'capa.jpg', y: 1 });
   assert.equal(frontmatter('---\nbanner: https://exemplo.com/a.png\n---\nx').banner, null);
-  assert.deepEqual(frontmatter('# Só texto\n---\nbanner: a.png\n---'), { properties: [], banner: null, body: '# Só texto\n---\nbanner: a.png\n---' });
+  assert.deepEqual(frontmatter('# Só texto\n---\nbanner: a.png\n---'), { properties: [], aliases: [], banner: null, body: '# Só texto\n---\nbanner: a.png\n---' });
 });
 
 test('anexos do Obsidian: largura em ![[foto|300]], .jfif e PDF embutido; link para PDF não vira nota', () => {
@@ -70,15 +71,16 @@ test('ajustes do banner preservam o corpo e as outras propriedades do cofre', ()
   const resized = changeBanner(changeBanner(text, 'banner_height', 320), 'banner_y', 1);
   assert.equal(resized, '---\r\nbanner: Imagens/Coruja.jpg\r\nbanner_y: "1"\r\ntags: [fera]\r\nbanner_height: 320\r\n---\r\n[[Feras|Fera]]');
   assert.equal(changeBanner(text, 'banner_y', 37.25).split('\r\n')[2], 'banner_y: "37.3"');
-  assert.deepEqual(frontmatter(resized), { banner: { target: 'Imagens/Coruja.jpg', y: 1, height: 320 }, properties: [{ key: 'tags', values: ['fera'] }], body: '[[Feras|Fera]]' });
+  assert.deepEqual(frontmatter(resized), { banner: { target: 'Imagens/Coruja.jpg', y: 1, height: 320 }, properties: [{ key: 'tags', values: ['fera'] }], aliases: [], body: '[[Feras|Fera]]' });
 });
 
 test('texto que começa com --- (separador) não vira propriedades nem esconde o começo da nota', () => {
   const text = '---\njogo de luta rogue like\ncartas de habilidades\n\nmain game (modo historia) - rogue like\n---\n10 - composite\n';
-  assert.deepEqual(frontmatter(text), { properties: [], banner: null, body: text });
+  assert.deepEqual(frontmatter(text), { properties: [], aliases: [], banner: null, body: text });
   assert.equal(changeBanner(text, 'banner_y', 30), text);
   const valid = frontmatter('---\n# comentário\ntags:\n- rpg\naliases: [a, b]\n---\nCorpo');
-  assert.deepEqual(valid.properties, [{ key: 'tags', values: ['rpg'] }, { key: 'aliases', values: ['a', 'b'] }]);
+  assert.deepEqual(valid.properties, [{ key: 'tags', values: ['rpg'] }]);
+  assert.deepEqual(valid.aliases, ['a', 'b']);
   assert.equal(valid.body, 'Corpo');
 });
 
@@ -102,4 +104,29 @@ test('anexo trocado no lugar ganha endereço novo (data de alteração), pelo ca
   setMediaVersions('cofre', [{ path: 'Imagens/Mapas/Krakatoa.png', modified: 200 }]);
   assert.ok(attachmentUrl('cofre', 'Imagens/Mapas/Krakatoa.png').endsWith('?v=200'));
   assert.ok(!attachmentUrl('outro', 'Imagens/Mapas/Krakatoa.png').includes('v='), 'cada raiz com as suas datas');
+});
+
+test('apelidos: lidos de aliases/alias, criados, editados e removidos no topo da nota', () => {
+  const nota = '---\ntags: [npc]\naliases:\n  - Kael\n  - "Kûarasy"\ncriado: 2026\n---\n# Kael\ntexto';
+  assert.deepEqual(noteAliases(nota), ['Kael', 'Kûarasy']);
+  assert.deepEqual(frontmatter(nota).properties.map(p => p.key), ['tags', 'criado'], 'apelidos saem da lista comum');
+  const editada = setAliases(nota, ['Kael', 'O Caçador', 'Kael']);
+  assert.equal(editada, '---\ntags: [npc]\naliases:\n  - Kael\n  - O Caçador\ncriado: 2026\n---\n# Kael\ntexto');
+  assert.equal(setAliases(nota, []), '---\ntags: [npc]\ncriado: 2026\n---\n# Kael\ntexto');
+  // Sem propriedades: cria o bloco; com só o apelido, removê-lo tira o bloco.
+  const nova = setAliases('# Nota\r\ncorpo', ['Pescador: o velho']);
+  assert.equal(nova, '---\r\naliases:\r\n  - "Pescador: o velho"\r\n---\r\n# Nota\r\ncorpo');
+  assert.deepEqual(noteAliases(nova), ['Pescador: o velho']);
+  assert.equal(setAliases(nova, []), '# Nota\r\ncorpo');
+  // `alias` antigo em linha vira `aliases`.
+  assert.equal(setAliases('---\nalias: Velho\n---\nx', ['Velho', 'Tomás']), '---\naliases:\n  - Velho\n  - Tomás\n---\nx');
+});
+
+test('banner removido: só as chaves do banner saem; sem outras propriedades, o bloco sai', () => {
+  const nota = '---\nbanner: Imagens/capa.png\nbanner_y: "40"\ntags: [npc]\nbanner_height: 320\n---\n\n# Kael';
+  assert.equal(removeBanner(nota), '---\ntags: [npc]\n---\n\n# Kael');
+  assert.equal(removeBanner('---\r\nbanner: a.png\r\nbanner_y: "10"\r\n---\r\n\r\n# Só'), '# Só', 'desfaz o bloco criado pelo banner');
+  // Trocar a imagem: a posição antiga sai e a altura fica.
+  assert.equal(removeBanner(nota, ['banner_y']), '---\nbanner: Imagens/capa.png\ntags: [npc]\nbanner_height: 320\n---\n\n# Kael');
+  assert.equal(removeBanner('# sem propriedades'), '# sem propriedades');
 });

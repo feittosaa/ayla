@@ -8,7 +8,9 @@ import './AthenaCalendar.css';
 
 /** Uma ocorrência num dia (os itens que repetem aparecem em cada dia). */
 type Item = { id: string; text: string; date: string; time: string | null; repeat: string; notify: boolean; past: boolean; start_date: string; repeat_label: string; alerts: number[] };
-type Range = { items: Item[]; notes: string[] };
+type Holiday = { data: string; nome: string; tipo: 'nacional' | 'estadual' | 'municipal' | 'facultativo' };
+type Range = { items: Item[]; notes: string[]; holidays?: Holiday[] };
+const HOLIDAY_KIND: Record<Holiday['tipo'], string> = { nacional: 'Feriado nacional', estadual: 'Feriado estadual', municipal: 'Feriado municipal', facultativo: 'Ponto facultativo' };
 /** Data e hora como digitadas (DD/MM/AAAA e HH:MM, 24 h); convertidas ao salvar. */
 type Draft = { id: string | null; text: string; date: string; allDay: boolean; time: string; repeat: string; alerts: Alert[] };
 const UNITS: [AlertUnit, string][] = [['na-hora', 'Na hora do evento'], ['minutos', 'Minutos antes'], ['horas', 'Horas antes'], ['dias', 'Dias antes']];
@@ -97,6 +99,11 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
     return map;
   }, [data.items]);
   const notes = useMemo(() => new Set(data.notes), [data.notes]);
+  const holidays = useMemo(() => {
+    const map = new Map<string, Holiday[]>();
+    for (const h of data.holidays ?? []) map.set(h.data, [...(map.get(h.data) ?? []), h]);
+    return map;
+  }, [data.holidays]);
   const step = (delta: number) => setStart(monthStart(new Date(month.getFullYear(), month.getMonth() + delta, 1)));
   const goToday = () => { setStart(monthStart(new Date())); setSelected(today); };
   // A grade é contínua: escolher um dia não pula de mês (ele já está à vista).
@@ -140,20 +147,24 @@ export default function AthenaCalendar({ onClose, onOpenDay }: { onClose: () => 
         {WEEK.map(name => <span key={name} className="calendar-weekday" role="columnheader">{name}</span>)}
         {days.map(date => {
           const items = byDay.get(date) ?? [];
+          const dayHolidays = holidays.get(date) ?? [];
+          const official = dayHolidays.some(h => h.tipo !== 'facultativo');
           const outside = parse(date).getMonth() !== month.getMonth();
           return <button key={date} role="gridcell" aria-selected={date === selected} aria-current={date === today ? 'date' : undefined}
-            className={['calendar-day', outside ? 'outside' : '', date === selected ? 'selected' : '', date === today ? 'today' : ''].join(' ')}
-            aria-label={`${longDay(date)}${notes.has(date) ? ', com nota do dia' : ''}${items.length ? `, ${items.length} ${items.length === 1 ? 'item' : 'itens'}` : ''}`}
+            className={['calendar-day', outside ? 'outside' : '', date === selected ? 'selected' : '', date === today ? 'today' : '', official ? 'holiday' : ''].join(' ')}
+            aria-label={`${longDay(date)}${dayHolidays.map(h => `, ${h.nome} (${HOLIDAY_KIND[h.tipo].toLowerCase()})`).join('')}${notes.has(date) ? ', com nota do dia' : ''}${items.length ? `, ${items.length} ${items.length === 1 ? 'item' : 'itens'}` : ''}`}
             onClick={() => pick(date)} onDoubleClick={() => { pick(date); setDraft(newDraft(false, date)); }}>
             <span className="calendar-number">{parse(date).getDate()}{notes.has(date) && <FileIcon size={11} />}</span>
-            {items.slice(0, 3).map((item, k) => <span key={`${item.id}-${k}`} className={['calendar-chip', item.notify ? 'reminder' : '', item.past ? 'past' : ''].join(' ')}>{item.time && <b>{item.time}</b>}{item.text}</span>)}
-            {items.length > 3 && <span className="calendar-more">+{items.length - 3}</span>}
+            {dayHolidays.map(h => <span key={h.nome} className={`calendar-chip holiday ${h.tipo}`} title={`${h.nome} · ${HOLIDAY_KIND[h.tipo]}`}>{h.nome}</span>)}
+            {items.slice(0, Math.max(1, 3 - dayHolidays.length)).map((item, k) => <span key={`${item.id}-${k}`} className={['calendar-chip', item.notify ? 'reminder' : '', item.past ? 'past' : ''].join(' ')}>{item.time && <b>{item.time}</b>}{item.text}</span>)}
+            {items.length > Math.max(1, 3 - dayHolidays.length) && <span className="calendar-more">+{items.length - Math.max(1, 3 - dayHolidays.length)}</span>}
           </button>;
         })}
       </div>
 
       <aside className="calendar-day-panel" aria-label={longDay(selected)}>
         <h3>{longDay(selected)}</h3>
+        {(holidays.get(selected) ?? []).map(h => <p key={h.nome} className={`calendar-holiday ${h.tipo}`}><b>{h.nome}</b><small>{HOLIDAY_KIND[h.tipo]}</small></p>)}
         <button className="calendar-note" onClick={() => onOpenDay(selected)}>
           <FileIcon size={15} />{notes.has(selected) ? 'Abrir a nota do dia' : 'Criar a nota do dia'}
         </button>

@@ -28,10 +28,15 @@ type Props = {
   onLink: (target: string) => void;
   /** O cursor mudou de lugar sem digitar (clique, setas). */
   onCaret?: (caret: number) => void;
+  /** O editor ficou pronto (para voltar ao cursor e à tela de antes). */
+  onReady?: (view: EditorView) => void;
   /** `![[nome]]` sem extensão: o anexo com esse nome, se houver. */
   embed?: (name: string) => string | undefined;
   /** Muda quando os anexos da raiz mudam (imagem trocada no lugar): redesenha as imagens. */
   media?: unknown;
+  /** Busca na nota (Ctrl+F): ocorrências [início, fim) no texto do editor e qual é a atual; `step`
+   * muda a cada navegação, para levar a atual à tela. */
+  find?: { matches: [number, number][]; current: number; step: number } | null;
 };
 
 const external = Annotation.define<boolean>();
@@ -39,6 +44,23 @@ const external = Annotation.define<boolean>();
 const pointerUp = StateEffect.define<null>();
 /** Os anexos mudaram: refaz as marcas (imagens com o endereço novo). */
 const mediaChanged = StateEffect.define<null>();
+/** Busca na nota: destaca as ocorrências (a atual com outra cor). */
+const findChanged = StateEffect.define<{ matches: [number, number][]; current: number } | null>();
+const findMark = Decoration.mark({ class: 'athena-find' });
+const findCurrent = Decoration.mark({ class: 'athena-find athena-find-current' });
+const findField = StateField.define({
+  create: () => Decoration.none,
+  update(value, tr) {
+    for (const effect of tr.effects) if (effect.is(findChanged)) {
+      const found = effect.value; if (!found) return Decoration.none;
+      const size = tr.state.doc.length;
+      return Decoration.set(found.matches.filter(([from, to]) => from < to && to <= size)
+        .map(([from, to], i) => (i === found.current ? findCurrent : findMark).range(from, to)), true);
+    }
+    return tr.docChanged ? value.map(tr.changes) : value;
+  },
+  provide: field => EditorView.decorations.from(field),
+});
 const wikiPattern = /^(!?)\[\[([^\]\n|]+)(?:\|([^\]\n]+))?\]\]/;
 // Pares fechados sozinhos, como no Obsidian: digitar o fechamento ou dar Enter logo antes dele
 // sai do par; Backspace no par vazio apaga os dois.
@@ -349,7 +371,7 @@ export default function AthenaEditor(props: Props) {
       parent: mount.current!,
       doc: initial.value,
       extensions: [
-        language, language.language.data.of({ closeBrackets: pairs }), closeBrackets(), plugin, drawn, history(),
+        language, language.language.data.of({ closeBrackets: pairs }), closeBrackets(), plugin, drawn, history(), findField,
         Prec.highest(keymap.of((['Enter', 'Tab', 'ArrowUp', 'ArrowDown'] as const).map(key => ({ key, run: () => options.current.onSuggestKey(key) })))),
         Prec.high(keymap.of([{ key: 'Enter', run: leavePair }])),
         keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
@@ -396,6 +418,7 @@ export default function AthenaEditor(props: Props) {
     });
     initial.editor.current = view;
     if (initial.autoFocus) view.focus();
+    initial.onReady?.(view);
     const release = () => { if (selecting) { selecting = false; view.dispatch({ effects: pointerUp.of(null) }); } };
     window.addEventListener('mouseup', release);
     return () => { window.removeEventListener('mouseup', release); initial.editor.current = null; view.destroy(); };
@@ -414,5 +437,15 @@ export default function AthenaEditor(props: Props) {
     if (view.state.readOnly !== props.readOnly) view.dispatch({ effects: readOnly.current.reconfigure(EditorState.readOnly.of(props.readOnly)) });
   }, [props.editor, props.value, props.readOnly]);
   useLayoutEffect(() => { props.editor.current?.dispatch({ effects: mediaChanged.of(null) }); }, [props.editor, props.media]);
+  const find = props.find;
+  useLayoutEffect(() => { props.editor.current?.dispatch({ effects: findChanged.of(find ? { matches: find.matches, current: find.current } : null) }); }, [props.editor, find]);
+  // Leva a ocorrência atual à tela (selecionada), sem tirar o foco da caixa de busca.
+  const step = find?.step; const target = find?.matches[find.current];
+  useLayoutEffect(() => {
+    const view = props.editor.current;
+    if (!view || !target || target[1] > view.state.doc.length) return;
+    view.dispatch({ selection: { anchor: target[0], head: target[1] }, effects: EditorView.scrollIntoView(target[0], { y: 'center' }) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.editor, step]);
   return <div ref={mount} className="athena-visual-editor markdown" />;
 }

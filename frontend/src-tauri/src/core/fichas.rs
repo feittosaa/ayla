@@ -848,6 +848,54 @@ pub fn pede_tracos_novos(message: &str) -> Option<usize> {
     Some(perto.unwrap_or(2))
 }
 
+/// Traço de outra ficha do cofre, para copiar o efeito ("igual ao da ficha do jogador").
+#[derive(Clone, Debug, PartialEq)]
+pub struct TracoDeOutra { pub titulo: String, pub descricao: String, pub pdf: String, pub personagem: String }
+
+/// O pedido manda usar o texto de um traço que já existe ("o mesmo efeito do traço…", "igual ao
+/// da ficha do Bart", "copia o traço…").
+pub fn pede_copia(message: &str) -> bool {
+    let text = format!("-{}-", slug(message));
+    ["-mesmo-efeito-", "-mesma-descricao-", "-mesmo-texto-", "-mesma-coisa-", "-igual-", "-iguais-", "-copia-", "-copie-", "-copiar-",
+        "-como-na-ficha-", "-como-o-da-", "-como-esta-na-", "-identico-", "-identica-", "-o-mesmo-do-", "-o-mesmo-da-", "-a-mesma-do-", "-a-mesma-da-"]
+        .iter().any(|t| text.contains(t))
+}
+
+/// Para cada traço citado no pedido (pelo título), a versão de outra ficha a copiar: a da ficha
+/// citada (palavra do PDF ou do personagem no pedido) ou, sem citação, a única descrição que
+/// existe. Títulos com versões diferentes e nenhuma citada ficam de fora (o modelo escolhe).
+pub fn copias_de_tracos<'a>(message: &str, outras: &'a [TracoDeOutra]) -> Vec<&'a TracoDeOutra> {
+    let pedido = format!("-{}-", slug(message));
+    let genericas = ["ficha", "fichas", "traco", "tracos", "jogo", "pdf", "copia", "pagina"];
+    let citada = |t: &TracoDeOutra| slug(&format!("{} {}", t.pdf.trim_end_matches(".pdf"), t.personagem)).split('-')
+        .any(|w| w.len() >= 4 && !genericas.contains(&w) && pedido.contains(&format!("-{w}-")));
+    let mut titulos: Vec<String> = outras.iter().map(|t| slug(&t.titulo)).filter(|t| !t.is_empty() && pedido.contains(&format!("-{t}-"))).collect();
+    titulos.sort(); titulos.dedup();
+    titulos.iter().filter_map(|titulo| {
+        let todas: Vec<&TracoDeOutra> = outras.iter().filter(|t| slug(&t.titulo) == *titulo && !t.descricao.trim().is_empty()).collect();
+        let citadas: Vec<&TracoDeOutra> = todas.iter().copied().filter(|t| citada(t)).collect();
+        let grupo = if citadas.is_empty() { todas } else { citadas };
+        let primeira = grupo.first()?;
+        grupo.iter().all(|t| slug(&t.descricao) == slug(&primeira.descricao)).then_some(*primeira)
+    }).collect()
+}
+
+/// Põe cada traço copiado no lugar do traço de mesmo título (pelo título ou, num traço só com uma
+/// linha lida como descrição, por ela), na posição em que ele estava; sem ele, no fim. Cópias que o
+/// modelo tenha feito do mesmo traço saem.
+pub fn aplicar_copias(atual: &[Traco], proposta: Vec<Traco>, copias: &[&TracoDeOutra]) -> Vec<Traco> {
+    let mut lista = proposta;
+    for copia in copias {
+        let alvo = slug(&copia.titulo);
+        let mesmo = |t: &Traco| slug(&t.titulo) == alvo || (t.titulo.trim().is_empty() && slug(&t.descricao) == alvo);
+        let antes = atual.iter().position(mesmo);
+        lista.retain(|t| !mesmo(t));
+        let novo = Traco { titulo: copia.titulo.clone(), descricao: copia.descricao.clone() };
+        match antes { Some(i) if i <= lista.len() => lista.insert(i, novo), _ => lista.push(novo) }
+    }
+    lista
+}
+
 /// "Coloca 50 de vida", "vigor 50", "PV para 50": o número pedido para o Vigor (sem depender do modelo).
 pub fn pedido_vigor(message: &str) -> Option<i64> {
     let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
@@ -898,6 +946,14 @@ pub fn pede_nova(message: &str) -> bool {
     let words: Vec<String> = slug(message).split('-').map(str::to_string).collect();
     let criar = ["cria", "crie", "criar", "faz", "faca", "fazer", "monta", "monte", "montar", "gera", "gere", "gerar", "nova", "novo", "duplica", "duplique", "copia", "copie"];
     words.iter().any(|w| w == "ficha" || w == "fichas") && words.iter().any(|w| criar.contains(&w.as_str()))
+}
+
+/// "um nome de escolha sua", "invente um nome", "escolhe um nome": a Ayla escolhe o nome da ficha nova.
+pub fn pede_nome_livre(message: &str) -> bool {
+    let text = format!("-{}-", slug(message));
+    ["-um-nome-", "-nome-de-escolha-", "-nome-a-sua-escolha-", "-nome-que-quiser-", "-qualquer-nome-", "-invente-", "-inventa-"]
+        .iter().any(|t| text.contains(t))
+        || (text.contains("-nome-") && ["-escolha-", "-escolhe-", "-escolher-"].iter().any(|t| text.contains(t)))
 }
 
 /// Nome da ficha nova dito no pedido: "chamada Caranguejo Vulcânico", "com o nome X", entre aspas
@@ -1781,6 +1837,38 @@ pub(crate) mod tests {
         eprintln!("gravada em {:?}", t.elapsed());
         let relidos = ler(&mapa, &saida, 1).unwrap();
         for (k, v) in &novos { if relidos.get(k) != Some(v) { eprintln!("DIFERENTE {k}: {v:?} → {:?}", relidos.get(k)); } }
+    }
+
+    #[test]
+    fn copia_o_traco_da_ficha_citada() {
+        let t = |titulo: &str, descricao: &str, pdf: &str, personagem: &str| TracoDeOutra { titulo: titulo.into(), descricao: descricao.into(), pdf: pdf.into(), personagem: personagem.into() };
+        let outras = vec![
+            t("PERSPICÁCIA", "REPRESENTA A INTELIGÊNCIA E A HABILIDADE DE LER SITUAÇÕES", "Ficha Jogador.pdf", "Bartholomew Roberts"),
+            t("PERSPICÁCIA", "OUTRA VERSÃO", "Fichas Lendas.pdf", "Desconhecido"),
+            t("DETERMINAÇÃO", "VONTADE ESSENCIAL DE SOBREVIVER", "Ficha Jogador.pdf", "Bartholomew Roberts"),
+            t("DETERMINAÇÃO", "VONTADE ESSENCIAL DE SOBREVIVER", "Ficha Jogador.pdf", "Aurora"),
+        ];
+        let pedido = "o traço perspicacia deve ter o mesmo efeito do traço usado na ficha do jogador";
+        assert!(pede_copia(pedido) && pede_copia("deixa a determinação igual à do Bart") && !pede_copia("cria um traço de voo"));
+        let achadas = copias_de_tracos(pedido, &outras);
+        assert_eq!(achadas.iter().map(|t| t.descricao.as_str()).collect::<Vec<_>>(), ["REPRESENTA A INTELIGÊNCIA E A HABILIDADE DE LER SITUAÇÕES"]);
+        // Sem citar a ficha: duas versões diferentes → nenhuma; versões iguais → a única.
+        assert!(copias_de_tracos("perspicacia igual a outra ficha", &outras).is_empty());
+        assert_eq!(copias_de_tracos("copia a determinação", &outras).len(), 1);
+        // Na ficha do Kael o traço era uma linha só (lida como descrição); o modelo trocou por um inventado.
+        let tr = |titulo: &str, descricao: &str| Traco { titulo: titulo.into(), descricao: descricao.into() };
+        let atual = vec![tr("DETERMINAÇÃO", "X"), tr("", "PERSPICÁCIA"), tr("VOO", "Y")];
+        let proposta = vec![tr("DETERMINAÇÃO", "X"), tr("VOO", "Y"), tr("PERSPICÁCIA", "VOCÊ PODE USAR ASTUTO EM VEZ DE PRECISO PARA ATACAR.")];
+        assert_eq!(aplicar_copias(&atual, proposta, &achadas), vec![tr("DETERMINAÇÃO", "X"), tr("PERSPICÁCIA", "REPRESENTA A INTELIGÊNCIA E A HABILIDADE DE LER SITUAÇÕES"), tr("VOO", "Y")]);
+    }
+
+    #[test]
+    fn nome_livre_quando_a_pessoa_deixa_a_ayla_escolher() {
+        assert!(pede_nome_livre("criar ficha pro pescador, a lanca com uma habilidade de escolha sua, um nome e distribui os pontos"));
+        assert!(pede_nome_livre("cria uma ficha e escolhe um nome pra ele"));
+        assert!(!pede_nome_livre("cria a ficha do Caranguejo de Lava a partir da Besta Ark"));
+        assert!(!pede_nome_livre("muda o nome dele para Tomás"));
+        assert_eq!(nome_pedido("criar ficha pro pescador, ele so deve ter o poder de humano").as_deref(), Some("Pescador"));
     }
 
     #[test]

@@ -372,55 +372,71 @@ pub enum Secret {
 }
 
 /// Monta o pedido de resposta em streaming para a plataforma.
-pub fn chat_request(api: Api, base: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, message: &str) -> Result<reqwest::RequestBuilder, String> {
+pub fn chat_request(api: Api, base: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, history: &[(String, String)], message: &str) -> Result<reqwest::RequestBuilder, String> {
     let base = base.trim_end_matches('/');
     let client = client()?;
     Ok(match (api, secret) {
-        (Api::Compatible, Secret::Key(key)) => client.post(format!("{base}/chat/completions")).bearer_auth(key).json(&compatible_body(model, effort, system, message)),
+        (Api::Compatible, Secret::Key(key)) => client.post(format!("{base}/chat/completions")).bearer_auth(key).json(&compatible_body(model, effort, system, history, message)),
         (Api::Anthropic, Secret::Key(key)) => client.post(format!("{base}/messages")).header("x-api-key", key).header("anthropic-version", "2023-06-01")
-            .json(&anthropic_body(model, effort, system, message)),
-        (Api::ChatGpt, Secret::ChatGpt(token)) => client.post(format!("{OPENAI_API}/responses")).bearer_auth(token).json(&responses_body(model, effort, system, message)),
+            .json(&anthropic_body(model, effort, system, history, message)),
+        (Api::ChatGpt, Secret::ChatGpt(token)) => client.post(format!("{OPENAI_API}/responses")).bearer_auth(token).json(&responses_body(model, effort, system, history, message)),
         _ => return Err("Credencial incompatível com a plataforma".into()),
     })
 }
 
-pub fn search_request(platform: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, message: &str) -> Result<reqwest::RequestBuilder, String> {
+pub fn search_request(platform: &str, secret: &Secret, model: &str, effort: Option<&str>, system: &str, history: &[(String, String)], message: &str) -> Result<reqwest::RequestBuilder, String> {
     let key = match (platform, secret) {
         ("chatgpt", Secret::ChatGpt(token)) | ("openai", Secret::Key(token)) => token,
         _ => return Err("Para pesquisar na web, escolha uma conta do ChatGPT ou da OpenAI em Configurações › Nuvem.".into()),
     };
     let instructions = format!("{system}\n\nPesquise na web antes de responder. Se o pedido trouxer links, abra essas páginas primeiro e use o que elas mostram; diga com clareza quando uma página não abrir ou não mostrar o que foi pedido, sem inventar valores. Responda em português. Para pedidos abertos, traga de 3 a 4 opções distintas, ordenadas da melhor para a pior segundo o seu julgamento, e explique em uma frase por que cada uma funciona melhor ou pior. Respeite a quantidade pedida explicitamente. Cite junto de cada opção a página específica ou o vídeo encontrado usando a ferramenta de citações. Escreva os nomes em texto simples e deixe os links para as citações. Use apenas fontes pertinentes à plataforma solicitada. Se não encontrar o suficiente, seja claro sobre isso.");
-    let mut body = responses_body(model, effort, &instructions, message);
+    let mut body = responses_body(model, effort, &instructions, history, message);
     body["tools"] = json!([{"type":"web_search"}]);
     body["tool_choice"] = json!("required");
     Ok(client()?.post(format!("{OPENAI_API}/responses")).bearer_auth(key).json(&body))
 }
 
+/// Trocas anteriores já conferidas (ver `research::cloud_history`) seguidas do pedido atual.
+/// Nada fica guardado no provedor: a Ayla manda o contexto a cada pedido.
+/// Sempre alternando pessoa/assistente e começando pela pessoa (a API da Anthropic exige).
+fn turns(history: &[(String, String)], message: &str) -> Vec<Value> {
+    let mut list: Vec<(&str, String)> = Vec::new();
+    for (role, content) in history.iter().map(|(r, c)| (r.as_str(), c.as_str())).chain([("user", message)]) {
+        if role != "user" && role != "assistant" || list.is_empty() && role == "assistant" { continue; }
+        match list.last_mut() {
+            Some((last, text)) if *last == role => { text.push_str("\n\n"); text.push_str(content); }
+            _ => list.push((role, content.to_string())),
+        }
+    }
+    list.into_iter().map(|(role, content)| json!({"role": role, "content": content})).collect()
+}
 /// Esforço só vai quando a pessoa escolhe; sem escolha, cada plataforma usa o padrão dela.
-pub fn compatible_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
-    let mut body = json!({"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}], "stream": true});
+pub fn compatible_body(model: &str, effort: Option<&str>, system: &str, history: &[(String, String)], message: &str) -> Value {
+    let mut messages = vec![json!({"role": "system", "content": system})];
+    messages.extend(turns(history, message));
+    let mut body = json!({"model": model, "messages": messages, "stream": true});
     if let Some(effort) = effort {
         body["reasoning_effort"] = json!(effort);
     }
     body
 }
 /// Claude: esforço vira orçamento de raciocínio estendido; a resposta ganha espaço além dele.
-pub fn anthropic_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
+pub fn anthropic_body(model: &str, effort: Option<&str>, system: &str, history: &[(String, String)], message: &str) -> Value {
     let budget = match effort {
         Some("low") => Some(2_048),
         Some("medium") => Some(8_000),
         Some("high") => Some(16_000),
         _ => None,
     };
-    let mut body = json!({"model": model, "max_tokens": 16000, "system": system, "messages": [{"role": "user", "content": message}], "stream": true});
+    let mut body = json!({"model": model, "max_tokens": 16000, "system": system, "messages": turns(history, message), "stream": true});
     if let Some(budget) = budget {
         body["max_tokens"] = json!(budget + 8_000);
         body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
     }
     body
 }
-pub fn responses_body(model: &str, effort: Option<&str>, system: &str, message: &str) -> Value {
-    let mut body = json!({"model": model, "instructions": system, "input": [{"role": "user", "content": message}], "store": false, "stream": true});
+pub fn responses_body(model: &str, effort: Option<&str>, system: &str, history: &[(String, String)], message: &str) -> Value {
+    let mut body = json!({"model": model, "instructions": system, "input": turns(history, message), "store": false, "stream": true});
     if let Some(effort) = effort {
         body["reasoning"] = json!({"effort": effort});
     }
@@ -509,20 +525,38 @@ pub fn http_error(status: u16, body: &str) -> String {
         404 => "Modelo não encontrado nesta plataforma. Escolha outro em Configurações.".into(),
         429 => "Limite de uso da plataforma atingido. Tente mais tarde.".into(),
         500..=599 => "A plataforma está com problemas agora. Tente de novo em instantes.".into(),
-        _ => format!("A plataforma recusou o pedido (HTTP {status})"),
+        // O motivo que a plataforma dá (ex.: modelo indisponível no plano) ajuda a resolver.
+        _ => match parsed["error"]["message"].as_str().or_else(|| parsed["detail"].as_str()).map(str::trim).filter(|m| !m.is_empty()) {
+            Some(reason) => format!("A plataforma recusou o pedido (HTTP {status}): {}", reason.chars().take(200).collect::<String>()),
+            None => format!("A plataforma recusou o pedido (HTTP {status})"),
+        },
     }
 }
 
 /// Lê o streaming SSE e repassa o texto; falha se terminar sem conclusão.
 pub async fn stream(request: reqwest::RequestBuilder, api: Api, cancel: &CancellationToken, mut report: impl FnMut(Value)) -> Result<String, String> {
-    read_stream(request, api, cancel, None, &mut report).await
+    read_stream(request, api, cancel, None, false, &mut report).await
 }
 
 pub async fn stream_search(request: reqwest::RequestBuilder, cancel: &CancellationToken, videos: bool, mut report: impl FnMut(Value)) -> Result<String, String> {
-    read_stream(request, Api::ChatGpt, cancel, Some(videos), &mut report).await
+    read_stream(request, Api::ChatGpt, cancel, Some(videos), false, &mut report).await
 }
 
-async fn read_stream(request: reqwest::RequestBuilder, api: Api, cancel: &CancellationToken, search: Option<bool>, report: &mut impl FnMut(Value)) -> Result<String, String> {
+/// Pesquisa para tarefas automáticas (rotinas, feriados): devolve o texto final do modelo como
+/// veio, sem exigir citações em cada trecho (a resposta é um JSON, não um texto para a conversa).
+pub async fn search_text(request: reqwest::RequestBuilder, cancel: &CancellationToken) -> Result<String, String> {
+    read_stream(request, Api::ChatGpt, cancel, Some(false), true, &mut |_| {}).await
+}
+
+/// Texto final de uma resposta concluída (todas as partes `output_text`).
+pub fn output_text(response: &Value) -> Option<String> {
+    let text: String = response["output"].as_array()?.iter().filter(|i| i["type"] == "message")
+        .filter_map(|i| i["content"].as_array()).flatten().filter(|p| p["type"] == "output_text")
+        .filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+async fn read_stream(request: reqwest::RequestBuilder, api: Api, cancel: &CancellationToken, search: Option<bool>, raw: bool, report: &mut impl FnMut(Value)) -> Result<String, String> {
     use futures_util::StreamExt;
     let response = tokio::select! {_ = cancel.cancelled() => return Err("Resposta interrompida".into()), r = request.send() => r.map_err(|_| "Não foi possível conectar à plataforma")?};
     if !response.status().is_success() {
@@ -559,6 +593,7 @@ async fn read_stream(request: reqwest::RequestBuilder, api: Api, cancel: &Cancel
                         if result["output"].as_array().is_none_or(|output| output.is_empty()) {
                             result["output"] = Value::Array(std::mem::take(&mut items));
                         }
+                        if raw { return output_text(&result).ok_or_else(|| "A pesquisa não trouxe uma resposta".to_string()); }
                         let answer = super::research::answer(&result, videos)?;
                         report(json!({"type":"token","text":answer}));
                         return Ok(answer);
@@ -723,15 +758,30 @@ pub fn parse_models(api: Api, body: &Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn texto_cru_da_pesquisa() {
+        let r = json!({"output":[{"type":"web_search_call","status":"completed"},{"type":"message","content":[{"type":"output_text","text":"{\"preco\": 10}","annotations":[]}]}]});
+        assert_eq!(output_text(&r).as_deref(), Some("{\"preco\": 10}"));
+        assert!(output_text(&json!({"output":[]})).is_none());
+    }
+
+    #[test]
     fn esforco_so_vai_quando_escolhido_e_no_formato_de_cada_api() {
-        assert!(compatible_body("m", None, "s", "q").get("reasoning_effort").is_none());
-        assert_eq!(compatible_body("m", Some("high"), "s", "q")["reasoning_effort"], "high");
-        assert_eq!(responses_body("m", Some("low"), "s", "q")["reasoning"]["effort"], "low");
-        assert!(responses_body("m", None, "s", "q").get("reasoning").is_none());
-        let claude = anthropic_body("m", Some("medium"), "s", "q");
+        assert!(compatible_body("m", None, "s", &[], "q").get("reasoning_effort").is_none());
+        assert_eq!(compatible_body("m", Some("high"), "s", &[], "q")["reasoning_effort"], "high");
+        assert_eq!(responses_body("m", Some("low"), "s", &[], "q")["reasoning"]["effort"], "low");
+        assert!(responses_body("m", None, "s", &[], "q").get("reasoning").is_none());
+        let claude = anthropic_body("m", Some("medium"), "s", &[], "q");
         assert_eq!(claude["thinking"]["budget_tokens"], 8000);
         assert!(claude["max_tokens"].as_u64().unwrap() > 8000, "resposta cabe além do raciocínio");
-        assert!(anthropic_body("m", None, "s", "q").get("thinking").is_none());
+        assert!(anthropic_body("m", None, "s", &[], "q").get("thinking").is_none());
+        // Histórico conferido vai antes do pedido, alternando e começando pela pessoa.
+        let history = vec![("assistant".to_string(), "solta".to_string()), ("user".to_string(), "a".to_string()),
+            ("assistant".to_string(), "b".to_string()), ("user".to_string(), "sem resposta".to_string())];
+        let sent = responses_body("m", None, "s", &history, "q");
+        assert_eq!(sent["input"], json!([{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"sem resposta\n\nq"}]));
+        assert_eq!(sent["store"], false);
+        assert_eq!(anthropic_body("m", None, "s", &history, "q")["messages"], sent["input"]);
+        assert_eq!(compatible_body("m", None, "s", &history, "q")["messages"][1], json!({"role":"user","content":"a"}));
     }
 
     use super::*;

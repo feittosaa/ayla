@@ -59,3 +59,13 @@
   .calendar-chip { display: none; }
   .calendar-day .calendar-chip:first-of-type { display: block; }
 }
+
+/* Feriados: o dia ganha um tom do destaque; ponto facultativo é mais leve (tracejado). */
+.app-shell .calendar-day.holiday { background: color-mix(in srgb, var(--ayla-accent) 9%, var(--ayla-bg)); }
+.calendar-chip.holiday { color: var(--ayla-accent); background: color-mix(in srgb, var(--ayla-accent) 16%, transparent); font-weight: 500; }
+.calendar-chip.holiday.facultativo { color: var(--ayla-text-soft); background: transparent; border: 1px dashed var(--ayla-border-strong); font-weight: 400; }
+.calendar-holiday { margin: 0; display: flex; flex-direction: column; gap: 1px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--ayla-accent) 12%, transparent); }
+.calendar-holiday b { color: var(--ayla-accent); font-weight: 600; }
+.calendar-holiday small { color: var(--ayla-text-soft); font-size: 12px; }
+.calendar-holiday.facultativo { background: transparent; border: 1px dashed var(--ayla-border-strong); }
+.calendar-holiday.facultativo b { color: var(--ayla-text); }
