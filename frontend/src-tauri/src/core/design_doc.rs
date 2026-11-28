@@ -87,13 +87,85 @@ fn comprimir(data: &[u8]) -> Vec<u8> {
 fn vazia(c: &Camada) -> bool { c.rgba.chunks_exact(4).all(|p| p[3] == 0) }
 
 /// Carimba as camadas (índice da página a partir de 0 → camada) por cima do PDF base.
+#[cfg(test)]
 pub fn carimbar(base: &[u8], camadas: Vec<(usize, Camada)>) -> Result<Vec<u8>, String> {
+    montar(base, None, camadas)
+}
+
+/// Uma folha do PDF montado: uma página do original (índice a partir de 0) ou uma página em
+/// branco nova (largura e altura em pontos).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Folha { Original(usize), Branca(f64, f64) }
+
+/// Monta o PDF a partir da base: com `folhas`, na ordem pedida (páginas do original tiradas ou
+/// repetidas não; páginas em branco novas no meio), e com as camadas (índice da folha → camada).
+pub fn montar(base: &[u8], folhas: Option<&[Folha]>, camadas: Vec<(usize, Camada)>) -> Result<Vec<u8>, String> {
     let mut doc = Document::load_mem(base).map_err(|_| "Não foi possível abrir o PDF original (protegido por senha?)".to_string())?;
+    if let Some(folhas) = folhas { reorganizar(&mut doc, folhas)?; }
+    carimbar_em(&mut doc, camadas)?;
+    let mut out = Vec::new();
+    doc.save_to(&mut out).map_err(|_| "Não foi possível gravar o PDF".to_string())?;
+    Ok(out)
+}
+
+/// Atributos que a página herda dos pais e precisa levar consigo quando a árvore é refeita.
+const HERDAVEIS: [&[u8]; 4] = [b"MediaBox", b"CropBox", b"Rotate", b"Resources"];
+
+/// Refaz a árvore de páginas na ordem das folhas (uma lista plana sob a raiz). Sem mudança
+/// (todas as páginas do original, na ordem), não mexe em nada.
+fn reorganizar(doc: &mut Document, folhas: &[Folha]) -> Result<(), String> {
+    let originais: Vec<ObjectId> = doc.get_pages().into_values().collect();
+    if folhas.is_empty() { return Err("O PDF precisa de pelo menos uma página".into()); }
+    if folhas.len() == originais.len() && folhas.iter().enumerate().all(|(i, f)| *f == Folha::Original(i)) { return Ok(()); }
+    let mut usadas = std::collections::HashSet::new();
+    for folha in folhas {
+        match *folha {
+            Folha::Original(i) if i >= originais.len() => return Err(format!("O PDF não tem a página {}", i + 1)),
+            Folha::Original(i) if !usadas.insert(i) => return Err("Página repetida na montagem do PDF".into()),
+            Folha::Branca(w, h) if !(w.is_finite() && h.is_finite() && (1.0..=14_400.0).contains(&w) && (1.0..=14_400.0).contains(&h)) => return Err("Tamanho de página inválido".into()),
+            _ => {}
+        }
+    }
+    let raiz = doc.catalog().map_err(erro)?.get(b"Pages").and_then(Object::as_reference).map_err(erro)?;
+    let mut kids = Vec::with_capacity(folhas.len());
+    for folha in folhas {
+        let id = match *folha {
+            Folha::Original(i) => {
+                let page = originais[i];
+                let herdados: Vec<(&[u8], Object)> = HERDAVEIS.iter().filter(|k| doc.get_dictionary(page).is_ok_and(|d| d.get(k).is_err()))
+                    .filter_map(|k| herdado(doc, page, k).cloned().map(|v| (*k, v))).collect();
+                let dict = doc.get_dictionary_mut(page).map_err(erro)?;
+                for (k, v) in herdados { dict.set(k.to_vec(), v); }
+                page
+            }
+            Folha::Branca(w, h) => {
+                let conteudo = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+                let mut d = Dictionary::new();
+                d.set("Type", Object::Name(b"Page".to_vec()));
+                d.set("MediaBox", Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Real(w as f32), Object::Real(h as f32)]));
+                d.set("Resources", Object::Dictionary(Dictionary::new()));
+                d.set("Contents", Object::Reference(conteudo));
+                doc.add_object(d)
+            }
+        };
+        doc.get_dictionary_mut(id).map_err(erro)?.set("Parent", Object::Reference(raiz));
+        kids.push(Object::Reference(id));
+    }
+    let dict = doc.get_dictionary_mut(raiz).map_err(erro)?;
+    // As páginas já levam o que herdavam; a raiz não pode passar nada às páginas novas.
+    for k in HERDAVEIS { dict.remove(k); }
+    dict.set("Count", Object::Integer(kids.len() as i64));
+    dict.set("Kids", Object::Array(kids));
+    doc.prune_objects();
+    Ok(())
+}
+
+fn carimbar_em(doc: &mut Document, camadas: Vec<(usize, Camada)>) -> Result<(), String> {
     let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
     for (indice, camada) in camadas {
         let Some(&page) = pages.get(indice) else { return Err(format!("O PDF não tem a página {}", indice + 1)) };
         if vazia(&camada) { continue; }
-        let (area, rotate) = area(&doc, page);
+        let (area, rotate) = area(doc, page);
         let rgb: Vec<u8> = camada.rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
         let alpha: Vec<u8> = camada.rgba.chunks_exact(4).map(|p| p[3]).collect();
         let imagem = |cores: &str, data: Vec<u8>, smask: Option<ObjectId>| {
@@ -116,7 +188,7 @@ pub fn carimbar(base: &[u8], camadas: Vec<(usize, Camada)>) -> Result<Vec<u8>, S
         let antes = doc.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
         let depois = doc.add_object(Stream::new(Dictionary::new(), format!("Q\n{desenho}").into_bytes()));
         // Recursos próprios da página (copiando os herdados), com a camada nos XObjects.
-        let mut recursos = match herdado(&doc, page, b"Resources") {
+        let mut recursos = match herdado(doc, page, b"Resources") {
             Some(Object::Dictionary(d)) => d.clone(),
             Some(Object::Reference(r)) => doc.get_dictionary(*r).cloned().unwrap_or_default(),
             _ => Dictionary::new(),
@@ -140,9 +212,7 @@ pub fn carimbar(base: &[u8], camadas: Vec<(usize, Camada)>) -> Result<Vec<u8>, S
         dict.set("Contents", Object::Array(conteudo));
         dict.set("Resources", Object::Dictionary(recursos));
     }
-    let mut out = Vec::new();
-    doc.save_to(&mut out).map_err(|_| "Não foi possível gravar o PDF".to_string())?;
-    Ok(out)
+    Ok(())
 }
 
 /// Formato da imagem pelos primeiros bytes ("png", "jpg", "webp").
@@ -237,6 +307,37 @@ mod tests {
         let d2 = Document::load_mem(&de_novo).unwrap();
         let p0 = *d2.get_pages().values().next().unwrap();
         assert!(matches!(d2.get_dictionary(p0).unwrap().get(b"Contents").unwrap(), Object::Array(a) if a.len() == 3));
+    }
+
+    #[test]
+    fn monta_com_paginas_novas_tiradas_e_herdadas() {
+        // MediaBox e Rotate só na raiz: as páginas herdam; a página nova não pode herdar o Rotate.
+        let mut base_doc = Document::load_mem(&pdf(&[("0 0 612 792", 0), ("0 0 300 400", 0), ("0 0 612 792", 0)])).unwrap();
+        let raiz = base_doc.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();
+        let p0 = *base_doc.get_pages().values().next().unwrap();
+        base_doc.get_dictionary_mut(p0).unwrap().remove(b"MediaBox");
+        base_doc.get_dictionary_mut(raiz).unwrap().set("MediaBox", Object::Array(vec![0.into(), 0.into(), 500.into(), 700.into()]));
+        base_doc.get_dictionary_mut(raiz).unwrap().set("Rotate", Object::Integer(90));
+        let mut base = Vec::new();
+        base_doc.save_to(&mut base).unwrap();
+
+        let folhas = [Folha::Original(1), Folha::Branca(200.0, 100.0), Folha::Original(0)];
+        let out = montar(&base, Some(&folhas), vec![(1, camada(4, 4, true))]).unwrap();
+        let doc = Document::load_mem(&out).unwrap();
+        let pages: Vec<ObjectId> = doc.get_pages().into_values().collect();
+        assert_eq!(pages.len(), 3, "a 3ª página do original saiu e entrou uma em branco");
+        assert_eq!(area(&doc, pages[0]).0, [0.0, 0.0, 300.0, 400.0]);
+        assert_eq!(area(&doc, pages[1]), ([0.0, 0.0, 200.0, 100.0], 0), "página nova: tamanho pedido, sem herdar o giro");
+        assert_eq!(area(&doc, pages[2]), ([0.0, 0.0, 500.0, 700.0], 90), "a página do original leva o que herdava");
+        assert!(matches!(doc.get_dictionary(pages[1]).unwrap().get(b"Contents").unwrap(), Object::Array(a) if a.len() == 3), "camada na página nova");
+
+        // Sem mudança na ordem: igual a só carimbar.
+        let igual = montar(&base, Some(&[Folha::Original(0), Folha::Original(1), Folha::Original(2)]), vec![]).unwrap();
+        assert_eq!(Document::load_mem(&igual).unwrap().get_pages().len(), 3);
+        assert!(montar(&base, Some(&[Folha::Original(0), Folha::Original(0)]), vec![]).is_err(), "página repetida");
+        assert!(montar(&base, Some(&[Folha::Original(5)]), vec![]).is_err());
+        assert!(montar(&base, Some(&[]), vec![]).is_err());
+        assert!(montar(&base, Some(&[Folha::Branca(0.0, 10.0)]), vec![]).is_err());
     }
 
     #[test]

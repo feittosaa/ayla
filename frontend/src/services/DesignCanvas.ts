@@ -1,7 +1,7 @@
 /** Parte dos designs que depende do Fabric.js: montar modelos, gradientes e prévias. Só é
  * carregada quando a pessoa abre Designs (import dinâmico), para não pesar no resto da Ayla. */
 import { Circle, FabricImage, FabricObject, Gradient, Rect, StaticCanvas, Textbox, loadSVGFromString, util, type StaticCanvas as Static } from 'fabric';
-import { draftOf, exportScale, fontValue, formatOf, gradientCoords, previewScale, type DesignSummary, type Draft, type Fill, type Spec, type Template } from './Design';
+import { designPages, draftOf, exportScale, fontValue, formatOf, gradientCoords, previewScale, type DesignSummary, type Draft, type Fill, type Spec, type Template } from './Design';
 import { loadPackFonts } from './DesignFonts';
 import { native } from './Desktop';
 
@@ -163,7 +163,7 @@ export async function exportDesign(id: string, target: 'iris' | 'computer') {
   const element = document.createElement('canvas');
   const canvas = withSoftwareCanvases(() => new StaticCanvas(element, { width: file.width, height: file.height, renderOnAddRemove: false, enableRetinaScaling: false }));
   try {
-    await canvas.loadFromJSON(file.data);
+    await canvas.loadFromJSON(designPages(file.data)[0]);
     canvas.renderAll();
     const multiplier = exportScale(file.width, file.height, 'png');
     const url = canvas.toDataURL({ format: 'png', multiplier });

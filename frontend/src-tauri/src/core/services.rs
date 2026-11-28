@@ -3195,9 +3195,13 @@ pub fn athena_move_file(state: tauri::State<'_, Core>, root: String, path: Strin
 
 /// Serviço único da Athena e da Iris para abrir uma mídia (imagem, vídeo ou PDF) no aplicativo
 /// do sistema: um arquivo guardado na Ayla (`file`) ou um arquivo de uma raiz da Athena (`root` + `path`).
+/// `reveal`: mostra o arquivo selecionado no explorador de arquivos (só de raízes; os guardados na
+/// Ayla ficam na pasta interna dos dados).
 #[tauri::command]
-pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>) -> Result<(), String> {
+pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Option<String>, path: Option<String>, reveal: Option<bool>) -> Result<(), String> {
+    let reveal = reveal.unwrap_or(false);
     let target = match (file, root, path) {
+        (Some(_), _, _) if reveal => return Err("Arquivos guardados na Ayla não ficam numa pasta sua".into()),
         (Some(id), _, _) => {
             let file = state.store.lock().map_err(|_| "Dados ocupados")?.file(&id).ok().flatten().ok_or("Arquivo não encontrado")?;
             stored_mime(&file).ok_or("Este tipo de arquivo não é uma mídia da Ayla")?;
@@ -3211,6 +3215,7 @@ pub fn media_open(state: tauri::State<'_, Core>, file: Option<String>, root: Opt
         }
         _ => return Err("Arquivo não informado".into()),
     };
+    if reveal { return super::hand::show_in_folder(&target); }
     media::open_in_system(&target)
 }
 
@@ -3352,31 +3357,82 @@ pub fn design_delete(state: tauri::State<'_, Core>, id: String) -> Result<(), St
     gio::File::for_path(&dir).trash(gio::Cancellable::NONE).map_err(|_| "Não foi possível mover o design para a lixeira do sistema.".into())
 }
 
-/// Exporta a imagem pronta do design (PNG, JPG ou PDF montado a partir de um JPEG): para a Iris
-/// (arquivo guardado na Ayla) ou para um arquivo escolhido no computador. `page` é o tamanho da
-/// página do PDF em pontos.
+/// Uma página pronta da exportação: a imagem (PNG ou JPEG em base64), o tamanho em pixels e, no
+/// PDF, o tamanho da página em pontos.
+#[derive(Deserialize)]
+pub struct ExportPage { image: String, pixels: (u32, u32), page: Option<(f64, f64)> }
+
+/// Exporta o design pronto (PNG, JPG ou PDF montado a partir de JPEGs): para a Iris (arquivo
+/// guardado na Ayla) ou para o computador. `pages`: uma ou várias páginas (PNG/JPG viram uma
+/// imagem por página; o PDF, um arquivo com todas). `image`/`pixels`/`page`: uma página só.
 #[tauri::command]
-pub async fn design_export(app: tauri::AppHandle, state: tauri::State<'_, Core>, name: String, format: String, image: String,
-    pixels: (u32, u32), page: Option<(f64, f64)>, target: String) -> Result<Value, String> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(image.as_bytes()).map_err(|_| "Imagem da exportação inválida")?;
-    let (extension, bytes) = match format.as_str() {
-        "png" if bytes.starts_with(b"\x89PNG") => ("png", bytes),
-        "jpg" if bytes.starts_with(&[0xFF, 0xD8]) => ("jpg", bytes),
-        "pdf" => ("pdf", super::design::pdf_from_jpeg(&bytes, pixels, page.ok_or("Tamanho de página ausente")?)?),
+#[allow(clippy::too_many_arguments)]
+pub async fn design_export(app: tauri::AppHandle, state: tauri::State<'_, Core>, name: String, format: String, image: Option<String>,
+    pixels: Option<(u32, u32)>, page: Option<(f64, f64)>, pages: Option<Vec<ExportPage>>, target: String) -> Result<Value, String> {
+    let pages = match (pages, image) {
+        (Some(pages), _) if !pages.is_empty() => pages,
+        (_, Some(image)) => vec![ExportPage { image, pixels: pixels.ok_or("Tamanho da imagem ausente")?, page }],
+        _ => return Err("Nada para exportar".into()),
+    };
+    if pages.len() > 500 { return Err("Páginas demais para exportar de uma vez".into()); }
+    let decoded: Vec<Vec<u8>> = pages.iter().map(|p| base64::engine::general_purpose::STANDARD.decode(p.image.as_bytes()).map_err(|_| "Imagem da exportação inválida".to_string())).collect::<Result<_, _>>()?;
+    let files: Vec<(String, Vec<u8>)> = match format.as_str() {
+        "pdf" => {
+            let list = pages.iter().zip(&decoded).map(|(p, bytes)| Ok((bytes.as_slice(), p.pixels, p.page.ok_or("Tamanho de página ausente")?))).collect::<Result<Vec<_>, String>>()?;
+            vec![(super::design::export_name(&name, "pdf"), super::design::pdf_from_jpegs(&list)?)]
+        }
+        "png" | "jpg" => {
+            let ok = |b: &[u8]| if format == "png" { b.starts_with(b"\x89PNG") } else { b.starts_with(&[0xFF, 0xD8]) };
+            if !decoded.iter().all(|b| ok(b)) { return Err("Formato de exportação inválido".into()); }
+            super::design::page_names(&name, &format, decoded.len()).into_iter().zip(decoded).collect()
+        }
         _ => return Err("Formato de exportação inválido".into()),
     };
-    let file_name = super::design::export_name(&name, extension);
+    deliver_export(&app, &state, files, &target).await
+}
+
+/// Entrega os arquivos exportados: na Iris (guardados na Ayla) ou no computador (um arquivo pelo
+/// diálogo de salvar; vários, numa pasta escolhida, sem sobrescrever o que já existe lá).
+pub(crate) async fn deliver_export(app: &tauri::AppHandle, state: &Core, files: Vec<(String, Vec<u8>)>, target: &str) -> Result<Value, String> {
     if target == "computer" {
         let dialog = app.clone();
-        let suggested = file_name.clone();
-        let chosen = tauri::async_runtime::spawn_blocking(move || dialog.dialog().file().set_title("Salvar design").set_file_name(&suggested).blocking_save_file())
+        if files.len() == 1 {
+            let (file_name, bytes) = files.into_iter().next().ok_or("Nada para exportar")?;
+            let suggested = file_name.clone();
+            let chosen = tauri::async_runtime::spawn_blocking(move || dialog.dialog().file().set_title("Salvar design").set_file_name(&suggested).blocking_save_file())
+                .await.map_err(|_| "Falha ao abrir o diálogo")?;
+            let Some(path) = chosen.and_then(|p| p.into_path().ok()) else { return Ok(json!({"cancelled": true})) };
+            fs::write(&path, &bytes).map_err(|_| "Não foi possível salvar o arquivo")?;
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            return Ok(json!({"path": path, "name": name, "names": [name], "count": 1}));
+        }
+        let chosen = tauri::async_runtime::spawn_blocking(move || dialog.dialog().file().set_title("Pasta para as páginas do design").blocking_pick_folder())
             .await.map_err(|_| "Falha ao abrir o diálogo")?;
-        let Some(path) = chosen.and_then(|p| p.into_path().ok()) else { return Ok(json!({"cancelled": true})) };
-        fs::write(&path, &bytes).map_err(|_| "Não foi possível salvar o arquivo")?;
-        return Ok(json!({"path": path, "name": path.file_name().map(|n| n.to_string_lossy().into_owned())}));
+        let Some(dir) = chosen.and_then(|p| p.into_path().ok()) else { return Ok(json!({"cancelled": true})) };
+        let mut names = Vec::new();
+        for (file_name, bytes) in files {
+            let path = free_path(&dir, &file_name);
+            fs::write(&path, &bytes).map_err(|_| "Não foi possível salvar as páginas")?;
+            names.push(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(file_name));
+        }
+        return Ok(json!({"path": dir, "name": names.first(), "names": names, "count": names.len()}));
     }
-    let saved = state.store_file(&file_name, |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a exportação".to_string()), None, true)?;
-    Ok(json!({"file": saved.id, "name": saved.name}))
+    let mut names = Vec::new();
+    let mut first = None;
+    for (file_name, bytes) in files {
+        let saved = state.store_file(&file_name, |dest| fs::write(dest, &bytes).map(|_| bytes.len() as u64).map_err(|_| "Não foi possível guardar a exportação".to_string()), None, true)?;
+        first.get_or_insert(saved.id);
+        names.push(saved.name);
+    }
+    Ok(json!({"file": first, "name": names.first(), "names": names, "count": names.len()}))
+}
+
+/// Caminho livre na pasta: o próprio nome ou "Nome (2).ext", "Nome (3).ext"…
+pub(crate) fn free_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
+    let path = dir.join(file_name);
+    if !path.exists() { return path; }
+    let (stem, ext) = file_name.rsplit_once('.').map_or((file_name, String::new()), |(s, e)| (s, format!(".{e}")));
+    (2..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap_or(path)
 }
 
 /// Fontes do pacote (família e arquivos) e bytes de um arquivo, para o `FontFace` da interface.
@@ -4997,6 +5053,18 @@ pub fn athena_open_obsidian(state: tauri::State<'_, Core>, root: String, path: S
     let relative = athena::safe_relative(&path).ok_or("Nota inválida")?;
     let link = athena_git::obsidian_link(&dir.join(relative));
     std::process::Command::new("xdg-open").arg(link).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|_| "Não foi possível abrir o Obsidian".into())
+}
+
+/// Mostra uma nota, anexo ou pasta da Athena no gerenciador de arquivos do sistema (o item
+/// aparece selecionado na pasta dele). Itens protegidos com senha ficam de fora: no disco são cifrados.
+#[tauri::command]
+pub fn athena_reveal(state: tauri::State<'_, Core>, root: String, path: String) -> Result<(), String> {
+    let dir = state.athena_path(&state.prefs()?, &root)?;
+    let relative = athena::safe_folder(&path).filter(|p| !p.as_os_str().is_empty()).ok_or("Caminho inválido")?;
+    if protected(&dir, &path).is_some() || athena_lock::protected_file_of(&dir, &path).is_some() {
+        return Err("Itens protegidos com senha não abrem no explorador de arquivos".into());
+    }
+    super::hand::show_in_folder(&dir.join(relative))
 }
 
 #[tauri::command]

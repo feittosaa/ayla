@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { ActiveSelection, Canvas, Circle, FabricImage, FabricObject, Gradient, Line, PencilBrush, Polygon, Rect, SprayBrush, Textbox, Triangle, cache } from 'fabric';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { ActiveSelection, Canvas, Circle, FabricImage, FabricObject, Gradient, Line, PencilBrush, Point, Polygon, Rect, SprayBrush, StaticCanvas, Textbox, Triangle, cache, util } from 'fabric';
 import { EraserBrush } from '@erase2d/fabric';
 import { errorText, native } from '../services/Desktop';
 import { mediaUrl, type MediaRef } from '../services/Media';
-import { History, exportScale, fontName, fontValue, gradientCoords, pdfPage, previewScale, systemFonts, type Fill, type PackFont, type Template } from '../services/Design';
+import { History, designData, designName, designPages, isPresentation, exportScale, fontName, fontValue, gradientCoords, pdfPage, previewScale, systemFonts, type Fill, type PackFont, type Template } from '../services/Design';
 import { EXTRA, applyTemplate, fillFrom, fitImage, iconFrom, iconParts, withSoftwareCanvases } from '../services/DesignCanvas';
 import { loadPackFonts } from '../services/DesignFonts';
-import { marginOf, snap, snapLines, type Guides } from '../services/DesignGuides';
-import { CloseIcon, DownloadIcon, ImageIcon, TrashIcon, CopyIcon } from './Icons';
-import { PDF_LAYER, abrir, camada, compor, documentoDe, previa, readDoc, refOf, type Aberto, type DadosDoc, type Documento } from '../services/DesignDocument';
+import { marginOf, scaleSnap, snap, snapLines, type Guides } from '../services/DesignGuides';
+import { CloseIcon, DownloadIcon, ImageIcon, PlusIcon, TrashIcon, CopyIcon } from './Icons';
+import Confirm from './Confirm';
+import { PDF_LAYER, abrir, camada, compor, comporPagina, documentoDe, folhasDe, imagemDe, previa, readDoc, refOf, type Aberto, type DadosDoc, type Documento, type PaginaDoc } from '../services/DesignDocument';
 
 /** `documento`: PDF ou imagem da Athena/Iris aberto para editar por cima (o design reaberto traz isso em `data`). */
 export type Opening = { id?: string; name: string; width: number; height: number; data?: string; template?: Template; documento?: Documento };
@@ -27,7 +28,6 @@ function storedSides() {
   try { const v = JSON.parse(localStorage.getItem(SIDES_KEY) ?? ''); return { left: clampSidePanel(Number(v.left) || 264), right: clampSidePanel(Number(v.right) || 264) }; }
   catch { return { left: 264, right: 264 }; }
 }
-type Leave = 'close' | null;
 
 const swatches = ['#ffffff', '#f4efe6', '#111111', '#264653', '#2a9d8f', '#e9c46a', '#f4a261', '#e76f51', '#ff3d77', '#7c5cff', '#4cc9f0', '#80ed99'];
 const gradients: Fill[] = [
@@ -37,6 +37,13 @@ const gradients: Fill[] = [
 ];
 const fillCss = (fill: Fill) => typeof fill === 'string' ? fill : `linear-gradient(${fill.angle + 90}deg, ${fill.colors[0]}, ${fill.colors[1]})`;
 const isText = (o: FabricObject | undefined): o is Textbox => o instanceof Textbox;
+/** Recorte em andamento: a imagem (escondida), a imagem inteira apagada e a parte que fica (pelo
+ * quadro), o quadro que a pessoa ajusta e como os outros elementos estavam. */
+type Crop = { image: FabricImage; dim: FabricImage; bright: FabricImage; frame: Rect; others: { o: FabricObject; evented: boolean; selectable: boolean }[] };
+/** Chave estável de cada página na lista (as páginas não têm id). */
+const pageKeys = new WeakMap<object, number>();
+let nextPageKey = 1;
+const keyOf = (page: object) => { let k = pageKeys.get(page); if (!k) { k = nextPageKey++; pageKeys.set(page, k); } return k; };
 const isIcon = (o: FabricObject | undefined) => Boolean(o && (o as FabricObject & { icon?: boolean }).icon);
 const parts = iconParts;
 const solid = (value: unknown) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : null;
@@ -62,7 +69,10 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   const docMode = Boolean(docStart);
   const docRef = useRef<DadosDoc | null>(docStart);
   const opened = useRef<Aberto | null>(null);
-  const histories = useRef(new Map<number, History>());
+  /** Páginas (no documento, as mesmas de `docRef.current.paginas`); o desfazer fica por página. */
+  const pagesRef = useRef<PaginaDoc[]>([]);
+  const histories = useRef(new Map<PaginaDoc, History>());
+  const pageIndexRef = useRef(0);
   const [pageIndex, setPageIndex] = useState(0);
   const [pageCount, setPageCount] = useState(1);
   const [backdrop, setBackdrop] = useState<string | null>(null);
@@ -78,9 +88,22 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   const commitQueued = useRef(false);
   const clipboard = useRef<FabricObject | null>(null);
   const [id, setId] = useState(opening.id);
+  const idRef = useRef(opening.id);
   const [name, setName] = useState(opening.name);
+  const nameRef = useRef(opening.name);
+  nameRef.current = name;
   const [savedName, setSavedName] = useState(opening.name);
+  const savedNameRef = useRef(opening.name);
   const [saved, setSaved] = useState<string | null>(null);
+  const savedRef = useRef<string | null>(null);
+  /** Documento: os dados como estavam na última gravação no arquivo. */
+  const [written, setWritten] = useState<string | null>(null);
+  const [autosaving, setAutosaving] = useState(false);
+  /** Gravações (automáticas e no arquivo) uma depois da outra: a primeira cria o id. */
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const lastPreview = useRef<string | null>(null);
+  const readyRef = useRef(false);
+  const [exportAll, setExportAll] = useState(true);
   const [current, setCurrent] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [, setTick] = useState(0);
@@ -93,7 +116,6 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState(false);
-  const [leave, setLeave] = useState<Leave>(null);
   const [images, setImages] = useState<LibraryImage[] | null>(null);
   const [imageQuery, setImageQuery] = useState('');
   const [icons, setIcons] = useState<{ query: string; items: { name: string; svg: string }[]; more: boolean } | null>(null);
@@ -119,26 +141,39 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
   const [margins, setMargins] = useState(() => localStorage.getItem('ayla-design-margens') !== 'nao');
   const [sides, setSides] = useState(storedSides);
   const guides = useRef<Guides>({ x: [], y: [] });
+  const cropRef = useRef<Crop | null>(null);
+  const [cropping, setCropping] = useState(false);
+  const slotRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const pageBox = useRef<HTMLDivElement>(null);
+  const thumbCache = useRef(new WeakMap<PaginaDoc, { key: string; url: string }>());
+  const [, setThumbTick] = useState(0);
+  const scrollTimer = useRef<number | undefined>(undefined);
+  const spinner = useRef<HTMLButtonElement>(null);
+  const [spinning, setSpinning] = useState<number | null>(null);
   const marginsRef = useRef(margins);
   marginsRef.current = margins;
   // Ajustar à tela arredonda para baixo e deixa folga: a página nunca passa da área (senão a
   // barra de rolagem aparece, a área encolhe, a página diminui e a barra some, sem parar).
-  const fit = box.width && box.height ? Math.floor(Math.min((box.width - 72) / width, (box.height - 72) / height) * 1000) / 1000 : 0;
+  // Com várias páginas (de tamanhos diferentes no documento), o ajuste vale para a maior: o zoom não
+  // muda ao rolar de uma para outra. O cabeçalho de cada página ("Página 2") também conta.
+  const dims = pagesRef.current.length ? pagesRef.current : [{ largura: width, altura: height }];
+  const maxW = Math.max(...dims.map(p => p.largura)); const maxH = Math.max(...dims.map(p => p.altura));
+  const fit = box.width && box.height ? Math.floor(Math.min((box.width - 80) / maxW, (box.height - 100) / maxH) * 1000) / 1000 : 0;
   const scale = Math.max(0.05, zoom === 'fit' ? fit : zoom);
   const fitRef = useRef(fit);
   fitRef.current = fit;
   const dirty = ready && (current !== saved || name !== savedName);
 
   const snapshot = useCallback(() => JSON.stringify(canvasRef.current!.toObject(EXTRA)), []);
-  /** O que vai para o design: o projeto, ou (documento) o arquivo e as páginas com os elementos. */
+  /** O que vai para o design: as páginas, ou (documento) o arquivo e as páginas com os elementos. */
   const dataNow = useCallback(() => {
-    const doc = docRef.current; const h = history.current;
-    if (!doc) return h?.value ?? '';
-    if (h && doc.paginas[pageIndexRef.current]) doc.paginas[pageIndexRef.current].objetos = h.value;
-    return JSON.stringify(doc);
+    const doc = docRef.current; const h = history.current; const pages = pagesRef.current;
+    if (h && pages[pageIndexRef.current]) pages[pageIndexRef.current].objetos = h.value;
+    if (doc) return JSON.stringify(doc);
+    return designData(pages.map(p => p.objetos ?? h?.value ?? ''));
   }, []);
   const commit = useCallback(() => {
-    if (restoring.current || commitQueued.current) return;
+    if (restoring.current || commitQueued.current || cropRef.current) return;
     commitQueued.current = true;
     requestAnimationFrame(() => {
       commitQueued.current = false;
@@ -165,8 +200,13 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       restoring.current = true;
       try {
         if (docRef.current) await openDocument(canvas);
-        else if (opening.data) await canvas.loadFromJSON(opening.data);
-        else if (opening.template) applyTemplate(canvas, opening.template);
+        else {
+          const pages = opening.data ? designPages(opening.data) : [null];
+          pagesRef.current = pages.map(objetos => ({ largura: width, altura: height, objetos }));
+          setPageCount(pages.length);
+          if (pages[0]) await canvas.loadFromJSON(pages[0]);
+          else if (opening.template) applyTemplate(canvas, opening.template);
+        }
       } catch (e) { setError(`Não foi possível abrir ${docRef.current ? 'o arquivo' : 'o design'}: ${errorText(e)}`); }
       restoring.current = false;
       if (!alive) return;
@@ -177,7 +217,9 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       const first = snapshot();
       history.current = new History(first);
       const data = dataNow();
-      setCurrent(data); setSaved(data); setReady(true);
+      // Design novo vindo de um modelo ou formato: ainda não é trabalho, só entra na lista na 1ª mudança.
+      savedRef.current = data;
+      setCurrent(data); setSaved(data); setWritten(data); setReady(true); readyRef.current = true;
     })();
     const changed = () => { commit(); refresh(); };
     canvas.on('object:modified', changed);
@@ -200,9 +242,37 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       if (result.dx || result.dy) { target.set({ left: target.left + result.dx, top: target.top + result.dy }); target.setCoords(); }
       guides.current = result.guides;
     });
+    // Redimensionar também encaixa: a borda puxada encosta na margem (sangria), nas bordas, no centro
+    // ou nos outros elementos (só sem giro; Shift redimensiona livre).
+    canvas.on('object:scaling', ({ target, e, transform }) => {
+      const angle = ((target.angle % 360) + 360) % 360;
+      if ((e as MouseEvent).shiftKey || !transform || (angle > 0.01 && angle < 359.99)) { guides.current = { x: [], y: [] }; return; }
+      const corner = transform.corner ?? '';
+      const edges = {
+        right: corner.includes('r') && transform.originX === 'left', left: corner.includes('l') && transform.originX === 'right',
+        bottom: corner.includes('b') && transform.originY === 'top', top: corner.includes('t') && transform.originY === 'bottom',
+      };
+      target.setCoords();
+      const moving = new Set(canvas.getActiveObjects());
+      const others = canvas.getObjects().filter(o => !moving.has(o) && o !== target && o.visible && !(cropRef.current && (o === cropRef.current.dim || o === cropRef.current.bright))).map(o => o.getBoundingRect());
+      const { width, height } = sizeRef.current;
+      const result = scaleSnap(target.getBoundingRect(), edges, snapLines(width, height, others), 6 / canvas.getZoom(), ['tl', 'tr', 'bl', 'br'].includes(corner));
+      if (result.fx !== 1 || result.fy !== 1) {
+        const anchor = target.translateToOriginPoint(target.getCenterPoint(), transform.originX, transform.originY);
+        target.set({ scaleX: target.scaleX * result.fx, scaleY: target.scaleY * result.fy });
+        target.setPositionByOrigin(anchor, transform.originX, transform.originY);
+        target.setCoords();
+      }
+      guides.current = result.guides;
+    });
+    // Duplo clique numa imagem: recortar (como no Canva).
+    canvas.on('mouse:dblclick', ({ target }) => { if (target instanceof FabricImage && !cropRef.current) startCropRef.current?.(target); });
+    // Clicar fora do quadro durante o recorte aplica o recorte.
+    canvas.on('selection:cleared', () => { if (cropRef.current) finishCropRef.current?.(true); });
     const clearGuides = () => { if (guides.current.x.length || guides.current.y.length) { guides.current = { x: [], y: [] }; canvas.requestRenderAll(); } };
     canvas.on('mouse:up', clearGuides);
     // Desenhadas só na tela (a exportação desenha em outro canvas, sem elas).
+    canvas.on('after:render', () => placeSpinnerRef.current());
     canvas.on('after:render', ({ ctx }) => {
       if (ctx !== canvas.getContext()) return;
       const { x, y } = guides.current;
@@ -225,7 +295,7 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       ctx.stroke();
       ctx.restore();
     });
-    return () => { alive = false; canvasRef.current = null; opened.current?.fechar(); void canvas.dispose(); };
+    return () => { alive = false; leaving.current?.(); canvasRef.current = null; opened.current?.fechar(); void canvas.dispose(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Abre o arquivo: confere se mudou fora do editor (aí parte da versão nova), desenha as páginas
@@ -241,37 +311,215 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     }
     const a = await abrir(doc.documento);
     opened.current = a;
-    doc.paginas = a.paginas.map((p, i) => ({ largura: p.largura, altura: p.altura, objetos: doc.paginas[i]?.objetos ?? null }));
+    const tamanho = (i: number) => ({ largura: a.paginas[i].largura, altura: a.paginas[i].altura });
+    // Com `origem`, as páginas guardadas valem (novas e tiradas); sem, a página i é a i do arquivo.
+    const guardadas = doc.paginas.some(p => p.origem !== undefined)
+      ? doc.paginas.filter(p => p.origem == null || p.origem < a.paginas.length).map(p => p.origem != null ? { ...p, ...tamanho(p.origem) } : p)
+      : [];
+    doc.paginas = guardadas.length && (doc.documento.tipo === 'pdf' || guardadas.some(p => p.origem === 0)) ? guardadas
+      : a.paginas.map((_, i) => ({ ...tamanho(i), objetos: doc.paginas[i]?.objetos ?? null, origem: i }));
+    pagesRef.current = doc.paginas;
     setPageCount(doc.paginas.length);
     const first = doc.paginas[0];
     setSize({ width: first.largura, height: first.altura });
     if (first.objetos) await canvas.loadFromJSON(first.objetos);
     canvas.backgroundColor = '';
-    setBackdrop(await a.fundo(0));
+    setBackdrop(first.origem != null ? await a.fundo(first.origem) : null);
+  }
+  const fundoDe = (page: PaginaDoc) => page.origem != null && opened.current ? opened.current.fundo(page.origem) : Promise.resolve(null);
+
+  /** Registra já a última mudança (o registro normal espera o próximo quadro, que pode não vir
+   * antes de trocar de página, salvar ou sair). */
+  function flush() {
+    if (cropRef.current) finishCrop(true);
+    if (canvasRef.current && history.current && !restoring.current) history.current.push(snapshot());
   }
 
-  const pageIndexRef = useRef(0);
-  pageIndexRef.current = pageIndex;
-  /** Troca de página: guarda os elementos (e o desfazer) desta e carrega os da outra. */
-  async function goPage(next: number) {
-    const doc = docRef.current; const canvas = canvasRef.current;
-    if (!doc || !canvas || !history.current || next === pageIndex || next < 0 || next >= doc.paginas.length) return;
-    doc.paginas[pageIndex].objetos = history.current.value;
-    histories.current.set(pageIndex, history.current);
-    const page = doc.paginas[next];
+  /** Recortar: mostra a imagem inteira apagada, a parte que fica acesa e um quadro para ajustar. */
+  function startCrop(image: FabricImage) {
+    const canvas = canvasRef.current;
+    if (!canvas || cropRef.current || canvas.isDrawingMode || !history.current) return;
+    flush();
+    const el = image.getElement();
+    const full = image.getOriginalSize();
+    const w = image.width; const h = image.height;
+    const cx = image.cropX ?? 0; const cy = image.cropY ?? 0;
+    // Centro da imagem inteira, nas coordenadas locais da imagem recortada (origem no centro).
+    const center = util.transformPoint(new Point(-w / 2 - cx + full.width / 2, -h / 2 - cy + full.height / 2), image.calcTransformMatrix());
+    const ghost = { angle: image.angle, scaleX: image.scaleX, scaleY: image.scaleY, flipX: image.flipX, flipY: image.flipY, originX: 'center' as const, originY: 'center' as const,
+      left: center.x, top: center.y, cropX: 0, cropY: 0, width: full.width, height: full.height, selectable: false, evented: false, excludeFromExport: true, erasable: false };
+    const middle = image.getCenterPoint();
+    const box = { left: middle.x, top: middle.y, originX: 'center' as const, originY: 'center' as const, width: w * image.scaleX, height: h * image.scaleY, angle: image.angle };
+    const clip = new Rect({ ...box, absolutePositioned: true });
+    const dim = new FabricImage(el, { ...ghost, opacity: 0.35 });
+    const bright = new FabricImage(el, { ...ghost, clipPath: clip });
+    const frame = new Rect({ ...box, fill: 'transparent', stroke: '#7c5cff', strokeWidth: 2, strokeUniform: true, strokeDashArray: [8, 5], lockRotation: true, excludeFromExport: true, erasable: false } as Record<string, unknown>);
+    frame.setControlsVisibility({ mtr: false });
+    const sync = () => { clip.set({ left: frame.left, top: frame.top, scaleX: frame.scaleX, scaleY: frame.scaleY }); clip.setCoords(); bright.set({ dirty: true }); };
+    frame.on('moving', sync); frame.on('scaling', sync); frame.on('modified', sync);
+    const others = canvas.getObjects().map(o => ({ o, evented: o.evented, selectable: o.selectable }));
+    restoring.current = true;
+    others.forEach(({ o }) => o.set({ evented: false, selectable: false }));
+    image.set({ visible: false });
+    canvas.add(dim, bright, frame);
+    restoring.current = false;
+    cropRef.current = { image, dim, bright, frame, others };
+    canvas.setActiveObject(frame);
+    canvas.requestRenderAll();
+    setCropping(true); refresh();
+  }
+  /** Aplica (`true`) ou desiste do recorte e volta à imagem selecionada. */
+  function finishCrop(applyIt: boolean) {
+    const canvas = canvasRef.current; const c = cropRef.current;
+    if (!canvas || !c) return;
+    cropRef.current = null;
+    const { image, dim, frame, others } = c;
+    restoring.current = true;
+    if (applyIt) {
+      const full = image.getOriginalSize();
+      const fw = frame.width * frame.scaleX; const fh = frame.height * frame.scaleY;
+      // Centro do quadro nas coordenadas da imagem inteira (pixels dela, origem no centro).
+      const local = util.transformPoint(frame.getCenterPoint(), util.invertTransform(dim.calcTransformMatrix()));
+      const cw = fw / Math.abs(image.scaleX); const ch = fh / Math.abs(image.scaleY);
+      const x0 = Math.max(0, local.x + full.width / 2 - cw / 2); const y0 = Math.max(0, local.y + full.height / 2 - ch / 2);
+      const x1 = Math.min(full.width, local.x + full.width / 2 + cw / 2); const y1 = Math.min(full.height, local.y + full.height / 2 + ch / 2);
+      if (x1 - x0 >= 2 && y1 - y0 >= 2) {
+        const middle = util.transformPoint(new Point((x0 + x1) / 2 - full.width / 2, (y0 + y1) / 2 - full.height / 2), dim.calcTransformMatrix());
+        image.set({ cropX: x0, cropY: y0, width: x1 - x0, height: y1 - y0 });
+        image.setPositionByOrigin(middle, 'center', 'center');
+      }
+    }
+    canvas.remove(c.dim, c.bright, c.frame);
+    others.forEach(({ o, evented, selectable }) => o.set({ evented, selectable }));
+    image.set({ visible: true });
+    image.setCoords();
+    restoring.current = false;
+    canvas.setActiveObject(image);
+    canvas.requestRenderAll();
+    setCropping(false);
+    commit(); refresh();
+  }
+  const startCropRef = useRef(startCrop);
+  startCropRef.current = startCrop;
+  const finishCropRef = useRef(finishCrop);
+  finishCropRef.current = finishCrop;
+  /** Botão de girar embaixo da seleção (fica visível mesmo quando a alça do Fabric sai da página). */
+  function placeSpinner() {
+    const button = spinner.current; const c = canvasRef.current; const box = pageBox.current;
+    if (!button) return;
+    const o = c?.getActiveObject();
+    if (!c || !box || !o || cropRef.current || c.isDrawingMode || (isText(o) && o.isEditing)) { button.style.display = 'none'; return; }
+    const r = o.getBoundingRect(); const z = c.getZoom(); const page = sizeRef.current;
+    // Embaixo da seleção, mas sem sair da página (elemento maior que a página: logo abaixo da borda).
+    const x = Math.min(Math.max((r.left + r.width / 2) * z, 18), page.width * z - 18);
+    const y = Math.min(Math.max((r.top + r.height) * z + 22, 18), page.height * z + 12);
+    button.style.display = '';
+    button.style.left = `${box.offsetLeft + x}px`;
+    button.style.top = `${box.offsetTop + y}px`;
+  }
+  const placeSpinnerRef = useRef(placeSpinner);
+  placeSpinnerRef.current = placeSpinner;
+  /** Segurar e arrastar o botão gira em volta do centro, para onde o ponteiro aponta (encaixa a cada
+   * 45° quando perto; Shift gira livre). */
+  function spin(event: ReactPointerEvent<HTMLButtonElement>) {
+    const c = canvasRef.current; const o = c?.getActiveObject();
+    if (!c || !o) return;
+    event.preventDefault(); event.stopPropagation();
+    const handle = event.currentTarget;
+    try { handle.setPointerCapture(event.pointerId); } catch { /* ponteiro já solto */ }
+    const centerOf = () => { const r = c.upperCanvasEl.getBoundingClientRect(); const p = o.getCenterPoint(); const z = c.getZoom(); return { x: r.left + p.x * z, y: r.top + p.y * z }; };
+    const center = centerOf();
+    const pointer = (e: { clientX: number; clientY: number }) => Math.atan2(e.clientY - center.y, e.clientX - center.x) * 180 / Math.PI;
+    const start = pointer(event); const from = o.angle;
+    const move = (e: PointerEvent) => {
+      let next = from + pointer(e) - start;
+      next = ((next % 360) + 360) % 360;
+      const near = Math.round(next / 45) * 45;
+      if (!e.shiftKey && Math.abs(next - near) <= 4) next = near % 360;
+      o.rotate(next); o.setCoords(); c.requestRenderAll();
+      setSpinning(Math.round(next));
+    };
+    const up = () => {
+      handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+      setSpinning(null); commit(); refresh();
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+  }
+  /** Gira a seleção em volta do centro (`by` graus a mais, ou para `to`). */
+  function rotate(change: { by?: number; to?: number }) {
+    if (!canvas || !active) return;
+    const next = change.to ?? (active.angle + (change.by ?? 0));
+    active.rotate(((next % 360) + 360) % 360);
+    active.setCoords();
+    canvas.requestRenderAll(); commit(); refresh();
+  }
+  function mirror(axis: 'x' | 'y') {
+    if (!canvas || !active) return;
+    active.set(axis === 'x' ? { flipX: !active.flipX } : { flipY: !active.flipY });
+    canvas.requestRenderAll(); commit(); refresh();
+  }
+  /** Guarda os elementos (e o desfazer) da página aberta. */
+  function keepPage() {
+    flush();
+    const page = pagesRef.current[pageIndexRef.current];
+    if (!page || !history.current) return;
+    page.objetos = history.current.value;
+    histories.current.set(page, history.current);
+  }
+  /** Carrega a página `next` no canvas (sem guardar a aberta). */
+  async function loadPage(next: number) {
+    const canvas = canvasRef.current; const page = pagesRef.current[next];
+    if (!canvas || !page) return;
     restoring.current = true;
     canvas.discardActiveObject();
     canvas.clear();
     if (page.objetos) await canvas.loadFromJSON(page.objetos);
-    canvas.backgroundColor = '';
+    else if (!docMode) canvas.backgroundColor = '#ffffff';
+    if (docMode) canvas.backgroundColor = '';
     restoring.current = false;
-    history.current = histories.current.get(next) ?? new History(snapshot());
+    history.current = histories.current.get(page) ?? new History(snapshot());
     pageIndexRef.current = next;
     setPageIndex(next);
     setSize({ width: page.largura, height: page.altura });
     canvas.renderAll();
     setCurrent(dataNow()); refresh();
-    if (opened.current) setBackdrop(await opened.current.fundo(next));
+    if (docMode) setBackdrop(await fundoDe(page));
+  }
+  /** Troca de página: guarda os elementos (e o desfazer) desta e carrega os da outra. */
+  async function goPage(next: number) {
+    if (!canvasRef.current || !history.current || next === pageIndexRef.current || next < 0 || next >= pagesRef.current.length) return;
+    keepPage();
+    await loadPage(next);
+  }
+  /** Página nova em branco, do tamanho da aberta, logo depois dela. */
+  async function addPage() {
+    if (!canvasRef.current || !history.current || busy) return;
+    keepPage();
+    const at = pageIndexRef.current;
+    const atual = pagesRef.current[at];
+    pagesRef.current.splice(at + 1, 0, { largura: atual.largura, altura: atual.altura, objetos: null, ...(docMode ? { origem: null } : {}) });
+    setPageCount(pagesRef.current.length);
+    await loadPage(at + 1);
+  }
+  /** Na imagem, a página dela mesma não sai (é o próprio arquivo). */
+  const removable = (page: PaginaDoc | undefined) => Boolean(page) && pagesRef.current.length > 1 && !(docRef.current?.documento.tipo === 'imagem' && page!.origem === 0);
+  async function removePage(i: number) {
+    const pages = pagesRef.current;
+    if (!removable(pages[i]) || busy) return;
+    const at = pageIndexRef.current;
+    if (i === at) {
+      histories.current.delete(pages[i]);
+      pages.splice(i, 1);
+      setPageCount(pages.length);
+      await loadPage(Math.min(i, pages.length - 1));
+      return;
+    }
+    keepPage();
+    histories.current.delete(pages[i]);
+    pages.splice(i, 1);
+    setPageCount(pages.length);
+    if (i < at) { pageIndexRef.current = at - 1; setPageIndex(at - 1); }
+    setCurrent(dataNow()); refresh();
   }
 
   // Fontes do pacote: registradas e, depois, os textos são medidos de novo.
@@ -490,8 +738,8 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     canvas.requestRenderAll();
     setCurrent(dataNow()); refresh();
   }
-  const undo = () => void restore(history.current?.undo() ?? null);
-  const redo = () => void restore(history.current?.redo() ?? null);
+  const undo = () => { if (cropRef.current) { finishCrop(false); return; } void restore(history.current?.undo() ?? null); };
+  const redo = () => { if (cropRef.current) finishCrop(false); void restore(history.current?.redo() ?? null); };
 
   function remove() {
     if (!canvas || !selected.length) return;
@@ -536,71 +784,228 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
     canvas.requestRenderAll(); commit(); refresh();
   }
 
-  function rendered(format: 'png' | 'jpeg', multiplier: number) {
-    canvas!.discardActiveObject();
-    canvas!.renderAll();
-    const url = canvas!.toDataURL({ format, quality: 0.92, multiplier: multiplier / scale, enableRetinaScaling: false });
-    refresh();
-    return url;
+  /** Uma página pronta como imagem (base64) e o tamanho em pixels. Designs: o JSON da página com
+   * o fundo dela (JPG e PDF sem fundo saem em branco); documentos: o fundo do arquivo e a camada. */
+  async function renderPage(page: PaginaDoc, format: 'png' | 'jpeg', multiplier: number): Promise<{ image: string; pixels: [number, number] }> {
+    const pixels: [number, number] = [Math.max(1, Math.round(page.largura * multiplier)), Math.max(1, Math.round(page.altura * multiplier))];
+    if (docMode) {
+      const url = await fundoDe(page);
+      return { image: await comporPagina(url ? await imagemDe(url) : null, page, multiplier, format === 'png' ? 'image/png' : 'image/jpeg', 0.92), pixels };
+    }
+    const element = document.createElement('canvas');
+    const still = withSoftwareCanvases(() => new StaticCanvas(element, { width: page.largura, height: page.altura, renderOnAddRemove: false, enableRetinaScaling: false }));
+    try {
+      if (page.objetos) await still.loadFromJSON(page.objetos);
+      if (format !== 'png' && !still.backgroundColor) still.backgroundColor = '#ffffff';
+      still.renderAll();
+      return { image: still.toDataURL({ format, quality: 0.92, multiplier, enableRetinaScaling: false }).split(',')[1], pixels };
+    } finally { void still.dispose(); }
+  }
+  /** Prévia da lista de designs: a 1ª página. */
+  async function previewNow() {
+    const first = pagesRef.current[0];
+    const preview = docMode ? await previa(await fundoDe(first), first) : (await renderPage(first, 'png', previewScale(first.largura, first.altura))).image;
+    lastPreview.current = preview;
+    return preview;
+  }
+  /** Guarda o design (os elementos de todas as páginas), sem tocar no arquivo do documento. */
+  async function storeDesign(data: string) {
+    const first = pagesRef.current[0];
+    const preview = await previewNow().catch(() => lastPreview.current);
+    if (!preview) throw new Error('Não foi possível montar a prévia');
+    const nameNow = nameRef.current;
+    const created = !idRef.current;
+    const next = await native<string>('design_save', { id: idRef.current ?? null, name: designName(nameNow), width: first.largura, height: first.altura, data, preview });
+    idRef.current = next; savedRef.current = data; savedNameRef.current = nameNow;
+    setId(next); setSaved(data); setSavedName(nameNow);
+    if (created) onSaved();
+  }
+  /** Salva sozinho (como o Canva): o design, nunca o arquivo do documento. */
+  function persist(): Promise<boolean> {
+    const run = queue.current.then(async () => {
+      if (!readyRef.current || !canvasRef.current || cropRef.current) return true;
+      flush();
+      const data = dataNow();
+      if (data === savedRef.current && nameRef.current === savedNameRef.current) return true;
+      setAutosaving(true);
+      try { await storeDesign(data); return true; }
+      catch (e) { setError(`Não foi possível salvar o design: ${errorText(e)}`); return false; }
+      finally { setAutosaving(false); }
+    });
+    queue.current = run.catch(() => false);
+    return run;
   }
   /** Documento: grava as camadas no arquivo original (com backup) e guarda o design. */
-  async function saveDocument() {
-    const doc = docRef.current!; const a = opened.current;
-    if (!a) return false;
-    setBusy('Gravando no arquivo…'); setError('');
-    let fileError = '';
-    try {
-      dataNow();
-      const extra = doc.documento.tipo === 'pdf'
-        ? { camadas: (await Promise.all(doc.paginas.map(async (p, i) => ({ pagina: i, png: await camada(p, PDF_LAYER) })))).filter(c => c.png) }
-        : { imagem: await compor(a.imagem!, doc.paginas[0]) };
-      const result = await native<{ atual: string }>('design_documento_gravar', { ...refOf(doc.documento), base: doc.documento.base, esperado: doc.documento.gravado, ...extra });
-      doc.documento.gravado = result.atual;
-    } catch (e) { fileError = errorText(e); }
-    try {
-      const data = dataNow();
-      const preview = await previa(await a.fundo(0), doc.paginas[0]);
-      const next = await native<string>('design_save', { id: id ?? null, name, width: doc.paginas[0].largura, height: doc.paginas[0].altura, data, preview });
-      setId(next); setSaved(data); setCurrent(data); setSavedName(name); onSaved();
-    } catch (e) { fileError ||= errorText(e); }
-    finally { setBusy(null); }
-    if (fileError) { setError(`Não foi gravado no arquivo: ${fileError}`); return false; }
-    setNote(`Gravado em ${doc.documento.nome}. O original ficou nos backups da Ayla.`);
-    return true;
-  }
-  async function save() {
-    if (!canvas || !history.current) return false;
-    if (docMode) return saveDocument();
-    setBusy('Salvando…'); setError('');
-    try {
-      const data = history.current.value;
-      const preview = rendered('png', previewScale(width, height)).split(',')[1];
-      const next = await native<string>('design_save', { id: id ?? null, name, width, height, data, preview });
-      setId(next); setSaved(data); setSavedName(name); onSaved();
+  function saveDocument(): Promise<boolean> {
+    const run = queue.current.then(async () => {
+      const doc = docRef.current!; const a = opened.current;
+      if (!a) return false;
+      setBusy('Gravando no arquivo…'); setError('');
+      let fileError = '';
+      try {
+        flush(); dataNow();
+        const pages = pagesRef.current;
+        let extra: Record<string, unknown>;
+        let extraPages: PaginaDoc[] = [];
+        if (doc.documento.tipo === 'pdf') {
+          extra = { camadas: (await Promise.all(pages.map(async (p, i) => ({ pagina: i, png: await camada(p, PDF_LAYER) })))).filter(c => c.png), folhas: folhasDe(pages) };
+        } else {
+          const own = pages.find(p => p.origem === 0) ?? pages[0];
+          const k = a.imagem!.largura / own.largura;
+          extraPages = pages.filter(p => p !== own);
+          extra = {
+            imagem: await compor(a.imagem!, own),
+            extras: await Promise.all(extraPages.map(async p => ({ imagem: await comporPagina(null, p, k, a.imagem!.tipo), arquivo: p.arquivo ?? null, hash: p.hash ?? null }))),
+          };
+        }
+        const result = await native<{ atual: string; extras: { arquivo: string; hash: string; nome: string }[] }>('design_documento_gravar', { ...refOf(doc.documento), base: doc.documento.base, esperado: doc.documento.gravado, ...extra });
+        doc.documento.gravado = result.atual;
+        result.extras.forEach((e, i) => { if (extraPages[i]) { extraPages[i].arquivo = e.arquivo; extraPages[i].hash = e.hash; } });
+        const outras = result.extras.map(e => e.nome);
+        setNote(`Gravado em ${doc.documento.nome}${outras.length ? ` e em ${outras.join(', ')}` : ''}. O original ficou nos backups da Ayla.`);
+      } catch (e) { fileError = errorText(e); }
+      try {
+        const data = dataNow();
+        await storeDesign(data);
+        if (!fileError) setWritten(data);
+        setCurrent(data);
+      } catch (e) { fileError ||= errorText(e); }
+      finally { setBusy(null); }
+      if (fileError) { setNote(''); setError(`Não foi gravado no arquivo: ${fileError}`); return false; }
       return true;
-    } catch (e) { setError(errorText(e)); return false; }
-    finally { setBusy(null); }
+    });
+    queue.current = run.catch(() => false);
+    return run;
   }
   async function exportAs(format: 'png' | 'jpg' | 'pdf', target: 'iris' | 'computer') {
     if (!canvas) return;
     setExporting(false); setBusy('Exportando…'); setError(''); setNote('');
     try {
-      const multiplier = exportScale(width, height, format);
-      const background = canvas.backgroundColor;
-      if (format !== 'png' && !background) canvas.backgroundColor = '#ffffff';
-      const url = rendered(format === 'png' ? 'png' : 'jpeg', multiplier);
-      canvas.backgroundColor = background;
-      const result = await native<{ cancelled?: boolean; name?: string; file?: string }>('design_export', {
-        name, format, image: url.split(',')[1], pixels: [Math.round(width * multiplier), Math.round(height * multiplier)],
-        page: format === 'pdf' ? pdfPage(width, height) : null, target,
-      });
-      if (!result.cancelled) { const message = target === 'iris' ? `${result.name} está na Iris (Arquivos).` : `Salvo como ${result.name}.`; setNote(message); onExported(message); }
+      canvas.discardActiveObject(); flush(); dataNow(); canvas.requestRenderAll(); refresh();
+      const pages = pagesRef.current;
+      const doc = docRef.current;
+      let result: { cancelled?: boolean; name?: string; count?: number };
+      if (doc?.documento.tipo === 'pdf' && format === 'pdf') {
+        // PDF do PDF: carimbado a partir do original, com o texto selecionável.
+        const camadas = (await Promise.all(pages.map(async (p, i) => ({ pagina: i, png: await camada(p, PDF_LAYER) })))).filter(c => c.png);
+        result = await native('design_documento_exportar', { name: designName(name), base: doc.documento.base, camadas, folhas: folhasDe(pages), target });
+      } else {
+        const chosen = format === 'pdf' || exportAll ? pages : [pages[pageIndexRef.current]];
+        const own = pages.find(p => p.origem === 0) ?? pages[0];
+        const scaleOf = (p: PaginaDoc) => doc ? (opened.current?.imagem ? opened.current.imagem.largura / own.largura : 1) : exportScale(p.largura, p.altura, format);
+        const list = [];
+        for (const page of chosen) {
+          const m = scaleOf(page);
+          const shot = await renderPage(page, format === 'png' ? 'png' : 'jpeg', m);
+          list.push({ ...shot, page: format === 'pdf' ? pdfPage(page.largura, page.altura) : null });
+        }
+        result = await native('design_export', { name: designName(name), format, pages: list, target });
+      }
+      if (!result.cancelled) {
+        const many = (result.count ?? 1) > 1;
+        const message = target === 'iris' ? (many ? `${result.count} imagens de ${designName(name)} estão na Iris (Arquivos).` : `${result.name} está na Iris (Arquivos).`)
+          : (many ? `${result.count} imagens salvas na pasta escolhida.` : `Salvo como ${result.name}.`);
+        setNote(message); onExported(message);
+      }
     } catch (e) { setError(errorText(e)); }
     finally { setBusy(null); canvas.requestRenderAll(); }
   }
-  async function close(saveFirst: boolean) {
-    if (saveFirst && !(await save())) return;
+  async function close() {
+    if (!(await persist())) return;
     onClose();
+  }
+  // Salvar sozinho: um instante depois de cada mudança (ou do nome), ao esconder a janela e ao sair.
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+  useEffect(() => {
+    if (!ready || !dirty) return;
+    const timer = setTimeout(() => void persistRef.current(), 900);
+    return () => clearTimeout(timer);
+  }, [ready, dirty, current, name]);
+  useEffect(() => {
+    const hide = () => { if (document.visibilityState === 'hidden') void persistRef.current(); };
+    const away = () => void persistRef.current();
+    document.addEventListener('visibilitychange', hide);
+    window.addEventListener('pagehide', away);
+    window.addEventListener('beforeunload', away);
+    return () => { document.removeEventListener('visibilitychange', hide); window.removeEventListener('pagehide', away); window.removeEventListener('beforeunload', away); };
+  }, []);
+  /** Saindo da página com o editor aberto (trocar de aba, fechar a Iris): guarda o que faltar, com
+   * a última prévia (ou a da página aberta), antes de o canvas sumir. */
+  const leaving = useRef<() => void>(undefined);
+  leaving.current = () => {
+    if (!readyRef.current || !canvasRef.current) return;
+    flush();
+    const data = dataNow();
+    if (data === savedRef.current && nameRef.current === savedNameRef.current) return;
+    let preview = lastPreview.current;
+    if (!preview && !docMode) { try { preview = canvasRef.current.toDataURL({ format: 'png', multiplier: previewScale(width, height) / scale, enableRetinaScaling: false }).split(',')[1]; } catch { preview = null; } }
+    if (!preview) { try { preview = canvasRef.current.toDataURL({ format: 'png', multiplier: 0.2, enableRetinaScaling: false }).split(',')[1]; } catch { return; } }
+    const first = pagesRef.current[0];
+    const id = idRef.current;
+    savedRef.current = data; savedNameRef.current = nameRef.current;
+    void queue.current.then(() => native<string>('design_save', { id: idRef.current ?? id ?? null, name: designName(nameRef.current), width: first.largura, height: first.altura, data, preview })).then(() => onSaved(), () => undefined);
+  };
+
+  // Páginas em rolagem vertical (como no Canva): as outras aparecem como imagem; a aberta, editável.
+  const presentation = ready && isPresentation(pagesRef.current);
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    // Na apresentação, a miniatura da página aberta acompanha as mudanças (um instante depois).
+    const timer = window.setTimeout(() => void (async () => {
+      for (const [i, page] of [...pagesRef.current.entries()]) {
+        if (!alive) return;
+        if (i === pageIndexRef.current && !presentation) continue;
+        const key = `${page.largura}x${page.altura}|${page.origem ?? ''}|${page.objetos ?? ''}`;
+        if (thumbCache.current.get(page)?.key === key) continue;
+        try {
+          const kind = docMode ? 'jpeg' : 'png';
+          const shot = await renderPage(page, kind, Math.min(1, 1400 / Math.max(page.largura, page.altura)));
+          thumbCache.current.set(page, { key, url: `data:image/${kind};base64,${shot.image}` });
+          if (alive) setThumbTick(t => t + 1);
+        } catch { /* a página fica em branco até a próxima vez */ }
+      }
+    })(), presentation ? 400 : 0);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [ready, pageIndex, pageCount, docMode, presentation, presentation ? current : null]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Leva a página `i` para a tela (faixa de miniaturas). */
+  async function showPage(i: number) {
+    await goPage(i);
+    const area = host.current; const slot = slotRefs.current[i];
+    if (area && slot) area.scrollTo({ top: Math.max(0, ((slot.offsetParent as HTMLElement | null)?.offsetTop ?? 0) + slot.offsetTop - 48) });
+  }
+  // A página editável fica por cima do lugar dela na lista.
+  useLayoutEffect(() => {
+    const slot = slotRefs.current[pageIndex]; const box = pageBox.current;
+    if (!slot || !box) return;
+    box.style.top = `${slot.offsetTop}px`; box.style.left = `${slot.offsetLeft}px`;
+    placeSpinner();
+  });
+  // Trocar de página pelos botões leva a página para a tela, se ela estiver fora.
+  useEffect(() => {
+    const area = host.current; const slot = slotRefs.current[pageIndex];
+    if (!area || !slot) return;
+    const top = (slot.offsetParent as HTMLElement | null)?.offsetTop ?? 0;
+    const start = top + slot.offsetTop; const end = start + slot.offsetHeight;
+    if (end < area.scrollTop + 40 || start > area.scrollTop + area.clientHeight - 40) area.scrollTo({ top: Math.max(0, start - 48) });
+  }, [pageIndex, pageCount]);
+  /** Ao parar de rolar, a página no meio da tela passa a ser a editável. */
+  function onStageScroll() {
+    window.clearTimeout(scrollTimer.current);
+    scrollTimer.current = window.setTimeout(() => {
+      const area = host.current;
+      if (!area || busy || cropRef.current || !history.current) return;
+      const mid = area.scrollTop + area.clientHeight / 2;
+      let best = pageIndexRef.current; let distance = Infinity;
+      slotRefs.current.forEach((slot, i) => {
+        if (!slot || i >= pagesRef.current.length) return;
+        const top = ((slot.offsetParent as HTMLElement | null)?.offsetTop ?? 0) + slot.offsetTop;
+        const d = mid < top ? top - mid : mid > top + slot.offsetHeight ? mid - top - slot.offsetHeight : 0;
+        if (d < distance) { distance = d; best = i; }
+      });
+      if (best !== pageIndexRef.current) void goPage(best);
+    }, 140);
   }
 
   // Atalhos (fora de campos de texto e da edição de um texto da página).
@@ -609,10 +1014,15 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       const field = event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable=true]');
       const editing = isText(canvasRef.current?.getActiveObject()) && (canvasRef.current?.getActiveObject() as Textbox).isEditing;
       const mod = event.ctrlKey || event.metaKey;
-      if (leave) { if (event.key === 'Escape') setLeave(null); return; }
-      if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); void save(); return; }
+      if (cropRef.current && !field) {
+        if (event.key === 'Enter') { event.preventDefault(); finishCrop(true); }
+        else if (event.key === 'Escape') { event.preventDefault(); finishCrop(false); }
+        else if (event.key === 'Delete' || event.key === 'Backspace') event.preventDefault();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); void (docMode ? saveDocument() : persist()); return; }
       if (field || editing) return;
-      if (event.key === 'Escape') { if (canvasRef.current?.getActiveObject()) { canvasRef.current.discardActiveObject(); canvasRef.current.requestRenderAll(); refresh(); } else if (dirty) setLeave('close'); else onClose(); }
+      if (event.key === 'Escape') { if (canvasRef.current?.getActiveObject()) { canvasRef.current.discardActiveObject(); canvasRef.current.requestRenderAll(); refresh(); } else void close(); }
       else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); remove(); }
       else if (mod && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) redo(); else undo(); }
       else if (mod && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); }
@@ -673,14 +1083,20 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
 
   return <div className="design-editor" role="dialog" aria-modal="true" aria-label={`Design: ${name}`}>
     <header className="design-bar">
-      <button className="icon-button" data-tip="Voltar aos designs" aria-label="Voltar aos designs" onClick={() => dirty ? setLeave('close') : onClose()}><CloseIcon size={18} /></button>
-      <input className="design-name" value={name} maxLength={120} aria-label="Nome do design" onChange={e => setName(e.target.value)} />
+      <button className="icon-button" data-tip="Voltar aos designs (salva sozinho)" aria-label="Voltar aos designs" onClick={() => void close()}><CloseIcon size={18} /></button>
+      <input className="design-name" value={name} maxLength={120} placeholder="Sem nome" aria-label="Nome do design" onChange={e => setName(e.target.value)} />
       <small className="design-size">{docMode ? `${docRef.current?.documento.nome ?? ''}` : `${width} × ${height} px`}</small>
-      {docMode && pageCount > 1 && <span className="design-pages-nav">
-        <Tool label="Página anterior" onClick={() => void goPage(pageIndex - 1)} disabled={pageIndex === 0 || Boolean(busy)}><span aria-hidden="true">‹</span></Tool>
-        <span>Página {pageIndex + 1} de {pageCount}</span>
-        <Tool label="Próxima página" onClick={() => void goPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1 || Boolean(busy)}><span aria-hidden="true">›</span></Tool>
-      </span>}
+      <span className="design-pages-nav">
+        {pageCount > 1 && <>
+          <Tool label="Página anterior" onClick={() => void goPage(pageIndex - 1)} disabled={pageIndex === 0 || Boolean(busy)}><span aria-hidden="true">‹</span></Tool>
+          <span>Página {pageIndex + 1} de {pageCount}</span>
+          <Tool label="Próxima página" onClick={() => void goPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1 || Boolean(busy)}><span aria-hidden="true">›</span></Tool>
+        </>}
+        <Tool label="Adicionar página depois desta" onClick={() => void addPage()} disabled={!ready || Boolean(busy)}><PlusIcon size={15} /></Tool>
+        {removable(pagesRef.current[pageIndex]) && <Confirm className="icon-button" title="Apagar esta página" ariaLabel={`Apagar a página ${pageIndex + 1}`} disabled={!ready || Boolean(busy)}
+          question={docMode && pagesRef.current[pageIndex]?.origem != null ? `Tirar a página ${pageIndex + 1} do arquivo? Ela sai quando você gravar no arquivo (o original fica nos backups).` : `Apagar a página ${pageIndex + 1} e o que tem nela?`}
+          confirm="Apagar" onConfirm={() => void removePage(pageIndex)}><TrashIcon size={15} /></Confirm>}
+      </span>
       <span className="design-bar-gap" />
       <Tool label="Desfazer (Ctrl+Z)" onClick={undo} disabled={!history.current?.canUndo}><span aria-hidden="true">↶</span></Tool>
       <Tool label="Refazer (Ctrl+Shift+Z)" onClick={redo} disabled={!history.current?.canRedo}><span aria-hidden="true">↷</span></Tool>
@@ -690,33 +1106,25 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
         <Tool label="Aumentar zoom" onClick={() => setZoom(Math.min(4, scale * 1.25))}><span aria-hidden="true">+</span></Tool>
       </span>
       {busy && <span className="design-status" role="status">{busy}</span>}
-      {!busy && ready && <span className="design-status">{note || (dirty ? 'Alterações não salvas' : id ? 'Salvo' : '')}</span>}
-      {docMode ? <button className="primary-action" disabled={!ready || Boolean(busy)} title="Grava no arquivo original (uma cópia dele fica nos backups da Ayla)" onClick={() => void save()}>Salvar no arquivo</button>
-        : <button className="ghost-button" disabled={!ready || Boolean(busy)} onClick={() => void save()}>Salvar</button>}
-      {!docMode && <span className="design-export">
-        <button className="primary-action" disabled={!ready || Boolean(busy)} aria-haspopup="menu" aria-expanded={exporting} onClick={() => setExporting(v => !v)}><DownloadIcon size={15} /> Exportar</button>
+      {!busy && ready && <span className="design-status" role="status">{autosaving ? 'Salvando…' : note || (dirty ? 'Salvando…' : docMode && current !== written ? 'Salvo nos designs; falta gravar no arquivo' : id ? 'Salvo' : '')}</span>}
+      {docMode && <button className={current !== written ? 'primary-action' : 'ghost-button'} disabled={!ready || Boolean(busy)} title="Grava no arquivo original (uma cópia dele fica nos backups da Ayla)" onClick={() => void saveDocument()}>Salvar no arquivo</button>}
+      <span className="design-export">
+        <button className={docMode ? 'ghost-button' : 'primary-action'} disabled={!ready || Boolean(busy)} aria-haspopup="menu" aria-expanded={exporting} onClick={() => setExporting(v => !v)}><DownloadIcon size={15} /> Exportar</button>
         {exporting && <div className="design-menu" role="menu">
+          {pageCount > 1 && <div className="design-sources" role="radiogroup" aria-label="Páginas em PNG e JPG">
+            <button role="radio" aria-checked={!exportAll} className={!exportAll ? 'active' : ''} onClick={() => setExportAll(false)}>Esta página</button>
+            <button role="radio" aria-checked={exportAll} className={exportAll ? 'active' : ''} onClick={() => setExportAll(true)}>Todas ({pageCount})</button>
+          </div>}
           {(['png', 'jpg', 'pdf'] as const).map(format => <div key={format} className="design-menu-row">
             <b>{format.toUpperCase()}</b>
             <button role="menuitem" className="ghost-button" onClick={() => void exportAs(format, 'iris')}>Para a Iris</button>
             <button role="menuitem" className="ghost-button" onClick={() => void exportAs(format, 'computer')}>No computador…</button>
           </div>)}
-          <small>{`PNG e JPG com ${Math.round(width * exportScale(width, height, 'png'))} px de largura; PDF em alta resolução.`}</small>
+          <small>{pageCount > 1 ? `PNG e JPG: ${exportAll ? 'uma imagem por página (no computador, você escolhe a pasta)' : 'só a página aberta'}. PDF sai com todas as páginas.` : docMode ? 'PNG e JPG no tamanho do arquivo; PDF com tudo o que foi adicionado.' : `PNG e JPG com ${Math.round(width * exportScale(width, height, 'png'))} px de largura; PDF em alta resolução.`}</small>
         </div>}
-      </span>}
+      </span>
     </header>
     {error && <p role="alert" className="app-error design-error">{error} <button className="link-button" onClick={() => setError('')}>Fechar</button></p>}
-    {leave && <div className="dialog-backdrop design-leave" onPointerDown={e => { if (e.target === e.currentTarget) setLeave(null); }}>
-      <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="design-leave-title" aria-describedby="design-leave-text">
-        <h2 id="design-leave-title">Sair sem salvar?</h2>
-        <p id="design-leave-text">“{name}” tem alterações que ainda não foram salvas. Se sair sem salvar, elas se perdem.</p>
-        <div className="design-leave-actions">
-          <button className="ghost-button" autoFocus onClick={() => setLeave(null)}>Continuar editando</button>
-          <button className="ghost-button danger" onClick={() => void close(false)}>Sair sem salvar</button>
-          <button className="primary-action" onClick={() => void close(true)}>Salvar e sair</button>
-        </div>
-      </div>
-    </div>}
     <div className="design-body">
       <nav className="design-tabs" aria-label="Elementos">
         {([['texto', 'Texto', 'T'], ['formas', 'Formas', '◆'], ['imagens', 'Imagens', null], ['icones', 'Ícones', '★'], ['desenhar', 'Desenhar', '✎'], ['fundo', 'Fundo', '▦']] as const).filter(([key]) => !docMode || key !== 'fundo').map(([key, label, glyph]) =>
@@ -824,27 +1232,75 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
       </aside>
       <div className="design-resizer" role="separator" aria-orientation="vertical" aria-label="Largura do painel da esquerda" aria-valuemin={sideLimits.min} aria-valuemax={sideLimits.max} aria-valuenow={sides.left} tabIndex={0}
         onPointerDown={e => resizeSide('left', e)} onKeyDown={e => nudgeSide('left', e)} onDoubleClick={() => setSides(old => ({ ...old, left: 264 }))} />
-      <div className={zoom === 'fit' ? 'design-stage fit' : 'design-stage'} ref={host} onPointerDown={e => { if (e.target === e.currentTarget && canvas) { canvas.discardActiveObject(); canvas.requestRenderAll(); refresh(); } }}>
-        <div className={docMode ? 'design-page doc' : 'design-page'} style={{ width: Math.round(width * scale), height: Math.round(height * scale), backgroundImage: backdrop ? `url(${backdrop})` : undefined }}><canvas ref={element} /></div>
+      <div className="design-center">
+      <div className="design-stage" ref={host} onScroll={onStageScroll} onPointerDown={e => { if ((e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('design-pages')) && canvas && !cropRef.current) { canvas.discardActiveObject(); canvas.requestRenderAll(); refresh(); } }}>
+        <div className="design-pages">
+          {pagesRef.current.map((page, i) => {
+            const shown = i === pageIndex;
+            const thumb = shown ? undefined : thumbCache.current.get(page)?.url;
+            return <div key={keyOf(page)} className="design-slot">
+              <div className="design-slot-head">Página {i + 1}{docMode && page.origem == null ? ' · nova' : ''}</div>
+              <div ref={el => { slotRefs.current[i] = el; }} className={`design-slot-page${docMode ? ' doc' : ''}${shown ? ' active' : ''}`}
+                style={{ width: Math.round(page.largura * scale), height: Math.round(page.altura * scale) }}
+                role={shown ? undefined : 'button'} tabIndex={shown ? undefined : 0} aria-label={shown ? undefined : `Editar a página ${i + 1}`}
+                onClick={shown || busy ? undefined : () => void goPage(i)} onKeyDown={shown ? undefined : e => { if (e.key === 'Enter') void goPage(i); }}>
+                {thumb && <img src={thumb} alt="" draggable={false} />}
+              </div>
+            </div>;
+          })}
+          {ready && <button className="ghost-button design-add-page" disabled={Boolean(busy) || cropping} onClick={() => { const last = pagesRef.current.length - 1; void (async () => { if (pageIndexRef.current !== last) await goPage(last); await addPage(); })(); }}><PlusIcon size={15} /> Adicionar página</button>}
+          <button ref={spinner} type="button" className="design-spinner" style={{ display: 'none' }} title="Segure e arraste para girar (Shift: sem encaixar)" aria-label="Girar: segure e arraste"
+            onPointerDown={spin} onKeyDown={e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); rotate({ by: (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 15 : 1) }); } }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.3-5.7M20 4v5h-5" /></svg>
+            {spinning !== null && <span className="design-spinner-angle">{spinning}°</span>}
+          </button>
+          <div ref={pageBox} className={docMode ? 'design-page doc' : 'design-page'} style={{ width: Math.round(width * scale), height: Math.round(height * scale), backgroundImage: backdrop ? `url(${backdrop})` : undefined }}><canvas ref={element} /></div>
+        </div>
+      </div>
+      {presentation && <nav className="design-strip" aria-label="Páginas da apresentação">
+        {pagesRef.current.map((page, i) => {
+          const thumb = thumbCache.current.get(page)?.url ?? (i === pageIndex && backdrop ? backdrop : undefined);
+          return <button key={keyOf(page)} className={i === pageIndex ? 'design-strip-page active' : 'design-strip-page'} aria-current={i === pageIndex ? 'page' : undefined}
+            aria-label={`Página ${i + 1}`} disabled={Boolean(busy) || cropping} onClick={() => void showPage(i)}>
+            <span className={docMode ? 'design-strip-thumb doc' : 'design-strip-thumb'} style={{ width: Math.round(64 * page.largura / page.altura) }}>{thumb && <img src={thumb} alt="" draggable={false} />}</span>
+            <small>{i + 1}</small>
+          </button>;
+        })}
+        <button className="design-strip-page add" aria-label="Adicionar página no fim" disabled={Boolean(busy) || cropping} onClick={() => { const last = pagesRef.current.length - 1; void (async () => { if (pageIndexRef.current !== last) await goPage(last); await addPage(); })(); }}>
+          <span className="design-strip-thumb" style={{ width: Math.round(64 * width / height) }}><PlusIcon size={20} /></span><small>Nova</small>
+        </button>
+      </nav>}
       </div>
       <div className="design-resizer" role="separator" aria-orientation="vertical" aria-label="Largura do painel da direita" aria-valuemin={sideLimits.min} aria-valuemax={sideLimits.max} aria-valuenow={sides.right} tabIndex={0}
         onPointerDown={e => resizeSide('right', e)} onKeyDown={e => nudgeSide('right', e)} onDoubleClick={() => setSides(old => ({ ...old, right: 264 }))} />
       <aside className="design-props" aria-label="Propriedades" style={{ width: sides.right }}>
-        {!active ? <div className="design-stack">
+        {cropping ? <div className="design-stack">
+          <p className="sidebar-label">Recortar imagem</p>
+          <p className="design-hint">Arraste o quadro e puxe as alças para escolher a parte que fica. A parte apagada sai. Enter ou clicar fora aplica; Esc desiste.</p>
+          <div className="design-row">
+            <button className="primary-action" onClick={() => finishCrop(true)}>Aplicar</button>
+            <button className="ghost-button" onClick={() => finishCrop(false)}>Cancelar</button>
+          </div>
+        </div> : !active ? <div className="design-stack">
           {docMode && <>
             <p className="sidebar-label">{docRef.current?.documento.tipo === 'pdf' ? 'PDF' : 'Imagem'}</p>
-            <p className="design-hint">O que você adicionar fica por cima do arquivo. "Salvar no arquivo" grava em {docRef.current?.documento.nome}{docRef.current?.documento.tipo === 'pdf' ? ' (o texto do PDF continua selecionável)' : ''}; antes, a Ayla guarda uma cópia do original. Os elementos continuam editáveis aqui em Designs.</p>
-            {pageCount > 1 && <div className="design-page-list" role="list" aria-label="Páginas">{docRef.current!.paginas.map((p, i) => {
+            <p className="design-hint">O que você adicionar fica por cima do arquivo e é salvo sozinho aqui em Designs. "Salvar no arquivo" grava em {docRef.current?.documento.nome}{docRef.current?.documento.tipo === 'pdf' ? ' (o texto do PDF continua selecionável; páginas novas entram nele)' : ' (páginas a mais viram outras imagens na mesma pasta)'}; antes, a Ayla guarda uma cópia do original.</p>
+          </>}
+          {pageCount > 1 && <>
+            <p className="sidebar-label">Páginas</p>
+            <div className="design-page-list" role="list" aria-label="Páginas">{pagesRef.current.map((p, i) => {
               const edited = i === pageIndex ? Boolean(canvas?.getObjects().length) : Boolean(p.objetos && JSON.parse(p.objetos).objects?.length);
-              return <button key={i} role="listitem" className={i === pageIndex ? 'active' : ''} aria-current={i === pageIndex ? 'page' : undefined} disabled={Boolean(busy)} onClick={() => void goPage(i)}>{i + 1}{edited ? ' •' : ''}</button>;
-            })}</div>}
+              const blank = docMode && p.origem == null;
+              return <button key={i} role="listitem" className={i === pageIndex ? 'active' : ''} aria-current={i === pageIndex ? 'page' : undefined} disabled={Boolean(busy)}
+                title={blank ? 'Página nova' : undefined} onClick={() => void goPage(i)}>{i + 1}{blank ? '+' : ''}{edited ? ' •' : ''}</button>;
+            })}</div>
           </>}
           <p className="sidebar-label">Página</p>
-          <p className="design-hint">{docMode ? 'Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar.' : `${width} × ${height} px. Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar.`}</p>
+          <p className="design-hint">{docMode ? '' : `${width} × ${height} px. `}Clique num elemento para editar; arraste para mover; use as alças para girar e redimensionar (encaixam nas guias e na margem; Shift solta). Duplo clique numa imagem recorta. Role para ver as outras páginas.</p>
           {!docMode && <label className="design-field">Fundo <input type="color" value={backgroundColor} onChange={e => setBackground(e.target.value)} /></label>}
           <label className="design-check"><input type="checkbox" checked={margins} onChange={e => { setMargins(e.target.checked); localStorage.setItem('ayla-design-margens', e.target.checked ? 'sim' : 'nao'); canvas?.requestRenderAll(); }} /> Mostrar margens</label>
           <p className="design-hint">Ao arrastar, os elementos encaixam nas margens, no centro da página e nas bordas dos outros; a linha rosa mostra o alinhamento. As margens não aparecem na exportação.</p>
-          <p className="design-hint">Atalhos: Ctrl+Z desfaz, Ctrl+D duplica, Delete apaga, setas movem (Shift: 10 px), Ctrl+S salva.</p>
+          <p className="design-hint">O design é salvo sozinho a cada mudança. Atalhos: Ctrl+Z desfaz, Ctrl+D duplica, Delete apaga, setas movem (Shift: 10 px){docMode ? ', Ctrl+S grava no arquivo' : ''}.</p>
         </div> : <div className="design-stack">
           {text && <>
             <p className="sidebar-label">Texto</p>
@@ -897,6 +1353,22 @@ export default function IrisDesignEditor({ opening, pack, onSaved, onExported, o
             <p className="design-hint design-credit">{(active as FabricObject & { credit?: string }).credit}</p>
             <button className="ghost-button" onClick={() => void navigator.clipboard?.writeText((active as FabricObject & { credit?: string }).credit ?? '')}><CopyIcon size={15} /> Copiar crédito</button>
           </>}
+          {active instanceof FabricImage && <>
+            <p className="sidebar-label">Imagem</p>
+            <button className="ghost-button" onClick={() => startCrop(active)}>Recortar (ou duplo clique na imagem)</button>
+          </>}
+          <p className="sidebar-label">Girar</p>
+          <div className="design-grid-buttons">
+            <button className="ghost-button" onClick={() => rotate({ by: -90 })}>↺ 90°</button>
+            <button className="ghost-button" onClick={() => rotate({ by: 90 })}>↻ 90°</button>
+            <button className="ghost-button" onClick={() => mirror('x')}>Espelhar ↔</button>
+            <button className="ghost-button" onClick={() => mirror('y')}>Espelhar ↕</button>
+          </div>
+          <div className="design-row design-angle">
+            <label className="design-field">Ângulo <input type="range" min={0} max={359} step={1} value={Math.round(((active.angle % 360) + 360) % 360)} onChange={e => rotate({ to: Number(e.target.value) })} /></label>
+            <label className="design-field">Graus <input type="number" min={-360} max={360} step={1} value={Math.round(((active.angle % 360) + 360) % 360)} aria-label="Ângulo em graus"
+              onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && e.target.value !== '') rotate({ to: v }); }} /></label>
+          </div>
           <label className="design-field">Transparência <input type="range" min={0.05} max={1} step={0.05} value={active.opacity} onChange={e => apply({ opacity: Number(e.target.value) })} /></label>
           <p className="sidebar-label">Camada</p>
           <div className="design-grid-buttons">

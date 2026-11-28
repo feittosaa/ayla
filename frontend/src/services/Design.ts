@@ -7,6 +7,7 @@ export type PackFont = { family: string; faces: { weight: number; style: string;
 
 export type Format = { id: string; label: string; width: number; height: number; hint: string };
 export const formats: Format[] = [
+  { id: 'apresentacao', label: 'Apresentação', width: 1920, height: 1080, hint: 'Slides 16:9, com as páginas embaixo' },
   { id: 'post', label: 'Post quadrado', width: 1080, height: 1080, hint: 'Instagram, Facebook' },
   { id: 'retrato', label: 'Post retrato', width: 1080, height: 1350, hint: 'Instagram 4:5' },
   { id: 'story', label: 'Story', width: 1080, height: 1920, hint: 'Stories, Reels, status' },
@@ -16,6 +17,13 @@ export const formats: Format[] = [
 ];
 export const MIN_SIDE = 16;
 export const MAX_SIDE = 8000;
+/** Unidades do tamanho livre. O design é medido em px de tela (96 por polegada), como o PDF
+ * exportado: 210 × 297 mm viram 794 × 1123 px, a mesma folha A4 do formato pronto. */
+export type Unit = 'px' | 'cm' | 'mm';
+const PX_PER: Record<Unit, number> = { px: 1, cm: 96 / 2.54, mm: 96 / 25.4 };
+export const toPx = (value: number, unit: Unit) => value * PX_PER[unit];
+/** Valor na unidade, com até 1 casa (cm/mm) ou inteiro (px). */
+export const fromPx = (px: number, unit: Unit) => unit === 'px' ? Math.round(px) : Math.round((px / PX_PER[unit]) * 10) / 10;
 export const clampSide = (value: number) => Math.round(Math.min(MAX_SIDE, Math.max(MIN_SIDE, Number.isFinite(value) ? value : MIN_SIDE)));
 
 /** Página do PDF em pontos: o design é medido em px de tela (96 por polegada), então A4
@@ -145,6 +153,24 @@ export const templates: Template[] = [
 ];
 
 export const formatOf = (id: string) => formats.find(f => f.id === id);
+
+/** Apresentação (slides): todas as páginas deitadas em 16:9 ou 4:3. Ganha a faixa de miniaturas. */
+export function isPresentation(pages: { largura: number; altura: number }[]) {
+  return pages.length > 0 && pages.every(p => p.largura > p.altura && [16 / 9, 4 / 3].some(r => Math.abs(p.largura / p.altura - r) < 0.03));
+}
+
+/** Páginas de um design guardado (JSON do Fabric de cada uma). Com uma página só, o design é o
+ * próprio JSON do Fabric (como os antigos); com várias, `{"ayla_paginas": [...]}`. */
+export function designPages(data: string): string[] {
+  try {
+    const value = JSON.parse(data) as { ayla_paginas?: unknown };
+    if (Array.isArray(value.ayla_paginas) && value.ayla_paginas.length && value.ayla_paginas.every(p => typeof p === 'string')) return value.ayla_paginas as string[];
+  } catch { /* fica como uma página */ }
+  return [data];
+}
+export const designData = (pages: string[]) => pages.length === 1 ? pages[0] : JSON.stringify({ ayla_paginas: pages });
+/** Nome de um design guardado: o digitado ou, vazio, "Sem nome". */
+export const designName = (name: string) => name.trim() || 'Sem nome';
 /** Nome padrão de um design novo: o formato (ou o modelo) e a data. */
 export function defaultName(label: string, now = new Date()) {
   return `${label} · ${now.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}`;

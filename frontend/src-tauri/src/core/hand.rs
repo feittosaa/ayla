@@ -665,9 +665,39 @@ pub fn launch(id: &str) -> Result<(), String> {
 /// Abre um arquivo ou pasta no programa padrão, ou mostra o arquivo na pasta dele.
 pub fn open_path(path: &Path, reveal: bool) -> Result<(), String> {
     if !path.exists() { return Err("Arquivo não encontrado".into()); }
-    let target = if reveal && !path.is_dir() { path.parent().unwrap_or(path) } else { path };
+    if reveal && !path.is_dir() { return show_in_folder(path); }
+    let target = path;
     Command::new("xdg-open").arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()
         .map(|_| ()).map_err(|_| "Não foi possível abrir (falta o xdg-open)".into())
+}
+
+/// URI `file://` de um caminho absoluto, com os bytes fora do conjunto seguro em `%XX`.
+pub fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) { uri.push(b as char); } else { uri.push_str(&format!("%{b:02X}")); }
+    }
+    uri
+}
+
+/// Mostra o arquivo selecionado no gerenciador de arquivos (FileManager1 pelo D-Bus); sem ele,
+/// abre a pasta do arquivo. Roda em segundo plano para não segurar a interface.
+pub fn show_in_folder(path: &Path) -> Result<(), String> {
+    if !path.exists() { return Err("Arquivo não encontrado".into()); }
+    let uri = file_uri(path);
+    let parent = path.parent().unwrap_or(path).to_path_buf();
+    std::thread::spawn(move || {
+        let shown = Command::new("gdbus").args(["call", "--session", "--timeout", "5", "--dest", "org.freedesktop.FileManager1",
+            "--object-path", "/org/freedesktop/FileManager1", "--method", "org.freedesktop.FileManager1.ShowItems"])
+            .arg(format!("['{uri}']")).arg("")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().is_ok_and(|s| s.success());
+        if !shown {
+            let _ = Command::new("xdg-open").arg(&parent).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+        }
+    });
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -1000,6 +1030,13 @@ pub fn programa_pelo_nome<'a>(nome: &str, programas: &'a [Programa]) -> Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_uri_escapa_espacos_aspas_e_acentos() {
+        assert_eq!(file_uri(Path::new("/home/x/Notas/a b.md")), "file:///home/x/Notas/a%20b.md");
+        assert_eq!(file_uri(Path::new("/h/it's/ação.pdf")), "file:///h/it%27s/a%C3%A7%C3%A3o.pdf");
+        assert_eq!(file_uri(Path::new("/h/['x'].md")), "file:///h/%5B%27x%27%5D.md");
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ayla-hand-{name}-{}-{}", std::process::id(), now_secs()));

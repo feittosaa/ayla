@@ -288,6 +288,10 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .tree-row .tree-trash.tree-protect { margin-left: auto; }
 .app-shell .tree-row .tree-trash.tree-protect + .tree-trash { margin-left: 0; }
 .app-shell .tree-row .tree-trash.tree-protect:hover { color: var(--ayla-accent); }
+/* Mostrar no explorador de arquivos: primeira ferramenta da linha; as seguintes encostam nela. */
+.app-shell .tree-row .tree-trash.tree-reveal { margin-left: auto; }
+.app-shell .tree-row .tree-reveal ~ .tree-trash { margin-left: 0; }
+.app-shell .tree-row .tree-trash.tree-reveal:hover { color: var(--ayla-accent); }
 /* Fixar no topo (só notas da Athena): o pino vem antes das outras ferramentas; fixada, fica sempre visível. */
 .app-shell .tree-row .tree-trash.tree-pin { margin-left: 0; }
 .app-shell .tree-row .tree-trash.tree-pin:hover { color: var(--ayla-accent); }
@@ -645,6 +649,12 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .app-shell .iris-card { display: flex; flex-direction: column; min-width: 0; padding: 0; border: 1px solid var(--ayla-border-soft); border-radius: calc(10px * var(--ayla-round, 1)); overflow: hidden; background: var(--ayla-panel); text-align: left; cursor: zoom-in; transition: border-color 120ms, transform 120ms; }
 .app-shell .iris-card:hover { border-color: var(--ayla-accent); }
 .app-shell .iris-card:focus-visible { outline: 2px solid var(--ayla-accent); outline-offset: 2px; }
+/* Mostrar no explorador de arquivos: canto do cartão, só com o mouse em cima (ou o foco do teclado). */
+.iris-card-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
+.iris-card-wrap > .iris-card { flex: 1; }
+.app-shell .iris-card-wrap .iris-reveal { position: absolute; top: 6px; right: 6px; display: none; width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 50%; background: rgb(0 0 0 / .5); color: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / .4); }
+.app-shell .iris-card-wrap:hover .iris-reveal, .app-shell .iris-card-wrap:focus-within .iris-reveal { display: inline-flex; align-items: center; justify-content: center; }
+.app-shell .iris-card-wrap .iris-reveal:hover { background: var(--ayla-accent); color: var(--ayla-on-accent); }
 .iris-thumb { position: relative; display: block; aspect-ratio: 1; background: var(--ayla-panel); overflow: hidden; }
 .iris-card.pdf .iris-thumb { aspect-ratio: 3 / 4; background: #f4f4f2; }
 .iris-card.pdf .iris-thumb img { object-position: top; }
@@ -919,6 +929,11 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .design-format-shape { display: block; margin: 6px 0 4px; border: 2px solid var(--ayla-accent); border-radius: calc(4px * var(--ayla-round, 1)); background: var(--ayla-accent-ring, transparent); }
 .design-custom { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ayla-text-soft); }
 .app-shell .design-custom input { width: 64px; padding: 4px 6px; }
+.design-format-shape.custom-shape { display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 54px; border-style: dashed; color: var(--ayla-text-soft); }
+.design-size-fields { display: flex; align-items: flex-end; gap: 10px; }
+.design-size-fields > span { padding-bottom: 8px; color: var(--ayla-text-soft); }
+.app-shell .design-size-fields input { width: 110px; }
+.design-size-preview { display: flex; justify-content: center; padding: 8px 0; }
 .app-shell .design-template, .app-shell .design-card-open { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 8px; border: 1px solid var(--ayla-border-soft); border-radius: calc(12px * var(--ayla-round, 1)); background: var(--ayla-panel); color: var(--ayla-text); text-align: left; height: auto; min-height: 0; width: 100%; }
 .app-shell .design-template:hover, .app-shell .design-card-open:hover { border-color: var(--ayla-accent); }
 .design-template-preview { display: flex; align-items: center; justify-content: center; max-height: 220px; overflow: hidden; border-radius: calc(8px * var(--ayla-round, 1)); background: repeating-conic-gradient(var(--ayla-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
@@ -1013,9 +1028,36 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .design-grid-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .design-grid-buttons.three { grid-template-columns: repeat(3, 1fr); }
 .app-shell .design-grid-buttons .ghost-button { padding: 6px 4px; font-size: 12px; }
-.design-stage { flex: 1; min-width: 0; min-height: 0; overflow: auto; display: flex; padding: 32px; background: var(--ayla-sidebar, var(--ayla-hover)); }
-.design-stage.fit { overflow: hidden; }
-.design-page { flex: none; margin: auto; box-shadow: 0 6px 30px #0005, 0 0 0 1px #0002; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 20px 20px; }
+.design-stage { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 16px 32px 40px; background: var(--ayla-sidebar, var(--ayla-hover)); }
+/* Páginas uma embaixo da outra (como no Canva); a editável fica por cima do lugar dela. */
+.design-pages { position: relative; display: flex; flex-direction: column; align-items: center; gap: 20px; min-width: max-content; margin: 0 auto; }
+.design-slot { display: flex; flex-direction: column; gap: 6px; }
+.design-slot-head { height: 20px; font-size: 12px; color: var(--ayla-text-soft); }
+.design-slot-page { box-shadow: 0 6px 30px #0005, 0 0 0 1px #0002; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 20px 20px; cursor: pointer; overflow: hidden; }
+.design-slot-page.doc { background: #fff; }
+.design-slot-page.active { cursor: default; box-shadow: none; background: none; }
+.design-slot-page:not(.active):hover { outline: 2px solid var(--ayla-accent); }
+.design-slot-page img { display: block; width: 100%; height: 100%; min-width: 0; }
+.design-add-page { align-self: center; }
+/* Girar: botão embaixo da seleção, que se segura e arrasta. */
+.app-shell .design-spinner { position: absolute; z-index: 3; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; transform: translate(-50%, 0); border: 1px solid #0003; border-radius: 50%; background: #fff; color: #3a3a48; box-shadow: 0 2px 8px #0004; cursor: grab; touch-action: none; }
+.app-shell .design-spinner:active { cursor: grabbing; color: var(--ayla-accent); }
+.design-spinner-angle { position: absolute; top: 38px; padding: 2px 6px; border-radius: 6px; background: #000c; color: #fff; font-size: 12px; white-space: nowrap; pointer-events: none; }
+.design-angle .design-field:first-child { flex: 1; }
+.app-shell .design-angle input[type=number] { width: 72px; }
+.design-center { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.design-center > .design-stage { flex: 1; }
+/* Apresentação: faixa de miniaturas das páginas embaixo (como no Canva). */
+.design-strip { flex: none; display: flex; gap: 10px; align-items: flex-end; padding: 10px 16px; overflow-x: auto; border-top: 1px solid var(--ayla-border-soft); background: var(--ayla-panel); }
+.app-shell .design-strip-page { flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 3px; border: 2px solid transparent; border-radius: calc(8px * var(--ayla-round, 1)); background: none; color: var(--ayla-text-soft); }
+.app-shell .design-strip-page:hover { border-color: var(--ayla-border-soft); }
+.app-shell .design-strip-page.active { border-color: var(--ayla-accent); color: var(--ayla-text); }
+.design-strip-thumb { display: flex; align-items: center; justify-content: center; height: 64px; overflow: hidden; border-radius: calc(4px * var(--ayla-round, 1)); background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 12px 12px; box-shadow: 0 0 0 1px #0002; }
+.design-strip-thumb.doc { background: #fff; }
+.design-strip-page.add .design-strip-thumb { background: var(--ayla-hover); color: var(--ayla-text-soft); }
+.design-strip-thumb img { display: block; height: 100%; width: 100%; min-width: 0; object-fit: cover; }
+.design-strip-page small { font-size: 11px; }
+.design-page { position: absolute; top: 0; left: 0; margin: 0; box-shadow: 0 6px 30px #0005, 0 0 0 1px #0002; background: repeating-conic-gradient(#e6e6ea 0 25%, #fff 0 50%) 0 0 / 20px 20px; }
 .app-shell .design-stack .ghost-button, .app-shell .design-menu .ghost-button, .app-shell .design-pack .ghost-button { border: 1px solid var(--ayla-border-soft); }
 .app-shell .design-stack .ghost-button:hover:not(:disabled) { border-color: var(--ayla-accent); }
 
