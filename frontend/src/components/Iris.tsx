@@ -3,9 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } 
 import { emit, listen } from '@tauri-apps/api/event';
 import MediaView from './MediaView';
 import { preloadPdf } from '../services/PdfJs';
-import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, CursorTextIcon, ExpandIcon, FileIcon, PencilIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, CursorTextIcon, ExpandIcon, FileIcon, FolderIcon, PencilIcon, PlusIcon, RefreshIcon, SidebarIcon, TrashIcon, VideoIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
-import { mediaUrl, openInSystem, type MediaRef } from '../services/Media';
+import { mediaUrl, openInSystem, revealInFolder, type MediaRef } from '../services/Media';
 import { setMediaVersions } from '../services/Wiki';
 import BrandMark from './BrandMark';
 import IrisUpscale, { type UpscaleResult } from './IrisUpscale';
@@ -459,6 +459,11 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
   function system(item: Item) {
     void openInSystem(mediaOf(item)).catch(e => setError(errorText(e)));
   }
+  /** Mostrar no explorador de arquivos: só arquivos de pastas (Athena ou do computador). */
+  function reveal(item: Item) {
+    if (item.file || !item.root || !item.path) return;
+    void revealInFolder({ root: item.root, path: item.path }).catch(e => setError(errorText(e)));
+  }
   const choose = (next: Kind) => { setKind(next); setDesigning(false); setShown(PAGE); };
 
   function selectFolder(next: 'athena' | 'computer', folder: FolderSelection) {
@@ -565,11 +570,15 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
             {groups.map(group => <section key={group.label} className="iris-month" aria-label={group.label}>
               {group.label && <h2>{group.label}</h2>}
               <div className="iris-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${tileSize}px), 1fr))` }}>
-                {group.items.map(item => <button key={item.key} className={`iris-card ${item.kind}${picked.has(item.key) ? ' picked' : ''}`} title={`${item.name}\n${itemLocation(item)}`}
-                  aria-pressed={picking ? picked.has(item.key) : undefined} onClick={event => clickCard(item, event)}>
-                  <span className="iris-thumb"><Thumb key={`${item.date}-${item.bytes}`} item={item} />{picking && <span className="iris-check" aria-hidden="true" />}</span>
-                  <span className="iris-caption"><b>{item.name}</b><small>{itemLocation(item)}</small></span>
-                </button>)}
+                {group.items.map(item => <div key={item.key} className="iris-card-wrap">
+                  <button className={`iris-card ${item.kind}${picked.has(item.key) ? ' picked' : ''}`} title={`${item.name}\n${itemLocation(item)}`}
+                    aria-pressed={picking ? picked.has(item.key) : undefined} onClick={event => clickCard(item, event)}>
+                    <span className="iris-thumb"><Thumb key={`${item.date}-${item.bytes}`} item={item} />{picking && <span className="iris-check" aria-hidden="true" />}</span>
+                    <span className="iris-caption"><b>{item.name}</b><small>{itemLocation(item)}</small></span>
+                  </button>
+                  {!picking && !item.file && item.root && item.path && <button type="button" className="icon-button iris-reveal" title="Mostrar no explorador de arquivos" aria-label={`Mostrar ${item.name} no explorador de arquivos`}
+                    onClick={() => reveal(item)}><FolderIcon size={15} /></button>}
+                </div>)}
               </div>
             </section>)}
             {shown < visible.length && <div ref={more} className="iris-more" aria-hidden="true" />}
@@ -589,6 +598,7 @@ export default function Iris({ active, external, projectTarget }: { projectTarge
         <span className="iris-viewer-count">{index + 1} de {list.length}</span>
         {!outside && <button className="icon-button" data-tip="Renomear" aria-label="Renomear" onClick={() => setRenaming(current.name.replace(/\.[^.]+$/, ''))}><CursorTextIcon size={17} /></button>}
         <button className="icon-button" data-tip="Abrir no visualizador do sistema" aria-label="Abrir no visualizador do sistema" onClick={() => system(current)}><ExpandIcon size={17} /></button>
+        {!current.file && current.root && current.path && <button className="icon-button" data-tip="Mostrar no explorador de arquivos" aria-label="Mostrar no explorador de arquivos" onClick={() => reveal(current)}><FolderIcon size={17} /></button>}
         {current.kind === 'image' && !/\.gif$/i.test(current.name) && <button className={upscaling ? 'icon-button active' : 'icon-button'} data-tip="Upscale de imagem" aria-label="Upscale de imagem" aria-pressed={upscaling}
           onClick={() => { setUpscaled(''); setUpscaling(v => !v); }}><UpscaleIcon /></button>}
         {(current.kind === 'video' || (current.kind === 'image' && !/\.gif$/i.test(current.name))) && <button className="icon-button" data-tip="Editar" aria-label="Editar"

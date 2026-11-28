@@ -42,3 +42,39 @@ export function snap(box: Box, lines: Guides, threshold: number): Snap {
   const y = axis(box.top, box.height, lines.y, threshold);
   return { dx: x.delta, dy: y.delta, guides: { x: x.lines, y: y.lines } };
 }
+
+/** Bordas que se mexem ao redimensionar (a oposta fica parada). */
+export type Edges = { left?: boolean; right?: boolean; top?: boolean; bottom?: boolean };
+export type ScaleSnap = { fx: number; fy: number; guides: Guides };
+
+/** Encaixe ao redimensionar: a borda puxada encosta na linha mais próxima (margem, borda, centro da
+ * página ou de outro elemento) e devolve o fator a aplicar na escala de cada eixo. `uniform`
+ * (alças dos cantos): o mesmo fator nos dois eixos, pelo encaixe mais perto. */
+export function scaleSnap(box: Box, edges: Edges, lines: Guides, threshold: number, uniform: boolean): ScaleSnap {
+  const best = (moving: number[], fixedSize: number, list: number[], grow: (delta: number) => number) => {
+    let found: { delta: number; factor: number } | null = null;
+    for (const edge of moving) {
+      for (const line of list) {
+        const delta = line - edge;
+        const size = grow(delta);
+        if (size < 1 || Math.abs(delta) > threshold || (found && Math.abs(delta) >= Math.abs(found.delta))) continue;
+        found = { delta, factor: size / fixedSize };
+      }
+    }
+    return found;
+  };
+  const right = box.left + box.width; const bottom = box.top + box.height;
+  const x = edges.right ? best([right], box.width, lines.x, d => box.width + d) : edges.left ? best([box.left], box.width, lines.x, d => box.width - d) : null;
+  const y = edges.bottom ? best([bottom], box.height, lines.y, d => box.height + d) : edges.top ? best([box.top], box.height, lines.y, d => box.height - d) : null;
+  let fx = x?.factor ?? 1; let fy = y?.factor ?? 1;
+  if (uniform) {
+    const pick = x && (!y || Math.abs(x.delta) <= Math.abs(y.delta)) ? x : y;
+    fx = fy = pick?.factor ?? 1;
+  }
+  // Linhas em que as bordas puxadas ficaram depois do encaixe.
+  const w = box.width * fx; const h = box.height * fy;
+  const nx = edges.right ? box.left + w : edges.left ? right - w : null;
+  const ny = edges.bottom ? box.top + h : edges.top ? bottom - h : null;
+  const hit = (edge: number | null, list: number[]) => edge === null ? [] : [...new Set(list.filter(line => Math.abs(line - edge) < 0.5))];
+  return { fx, fy, guides: { x: hit(nx, lines.x), y: hit(ny, lines.y) } };
+}

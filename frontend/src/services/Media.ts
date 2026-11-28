@@ -13,3 +13,5 @@ export const mediaUrl = (media: MediaRef, thumb = false) => 'file' in media ? st
 export const mediaKey = (media: MediaRef) => 'file' in media ? `arquivo:${media.file}` : `${media.root}|${media.path}`;
 /** Abre no aplicativo padrão do sistema. */
 export const openInSystem = (media: MediaRef) => native<void>('media_open', 'file' in media ? { file: media.file } : { root: media.root, path: media.path });
+/** Mostra o arquivo selecionado no explorador de arquivos (só arquivos de pastas, não os guardados na Ayla). */
+export const revealInFolder = (media: { root: string; path: string }) => native<void>('media_open', { root: media.root, path: media.path, reveal: true });

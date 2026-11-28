@@ -7,8 +7,11 @@ import { withSoftwareCanvases } from './DesignCanvas';
 /** Arquivo da Athena/Iris aberto nos designs. `base`: cópia intacta guardada pela Ayla; `gravado`:
  * hash do arquivo como o editor o viu por último (só grava se ainda for esse). */
 export type Documento = { tipo: 'pdf' | 'imagem'; nome: string; file?: string | null; root?: string | null; path?: string | null; base: string; gravado: string };
-/** Uma página do documento no design: tamanho lógico e os elementos adicionados (JSON do Fabric). */
-export type PaginaDoc = { largura: number; altura: number; objetos: string | null };
+/** Uma página do documento no design: tamanho lógico e os elementos adicionados (JSON do Fabric).
+ * `origem`: a página do arquivo por baixo (a partir de 0); `null` é uma página em branco nova
+ * (designs antigos não têm o campo: a página `i` é a `i` do arquivo). `arquivo`/`hash`: numa
+ * imagem, onde esta página a mais foi gravada da última vez. */
+export type PaginaDoc = { largura: number; altura: number; objetos: string | null; origem?: number | null; arquivo?: string | null; hash?: string | null };
 export type DadosDoc = { documento: Documento; paginas: PaginaDoc[] };
 
 export const refOf = (d: Pick<Documento, 'file' | 'root' | 'path'>) => ({ file: d.file ?? null, root: d.file ? null : d.root ?? null, path: d.file ? null : d.path ?? null });
@@ -101,32 +104,47 @@ export async function camada(pagina: PaginaDoc, multiplicador: number): Promise<
 
 /** Imagem final (original + camada) no formato do arquivo, em base64. */
 export async function compor(img: NonNullable<Aberto['imagem']>, pagina: PaginaDoc): Promise<string> {
+  return comporPagina(img.el, pagina, img.largura / pagina.largura, img.tipo);
+}
+
+/** Página composta (fundo + camada) em `tipo` (base64), com `k` px por px do editor. Sem fundo
+ * (página em branco nova), o papel é branco. */
+export async function comporPagina(fundo: HTMLImageElement | null, pagina: PaginaDoc, k: number, tipo: string, qualidade = 0.95): Promise<string> {
   const el = document.createElement('canvas');
-  el.width = img.largura; el.height = img.altura;
+  el.width = Math.max(1, Math.round(pagina.largura * k)); el.height = Math.max(1, Math.round(pagina.altura * k));
   const ctx = el.getContext('2d')!;
-  ctx.drawImage(img.el, 0, 0);
-  const layer = await camada(pagina, img.largura / pagina.largura);
+  if (!fundo || tipo !== 'image/png') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, el.width, el.height); }
+  if (fundo) ctx.drawImage(fundo, 0, 0, el.width, el.height);
+  const layer = await camada(pagina, k);
   if (layer) {
     const over = new Image();
     over.src = `data:image/png;base64,${layer}`;
     await over.decode();
-    ctx.drawImage(over, 0, 0, img.largura, img.altura);
+    ctx.drawImage(over, 0, 0, el.width, el.height);
   }
-  const blob = await new Promise<Blob>((ok, fail) => el.toBlob(b => b ? ok(b) : fail(new Error('imagem')), img.tipo, 0.95));
+  const blob = await new Promise<Blob>((ok, fail) => el.toBlob(b => b ? ok(b) : fail(new Error('imagem')), tipo, qualidade));
   const buffer = new Uint8Array(await blob.arrayBuffer());
   let binary = '';
   for (let i = 0; i < buffer.length; i += 0x8000) binary += String.fromCharCode(...buffer.subarray(i, i + 0x8000));
   return btoa(binary);
 }
 
+/** Imagem a partir de uma URL (fundo de página). */
+export async function imagemDe(url: string): Promise<HTMLImageElement> {
+  const el = new Image(); el.src = url; await el.decode(); return el;
+}
+
+/** Folhas do PDF montado: as páginas do original pela origem; as novas, em branco, em pontos. */
+export const folhasDe = (paginas: PaginaDoc[]) => paginas.map(p => p.origem != null ? { origem: p.origem } : { largura: p.largura / PDF_PX, altura: p.altura / PDF_PX });
+
 /** Prévia para a lista de designs: a 1ª página com os elementos por cima (PNG base64). */
-export async function previa(fundoUrl: string, pagina: PaginaDoc, lado = 360): Promise<string> {
+export async function previa(fundoUrl: string | null, pagina: PaginaDoc, lado = 360): Promise<string> {
   const k = lado / Math.max(pagina.largura, pagina.altura);
   const el = document.createElement('canvas');
   el.width = Math.max(1, Math.round(pagina.largura * k)); el.height = Math.max(1, Math.round(pagina.altura * k));
   const ctx = el.getContext('2d')!;
-  const bg = new Image(); bg.src = fundoUrl; await bg.decode();
-  ctx.drawImage(bg, 0, 0, el.width, el.height);
+  if (fundoUrl) { const bg = new Image(); bg.src = fundoUrl; await bg.decode(); ctx.drawImage(bg, 0, 0, el.width, el.height); }
+  else { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, el.width, el.height); }
   const layer = await camada(pagina, k);
   if (layer) { const over = new Image(); over.src = `data:image/png;base64,${layer}`; await over.decode(); ctx.drawImage(over, 0, 0, el.width, el.height); }
   return el.toDataURL('image/png').split(',')[1];

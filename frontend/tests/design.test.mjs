@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { History, clampSide, exportScale, fontName, fontValue, formatOf, formats, gradientCoords, pdfPage, previewScale, templates } from '../src/services/Design.ts';
+import { History, clampSide, designData, designName, designPages, exportScale, fontName, fontValue, formatOf, formats, gradientCoords, pdfPage, previewScale, templates } from '../src/services/Design.ts';
 
 test('A4 do design vira a folha A4 do PDF e outras páginas seguem 96 px por polegada', () => {
   const a4 = formatOf('a4');
@@ -97,4 +97,55 @@ test('rascunho da Ayla: reconhece só o formato da conversa', async () => {
   assert.equal(draftOf(JSON.stringify({ objects: [], version: '7.0.0' })), null, 'projeto do editor não é rascunho');
   assert.equal(draftOf(JSON.stringify({ ayla_draft: { ...draft, width: 0 } })), null);
   assert.equal(draftOf('{quebrado'), null);
+});
+
+test('páginas do design: uma página é o próprio JSON (como os antigos); várias vão numa lista', () => {
+  const a = JSON.stringify({ version: '7.0.0', objects: [] });
+  const b = JSON.stringify({ version: '7.0.0', objects: [{ type: 'Rect' }] });
+  assert.equal(designData([a]), a, 'design de uma página continua legível por quem lê o JSON direto');
+  assert.deepEqual(designPages(designData([a, b])), [a, b]);
+  assert.deepEqual(designPages(a), [a]);
+  assert.deepEqual(designPages(JSON.stringify({ ayla_paginas: [] })), [JSON.stringify({ ayla_paginas: [] })], 'lista vazia não vira design sem páginas');
+  assert.deepEqual(designPages('{quebrado'), ['{quebrado']);
+  assert.equal(designName('   '), 'Sem nome');
+  assert.equal(designName(' Cartaz '), 'Cartaz');
+});
+
+test('redimensionar encaixa a borda puxada na margem (sangria), na borda e em outro elemento', async () => {
+  const { snapLines, scaleSnap } = await import('../src/services/DesignGuides.ts');
+  const lines = snapLines(1000, 1000, [{ left: 600, top: 600, width: 100, height: 100 }]); // margem 50
+  // Canto de baixo à direita (proporcional): a direita em 947 encaixa na margem 950.
+  const a = scaleSnap({ left: 100, top: 100, width: 847, height: 380 }, { right: true, bottom: true }, lines, 6, true);
+  assert.ok(Math.abs(a.fx - 850 / 847) < 1e-9 && a.fx === a.fy);
+  assert.deepEqual(a.guides.x, [950]);
+  // Lado esquerdo sozinho: a esquerda em 52 vai para a margem 50; só o eixo x muda.
+  const b = scaleSnap({ left: 52, top: 300, width: 200, height: 80 }, { left: true }, lines, 6, false);
+  assert.equal(b.fx, 202 / 200); assert.equal(b.fy, 1);
+  // Base encosta no topo do outro elemento (600).
+  const c = scaleSnap({ left: 100, top: 100, width: 300, height: 497 }, { bottom: true }, lines, 6, false);
+  assert.equal(c.fy, 500 / 497); assert.deepEqual(c.guides.y, [600]);
+  // Longe de tudo: nada muda.
+  const d = scaleSnap({ left: 100, top: 100, width: 220, height: 220 }, { right: true, bottom: true }, lines, 6, true);
+  assert.deepEqual([d.fx, d.fy, d.guides], [1, 1, { x: [], y: [] }]);
+});
+
+test('apresentação: páginas deitadas em 16:9 ou 4:3 (slides exportados em PDF também)', async () => {
+  const { isPresentation, formatOf } = await import('../src/services/Design.ts');
+  const f = formatOf('apresentacao');
+  assert.ok(isPresentation([{ largura: f.width, altura: f.height }]));
+  assert.ok(isPresentation([{ largura: 1920, altura: 1080 }, { largura: 1600, altura: 1200 }]), '4:3 também');
+  assert.ok(isPresentation([{ largura: 1920, altura: 1081 }]), 'arredondamento do PDF');
+  assert.ok(!isPresentation([{ largura: 1080, altura: 1080 }]));
+  assert.ok(!isPresentation([{ largura: 1920, altura: 1080 }, { largura: 794, altura: 1123 }]), 'uma página em pé tira a faixa');
+  assert.ok(!isPresentation([]));
+});
+
+test('tamanho livre em cm e mm: 96 px por polegada, a mesma folha A4 do formato pronto', async () => {
+  const { toPx, fromPx, formatOf } = await import('../src/services/Design.ts');
+  const a4 = formatOf('a4');
+  assert.equal(Math.round(toPx(210, 'mm')), a4.width);
+  assert.equal(Math.round(toPx(29.7, 'cm')), a4.height);
+  assert.equal(fromPx(a4.width, 'mm'), 210.1, 'uma casa');
+  assert.equal(fromPx(1200.4, 'px'), 1200);
+  assert.equal(fromPx(toPx(10, 'cm'), 'mm'), 100);
 });

@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import Confirm from './Confirm';
 import AthenaNote, { AttachmentView, type Note, type Tab } from './AthenaNote';
-import { CalendarIcon, ChevronRightIcon, FileIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, ImportIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, PushIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
+import { CalendarIcon, ChevronRightIcon, FileIcon, FolderIcon, ImageIcon, VideoIcon, CloseIcon, ColumnsIcon, ExpandIcon, EyeIcon, GitIcon, ImportIcon, LockIcon, PencilIcon, UnlockIcon, PinIcon, PlusIcon, PushIcon, RefreshIcon, SidebarIcon, TrashIcon } from './Icons';
 import { errorText, native } from '../services/Desktop';
 import { preloadPdf } from '../services/PdfJs';
 import { IMAGE, VIDEO, folderOf, isAttachment, setMediaVersions, titleOf } from '../services/Wiki';
@@ -998,6 +998,12 @@ export default function Athena({ active, onOpenSettings, external, projectTarget
       <button className="icon-button tiny" title="Tirar a proteção" aria-label={`Tirar a proteção de ${label}`} onClick={stop(() => setLockDialog({ mode: 'unprotect', root, path, file: guard.file }))}><UnlockIcon size={13} /></button>
     </>;
   }
+  /** Mostra o item no explorador de arquivos do sistema (fora dos protegidos com senha, cifrados no disco). */
+  function revealButton(root: string, path: string, label: string, tree = true): ReactNode {
+    if (lockOf(root, path)) return null;
+    return <button className={tree ? 'icon-button tiny tree-trash tree-reveal' : 'icon-button tiny'} title="Mostrar no explorador de arquivos" aria-label={`Mostrar ${label} no explorador de arquivos`}
+      onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); void native('athena_reveal', { root, path }).catch(err => setError(errorText(err))); }}><FolderIcon size={13} /></button>;
+  }
   function tools(root: string, folder: string): ReactNode {
     const start = (kind: Adding['kind']) => (e: { stopPropagation: () => void }) => { e.stopPropagation(); setFocus(root); setAdding({ root, folder, kind }); setName(''); setExpanded(prev => [...new Set([...prev, `${root}|${folder}`])]); };
     return <span className="tree-tools">
@@ -1006,6 +1012,7 @@ export default function Athena({ active, onOpenSettings, external, projectTarget
       <button className="icon-button tiny" title="Importar notas, imagens, PDFs e vídeos para cá" aria-label="Importar para cá" onClick={e => { e.stopPropagation(); setFocus(root); setImporting({ root, folder }); }}><ImportIcon size={13} /></button>
       {folder && <Confirm className="icon-button tiny" title="Apagar a pasta (vai para a lixeira do cofre)" ariaLabel={`Apagar a pasta ${folder}`} question={`Apagar a pasta "${folder.slice(folder.lastIndexOf('/') + 1)}" e tudo o que tem dentro? Ela vai para a lixeira (.trash) da raiz.`} confirm="Apagar" onConfirm={() => void removeFolder(root, folder)}><TrashIcon size={13} /></Confirm>}
       {folder && <button className="icon-button tiny" title="Renomear ou mover a pasta" aria-label="Renomear ou mover a pasta" onClick={e => { e.stopPropagation(); setFolderEdit({ root, path: folder, name: folder.slice(folder.lastIndexOf('/') + 1) }); }}>✎</button>}
+      {folder && revealButton(root, folder, folder.slice(folder.lastIndexOf('/') + 1), false)}
       {folder && lockTools(root, folder, lockOf(root, folder))}
     </span>;
   }
@@ -1041,6 +1048,7 @@ export default function Athena({ active, onOpenSettings, external, projectTarget
               </form>
             : <div key={item.path} role="treeitem" className={`tree-row note file${isSelected(root.id, item.path) ? ' checked' : ''}`} aria-selected={/\.txt$/i.test(item.path) ? isSelected(root.id, item.path) : undefined} aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nClique para abrir; arraste para uma pasta para mover`} onPointerDown={startNoteDrag({ kind: 'file', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
               <span className="tree-file-icon">{/\.(pdf|txt)$/i.test(item.path) ? <FileIcon size={13} /> : VIDEO.test(item.path) ? <VideoIcon size={13} /> : <ImageIcon size={13} />}</span><span className="tree-name">{item.title.replace(/\.[^.]+$/, '')}</span><small>{item.title.slice(item.title.lastIndexOf('.') + 1).toUpperCase()}</small>
+              {revealButton(root.id, item.path, item.title)}
               {/\.txt$/i.test(item.path) && !lockOf(root.id, item.path) && <button className="icon-button tiny tree-trash tree-protect" title="Proteger com senha" aria-label={`Proteger ${item.title} com senha`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setLockDialog({ mode: 'protect', root: root.id, path: item.path, file: true }); }}><LockIcon size={13} /></button>}
               <button className="icon-button tiny tree-trash tree-rename" title="Renomear" aria-label={`Renomear ${item.title}`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setFileEdit({ root: root.id, path: item.path, name: item.title.replace(/\.[^.]+$/, '') }); }}><PencilIcon size={13} /></button>
               {selectDot(root.id, item.path, item.title)}
@@ -1079,6 +1087,7 @@ export default function Athena({ active, onOpenSettings, external, projectTarget
   function noteRow(root: Root, item: { path: string; title: string }, inner: number, pinned = false): ReactNode {
     return <div key={item.path} role="treeitem" className={`tree-row note${isSelected(root.id, item.path) ? ' checked' : ''}${pinned ? ' pinned' : ''}`} aria-selected={isSelected(root.id, item.path)} aria-current={activeTab && same(activeTab, root.id, item.path) ? 'page' : undefined} style={{ paddingLeft: 20 + inner * 14 }} title={`${item.path}\nCtrl+clique ou botão do meio: abrir em nova aba. Arraste para uma pasta (mover) ou para a tela (abrir ao lado)`} onPointerDown={startNoteDrag({ kind: 'note', root: root.id, path: item.path, label: item.title })} onClick={openFromTree(root.id, item.path)} onAuxClick={openFromTree(root.id, item.path)}>
           <span className="tree-name">{item.title}</span>
+          {revealButton(root.id, item.path, item.title)}
           {!lockOf(root.id, item.path) && <button className="icon-button tiny tree-trash tree-protect" title="Proteger com senha" aria-label={`Proteger ${item.title} com senha`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setLockDialog({ mode: 'protect', root: root.id, path: item.path, file: true }); }}><LockIcon size={13} /></button>}
           <button className="icon-button tiny tree-trash" title="Apagar nota" aria-label={`Apagar a nota ${item.title}`} onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setTrashing({ root: root.id, path: item.path, title: item.title }); }}><TrashIcon size={13} /></button>
           {root.kind === 'ayla' && pinButton(item.title, pinned, () => togglePinned(item.path))}

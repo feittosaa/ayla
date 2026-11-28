@@ -1,6 +1,6 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { errorText, formatBytes, native, nativeTask, taskId } from '../services/Desktop';
-import { OPEN_DESIGN_EVENT, clampSide, defaultName, draftOf, formatOf, formats, takePendingDesign, templates, type DesignSummary, type Format, type Template } from '../services/Design';
+import { OPEN_DESIGN_EVENT, MAX_SIDE, MIN_SIDE, clampSide, defaultName, draftOf, formatOf, formats, fromPx, takePendingDesign, templates, toPx, type DesignSummary, type Format, type Template, type Unit } from '../services/Design';
 import { loadPackFonts, resetPackFonts } from '../services/DesignFonts';
 import { FileIcon, PlusIcon, TrashIcon } from './Icons';
 import { documentoDe } from '../services/DesignDocument';
@@ -54,6 +54,42 @@ function DocumentPicker({ close, choose }: { close: () => void; choose: (item: L
   </div>;
 }
 
+/** Tamanho livre: largura e altura em px, cm ou mm (a unidade escolhida fica guardada). */
+function CustomSize({ close, create }: { close: () => void; create: (width: number, height: number) => void }) {
+  const [unit, setUnit] = useState<Unit>(() => (['px', 'cm', 'mm'] as const).find(u => u === localStorage.getItem('ayla-design-unidade')) ?? 'px');
+  const [size, setSize] = useState(() => ({ width: fromPx(1200, unit), height: fromPx(800, unit) }));
+  const px = { width: Math.round(toPx(size.width, unit)), height: Math.round(toPx(size.height, unit)) };
+  const valid = [px.width, px.height].every(v => Number.isFinite(v) && v >= MIN_SIDE && v <= MAX_SIDE);
+  const final = { width: clampSide(px.width), height: clampSide(px.height) };
+  function changeUnit(next: Unit) {
+    setSize({ width: fromPx(toPx(size.width, unit), next), height: fromPx(toPx(size.height, unit), next) });
+    setUnit(next); localStorage.setItem('ayla-design-unidade', next);
+  }
+  const step = unit === 'px' ? 1 : 0.1;
+  return <div className="dialog-backdrop" onPointerDown={e => { if (e.target === e.currentTarget) close(); }}>
+    <form className="dialog design-size-dialog" role="dialog" aria-modal="true" aria-labelledby="design-size-title" onKeyDown={e => { if (e.key === 'Escape') close(); }}
+      onSubmit={e => { e.preventDefault(); if (valid) create(final.width, final.height); }}>
+      <h2 id="design-size-title">Tamanho livre</h2>
+      <div className="design-size-fields">
+        <label className="design-field">Largura <input type="number" autoFocus min={0} step={step} value={size.width} onChange={e => setSize(s => ({ ...s, width: Number(e.target.value) }))} /></label>
+        <span aria-hidden="true">×</span>
+        <label className="design-field">Altura <input type="number" min={0} step={step} value={size.height} onChange={e => setSize(s => ({ ...s, height: Number(e.target.value) }))} /></label>
+        <label className="design-field">Unidade <select value={unit} onChange={e => changeUnit(e.target.value as Unit)}>
+          <option value="px">px</option><option value="cm">cm</option><option value="mm">mm</option>
+        </select></label>
+      </div>
+      <div className="design-size-preview"><FormatShape format={final} /></div>
+      <p className="design-hint" role="status">{valid
+        ? `${final.width} × ${final.height} px${unit === 'px' ? '' : ` (${unit}, a 96 px por polegada: no PDF sai com essa medida)`}.`
+        : `Cada lado deve ter de ${fromPx(MIN_SIDE, unit)} a ${fromPx(MAX_SIDE, unit)} ${unit}.`}</p>
+      <div className="row-actions dialog-actions">
+        <button type="button" className="ghost-button" onClick={close}>Cancelar</button>
+        <button type="submit" className="primary-action" disabled={!valid}><PlusIcon size={15} /> Criar</button>
+      </div>
+    </form>
+  </div>;
+}
+
 const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
 
 /** Moldura proporcional de um formato (sem o canvas). */
@@ -72,7 +108,7 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [opening, setOpening] = useState<Opening | null>(null);
-  const [custom, setCustom] = useState({ width: 1200, height: 800 });
+  const [sizing, setSizing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [picking, setPicking] = useState(false);
@@ -165,6 +201,7 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
         <span className="design-picker-pdf"><FileIcon size={26} /></span><b>Abrir um PDF ou imagem</b><small>Da Athena ou da Iris: escreva, marque e adicione imagens por cima, e grave no próprio arquivo</small>
       </button>
     </section>
+    {sizing && <CustomSize close={() => setSizing(false)} create={(w, h) => { setSizing(false); start({ label: 'Tamanho livre', width: w, height: h }); }} />}
     {picking && <DocumentPicker close={() => setPicking(false)} choose={async item => {
       const documento = await documentoDe(item);
       setPicking(false); setNotice('');
@@ -176,14 +213,9 @@ export default function IrisDesigns({ active, onCount, onExported }: { active: b
         {formats.map(format => <button key={format.id} className="design-format" onClick={() => start(format)}>
           <FormatShape format={format} /><b>{format.label}</b><small>{format.width} × {format.height} px · {format.hint}</small>
         </button>)}
-        <form className="design-format custom" onSubmit={e => { e.preventDefault(); start({ label: 'Tamanho livre', width: clampSide(custom.width), height: clampSide(custom.height) }); }}>
-          <FormatShape format={{ width: clampSide(custom.width), height: clampSide(custom.height) }} /><b>Tamanho livre</b>
-          <span className="design-custom">
-            <input type="number" min={16} max={8000} value={custom.width} aria-label="Largura em px" onChange={e => setCustom(c => ({ ...c, width: Number(e.target.value) }))} />×
-            <input type="number" min={16} max={8000} value={custom.height} aria-label="Altura em px" onChange={e => setCustom(c => ({ ...c, height: Number(e.target.value) }))} />px
-          </span>
-          <button className="ghost-button" type="submit"><PlusIcon size={15} /> Criar</button>
-        </form>
+        <button className="design-format custom" onClick={() => setSizing(true)}>
+          <span className="design-format-shape custom-shape"><PlusIcon size={20} /></span><b>Tamanho livre</b><small>Em px, cm ou mm</small>
+        </button>
       </div>
     </section>
     <section aria-label="Modelos">

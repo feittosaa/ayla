@@ -122,23 +122,33 @@ pub fn export_name(name: &str, extension: &str) -> String {
 }
 
 /// PDF de uma página com a imagem JPEG ocupando a página inteira (`page` em pontos).
+#[cfg(test)]
 pub fn pdf_from_jpeg(jpeg: &[u8], pixels: (u32, u32), page: (f64, f64)) -> Result<Vec<u8>, String> {
-    if !jpeg.starts_with(&[0xFF, 0xD8]) { return Err("Imagem da exportação inválida".into()); }
-    let (w, h) = page;
-    if !(w.is_finite() && h.is_finite() && w > 1.0 && h > 1.0 && w <= 14_400.0 && h <= 14_400.0) {
-        return Err("Tamanho de página inválido".into());
-    }
-    let content = format!("q\n{w:.2} 0 0 {h:.2} 0 0 cm\n/Im0 Do\nQ\n");
+    pdf_from_jpegs(&[(jpeg, pixels, page)])
+}
+
+/// PDF com uma página por imagem JPEG, cada uma ocupando a própria página (`page` em pontos).
+pub fn pdf_from_jpegs(pages: &[(&[u8], (u32, u32), (f64, f64))]) -> Result<Vec<u8>, String> {
+    if pages.is_empty() { return Err("Nenhuma página para exportar".into()); }
+    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", 3 + i * 3)).collect();
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.2} {h:.2}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>").into_bytes(),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).into_bytes(),
     ];
-    let mut image = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", pixels.0, pixels.1, jpeg.len()).into_bytes();
-    image.extend_from_slice(jpeg);
-    image.extend_from_slice(b"\nendstream");
-    objects.push(image);
-    objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()).into_bytes());
+    for (index, (jpeg, pixels, (w, h))) in pages.iter().enumerate() {
+        if !jpeg.starts_with(&[0xFF, 0xD8]) { return Err("Imagem da exportação inválida".into()); }
+        if !(w.is_finite() && h.is_finite() && *w > 1.0 && *h > 1.0 && *w <= 14_400.0 && *h <= 14_400.0) {
+            return Err("Tamanho de página inválido".into());
+        }
+        let (image, content) = (4 + index * 3, 5 + index * 3);
+        let draw = format!("q\n{w:.2} 0 0 {h:.2} 0 0 cm\n/Im0 Do\nQ\n");
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.2} {h:.2}] /Resources << /XObject << /Im0 {image} 0 R >> >> /Contents {content} 0 R >>").into_bytes());
+        let mut data = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", pixels.0, pixels.1, jpeg.len()).into_bytes();
+        data.extend_from_slice(jpeg);
+        data.extend_from_slice(b"\nendstream");
+        objects.push(data);
+        objects.push(format!("<< /Length {} >>\nstream\n{draw}endstream", draw.len()).into_bytes());
+    }
     let mut out = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
@@ -152,6 +162,14 @@ pub fn pdf_from_jpeg(jpeg: &[u8], pixels: (u32, u32), page: (f64, f64)) -> Resul
     for offset in offsets { out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes()); }
     out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
     Ok(out)
+}
+
+/// Nome do arquivo de cada página numa exportação de várias imagens ("Nome 1.png", "Nome 2.png"…).
+pub fn page_names(name: &str, extension: &str, count: usize) -> Vec<String> {
+    let single = export_name(name, extension);
+    if count <= 1 { return vec![single]; }
+    let stem = single.strip_suffix(&format!(".{extension}")).unwrap_or(&single).to_string();
+    (1..=count).map(|i| format!("{stem} {i}.{extension}")).collect()
 }
 
 /// Nome de exibição das fontes do pacote.
@@ -286,6 +304,20 @@ mod tests {
         }
         assert!(pdf_from_jpeg(b"PNG", (1, 1), (10.0, 10.0)).is_err());
         assert!(pdf_from_jpeg(&jpeg, (1, 1), (f64::NAN, 10.0)).is_err());
+    }
+
+    #[test]
+    fn pdf_with_one_page_per_jpeg() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
+        let pdf = pdf_from_jpegs(&[(&jpeg, (10, 20), (595.0, 842.0)), (&jpeg, (30, 10), (300.0, 100.0))]).unwrap();
+        let doc = lopdf::Document::load_mem(&pdf).unwrap();
+        let pages: Vec<_> = doc.get_pages().into_values().collect();
+        assert_eq!(pages.len(), 2);
+        let media = |p| doc.get_dictionary(p).unwrap().get(b"MediaBox").unwrap().as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect::<Vec<_>>();
+        assert_eq!(media(pages[1]), vec![0.0, 0.0, 300.0, 100.0]);
+        assert!(pdf_from_jpegs(&[]).is_err());
+        assert_eq!(page_names("Post", "png", 1), vec!["Post.png"]);
+        assert_eq!(page_names("Post", "png", 2), vec!["Post 1.png", "Post 2.png"]);
     }
 
     #[test]
