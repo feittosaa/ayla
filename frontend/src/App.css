@@ -367,12 +367,38 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 @media (hover: none) { .note-banner-margin > button { opacity: 1; } }
 .note-banner-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 8px 24px; border-bottom: 1px solid var(--ayla-border-soft); }
 .note-banner-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.note-banner-remove { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .note-banner-controls output { font-variant-numeric: tabular-nums; min-width: 6ch; }
 .note-page { max-width: 1080px; margin: 0 auto; padding: 36px 48px 80px; line-height: 1.7; font-size: 15.5px; }
 .note-banner-region + .note-page { padding-top: 28px; }
 .note-banner-margin + .note-page { padding-top: 0; }
 .note-title { margin: 0 0 18px; font-size: 32px; line-height: 1.2; font-weight: 700; letter-spacing: -0.01em; color: var(--ayla-text); overflow-wrap: anywhere; cursor: text; }
 .app-shell .note-page input.athena-rename { width: 100%; margin: 0 0 18px; padding: 0 4px; min-height: 0; font-size: 32px; line-height: 1.2; font-weight: 700; border: 0; border-bottom: 1px solid var(--ayla-accent); border-radius: 0; background: transparent; }
+/* Ctrl+F na nota: caixa fixa no canto superior direito da área da nota. */
+.note-find-anchor { position: sticky; top: 0; height: 0; z-index: 6; }
+.note-find { position: absolute; top: 10px; right: 16px; display: flex; align-items: center; gap: 4px; padding: 5px 6px 5px 10px; border: 1px solid var(--ayla-border); border-radius: calc(10px * var(--ayla-round, 1)); background: var(--ayla-panel); box-shadow: 0 8px 24px #0005; font-size: 13px; animation: athena-rise 140ms ease-out backwards; }
+.note-find input { width: 190px; min-height: 0; padding: 4px 6px; border: 0; background: transparent; color: var(--ayla-text); font: inherit; outline: none; }
+.note-find-count { min-width: 6ch; color: var(--ayla-text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.app-shell .note-find .icon-button { width: 26px; height: 26px; min-height: 0; padding: 0; }
+.athena-visual-editor .athena-find { background: color-mix(in srgb, var(--ayla-accent) 28%, transparent); border-radius: 2px; }
+.athena-visual-editor .athena-find-current { background: color-mix(in srgb, var(--ayla-accent) 65%, transparent); color: var(--ayla-text); }
+::highlight(athena-find) { background-color: color-mix(in srgb, var(--ayla-accent) 28%, transparent); }
+::highlight(athena-find-current) { background-color: color-mix(in srgb, var(--ayla-accent) 65%, transparent); }
+@media (prefers-reduced-motion: reduce) { .note-find { animation: none; } }
+.note-aliases { display: grid; grid-template-columns: minmax(90px, 150px) 1fr; gap: 10px; align-items: center; margin: -6px 0 14px; font-size: 13px; }
+.note-aliases-label { color: var(--ayla-text-faint); }
+.note-aliases-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
+.note-aliases .alias-chip { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; }
+.note-aliases .alias-chip.removing { gap: 6px; }
+.app-shell .note-aliases button { min-height: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.app-shell .note-aliases .alias-action { width: 18px; height: 18px; border-radius: 50%; color: var(--ayla-text-faint); line-height: 1; }
+.app-shell .note-aliases .alias-action:hover { background: var(--ayla-hover); color: var(--ayla-text); }
+.app-shell .note-aliases .alias-add { padding: 2px 8px; border-radius: 999px; border: 1px dashed var(--ayla-border); color: var(--ayla-text-soft); }
+.app-shell .note-aliases .alias-add:hover { color: var(--ayla-accent); border-color: var(--ayla-accent); }
+.app-shell .note-aliases .alias-confirm { padding: 1px 8px; border-radius: 999px; background: #5c2620; color: #ffd9d2; font-weight: 600; }
+.app-shell .note-aliases .alias-confirm:hover { background: #6e2d25; }
+.note-aliases .alias-input { width: 160px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--ayla-accent); background: var(--ayla-panel); color: var(--ayla-text); font: inherit; }
+.note-aliases .alias-problem { grid-column: 2; margin: 2px 0 0; color: var(--ayla-danger, #e5484d); font-size: 12px; }
 .note-properties { margin: 0 0 22px; padding: 0 0 14px; border-bottom: 1px solid var(--ayla-border-soft); display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .note-property { display: grid; grid-template-columns: minmax(90px, 150px) 1fr; gap: 10px; align-items: baseline; }
 .note-property dt { color: var(--ayla-text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -398,7 +424,9 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .athena-visual-editor .athena-emphasis, .note-page .markdown em { color: var(--ayla-accent); }
 .athena-strike { text-decoration: line-through; }
 .athena-visual-editor .athena-code { font-family: monospace; background: var(--ayla-hover); }
-.athena-visual-editor .athena-quote { color: var(--ayla-text-soft); }
+/* Citações (>) num segundo tom do destaque, distinto do itálico (pedido do usuário, 28/11/2026). */
+.athena-visual-editor .athena-quote, .note-page .markdown blockquote { color: color-mix(in srgb, var(--ayla-accent) 55%, var(--ayla-text)); }
+.note-page .markdown blockquote { border-left-color: color-mix(in srgb, var(--ayla-accent) 45%, transparent); }
 /* Tabela e diagrama desenhados no editor; o clique volta ao texto. */
 .athena-visual-editor .athena-drawn { padding: 4px 0; cursor: text; }
 .athena-visual-editor .athena-drawn .markdown table, .athena-visual-editor .athena-drawn .diagram { margin: 0; }
@@ -1095,3 +1123,8 @@ fieldset.group-row > legend { padding: 16px 0 0; }
 .design-picker-list button > span:not(.design-picker-pdf) { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .design-picker-list b { font-weight: 500; overflow-wrap: anywhere; }
 .design-picker-list small { color: var(--ayla-text-faint); font-size: 12px; overflow-wrap: anywhere; }
+/* Configurações › Athena › Calendários */
+.calendar-place { flex-wrap: wrap; }
+.calendar-place select, .calendar-place input { min-width: 160px; }
+.calendar-holidays { align-items: flex-start; }
+.calendar-holidays .row-text { display: flex; flex-direction: column; gap: 4px; }

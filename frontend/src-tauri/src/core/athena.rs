@@ -908,12 +908,14 @@ pub fn parse_model(raw: &str) -> Option<(String, String)> {
 /// Troca, no texto, os links wiki que apontam para `old` (pelo nome ou caminho) por `target`,
 /// mantendo seção e apelido; também links Markdown para o caminho antigo. Devolve o texto novo,
 /// se mudou.
-pub fn relink(text: &str, old: &str, target: &str, new_path: &str) -> Option<String> {
+/// Um link que cita a nota por um nome que ela guarda como apelido (`kept`, o
+/// nome antigo que virou apelido) continua mostrando esse nome: `[[Antigo]]` vira `[[Novo|Antigo]]`.
+pub fn relink_keeping(text: &str, old: &str, target: &str, new_path: &str, kept: &[String]) -> Option<String> {
     // Código (em bloco ou em linha) fica como está, como no Obsidian.
     let mut out = String::new();
     let mut changed = false;
     for (code, part) in code_spans(text) {
-        match (code, relink_plain(part, old, target, new_path)) {
+        match (code, relink_plain(part, old, target, new_path, kept)) {
             (false, Some(updated)) => {
                 out.push_str(&updated);
                 changed = true;
@@ -949,7 +951,7 @@ fn code_spans(text: &str) -> Vec<(bool, &str)> {
     out
 }
 
-fn relink_plain(text: &str, old: &str, target: &str, new_path: &str) -> Option<String> {
+fn relink_plain(text: &str, old: &str, target: &str, new_path: &str, kept: &[String]) -> Option<String> {
     let mut out = String::new();
     let mut rest = text;
     let mut changed = false;
@@ -965,7 +967,10 @@ fn relink_plain(text: &str, old: &str, target: &str, new_path: &str) -> Option<S
         let cut = inner.find(['|', '#']).unwrap_or(inner.len());
         let (name, tail) = inner.split_at(cut);
         if !inner.contains('\n') && links_to(name, old) {
-            out.push_str(&format!("[[{target}{tail}]]"));
+            // Sem texto próprio e citado por um apelido da nota: o texto continua o mesmo.
+            let written = name.rsplit('/').next().unwrap_or(name).trim();
+            let keep = !tail.contains('|') && kept.iter().any(|k| k.eq_ignore_ascii_case(written));
+            if keep { out.push_str(&format!("[[{target}{tail}|{written}]]")); } else { out.push_str(&format!("[[{target}{tail}]]")); }
             changed = true;
         } else {
             out.push_str(&format!("[[{inner}]]"));
@@ -992,13 +997,18 @@ pub fn link_target(notes: &[Note], path: &str) -> String {
 
 /// Atualiza os links de todas as notas da raiz para as mudanças (antigo, novo). Devolve quantas notas mudaram.
 fn relink_all(root: &Path, moves: &[(String, String)]) -> usize {
+    relink_all_keeping(root, moves, &[])
+}
+
+/// `kept`: apelidos da nota movida que os links podem continuar mostrando (ver `relink_keeping`).
+fn relink_all_keeping(root: &Path, moves: &[(String, String)], kept: &[String]) -> usize {
     let notes = list(root);
     let mut changed = 0;
     for note in &notes {
         let Ok((mut text, _)) = read(root, &note.path) else { continue };
         let mut touched = false;
         for (old, new) in moves {
-            if let Some(updated) = relink(&text, old, &link_target(&notes, new), new) {
+            if let Some(updated) = relink_keeping(&text, old, &link_target(&notes, new), new, kept) {
                 text = updated;
                 touched = true;
             }
@@ -1031,7 +1041,11 @@ pub fn rename_note(root: &Path, from: &str, to: &str) -> Result<(String, usize),
     }
     fs::rename(root.join(&from_path), root.join(&to_path)).map_err(|_| "Não foi possível renomear a nota")?;
     let (old, new) = (relative_string(&from_path), relative_string(&to_path));
-    let changed = relink_all(root, &[(old, new.clone())]);
+    // O nome antigo guardado como apelido da nota: os links que o citam continuam mostrando-o.
+    let old_name = from_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let kept: Vec<String> = fs::read_to_string(root.join(&to_path)).map(|t| aliases(&t)).unwrap_or_default()
+        .into_iter().filter(|a| a.eq_ignore_ascii_case(&old_name)).collect();
+    let changed = relink_all_keeping(root, &[(old, new.clone())], &kept);
     Ok((new, changed))
 }
 
@@ -1640,6 +1654,23 @@ mod tests {
         assert!(links_to("Personagens", "RPG/Personagens.md"));
         assert!(links_to("rpg/personagens", "RPG/Personagens.md"));
         assert!(!links_to("Mapa", "RPG/Mapa antigo.md"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn renomear_mantem_o_nome_antigo_quando_ele_virou_apelido() {
+        let root = temp();
+        create_in(&root, "Lugares", "Reino das Serpentes", "---\naliases:\n  - Reino das Serpentes\n---\n# Reino\n").unwrap();
+        create_in(&root, "", "Mapa", "Ao norte, [[Reino das Serpentes]]; ver [[Reino das Serpentes#História]], [[reino das serpentes|o reino]] e [[Lugares/Reino das Serpentes]].").unwrap();
+        let (_, changed) = rename_note(&root, "Lugares/Reino das Serpentes.md", "Lugares/Reino do Sol").unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(read(&root, "Mapa.md").unwrap().0,
+            "Ao norte, [[Reino do Sol|Reino das Serpentes]]; ver [[Reino do Sol#História|Reino das Serpentes]], [[Reino do Sol|o reino]] e [[Reino do Sol|Reino das Serpentes]].");
+        // Sem o nome antigo como apelido: os links passam a citar o nome novo.
+        create_in(&root, "", "Sem apelido", "# x\n").unwrap();
+        create_in(&root, "", "Diário", "Fui ao [[Sem apelido]].").unwrap();
+        rename_note(&root, "Sem apelido.md", "Com nome novo").unwrap();
+        assert_eq!(read(&root, "Diário.md").unwrap().0, "Fui ao [[Com nome novo]].");
         let _ = fs::remove_dir_all(&root);
     }
 

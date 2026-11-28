@@ -76,7 +76,7 @@ export function resizedImage(original: string, src: string, alt: string, title: 
 
 export type Property = { key: string; values: string[] };
 export type Banner = { target: string; y: number; height?: number };
-export type Frontmatter = { properties: Property[]; banner: Banner | null; body: string };
+export type Frontmatter = { properties: Property[]; aliases: string[]; banner: Banner | null; body: string };
 
 const unquote = (value: string) => value.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
 const frontmatterBlock = /^(---[ \t]*(\r?\n))([\s\S]*?)(^---[ \t]*(?:\r?\n|$))/m;
@@ -100,12 +100,67 @@ export function changeBanner(text: string, key: 'banner_height' | 'banner_y', va
   return opening + updated + closing + text.slice(block[0].length);
 }
 
+const BANNER_KEYS = ['banner', 'banner_y', 'banner_height', 'banner_x', 'banner_icon', 'banner_lock'];
+/** Tira o banner do topo da nota (por padrão, `banner` e os ajustes dele, como o make-md grava);
+ * com `keys`, só essas chaves. Sem outras propriedades, o bloco `---` sai junto. */
+export function removeBanner(text: string, keys: string[] = BANNER_KEYS) {
+  const block = propertiesBlock(text);
+  if (!block) return text;
+  const [, opening, newline, properties, closing] = block;
+  const lines = properties.split(/\r?\n/);
+  if (lines[lines.length - 1] === '') lines.pop();
+  const kept: string[] = []; let skipping = false;
+  for (const line of lines) {
+    const key = /^([^\s:#-][^:]*):/.exec(line)?.[1].trim();
+    if (key !== undefined) skipping = keys.includes(key);
+    else if (skipping && !/^(\s|-)/.test(line)) skipping = false;
+    if (!skipping) kept.push(line);
+  }
+  const rest = text.slice(block[0].length);
+  if (!kept.some(line => line.trim())) return rest.replace(/^\r?\n/, '');
+  return opening + kept.map(line => line + newline).join('') + closing + rest;
+}
+
+/** Apelidos da nota (`aliases`, ou `alias` antigo), como o Obsidian os lê. */
+export function noteAliases(text: string) {
+  const seen = new Set<string>();
+  return frontmatter(text).aliases.filter(alias => { const key = alias.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+}
+
+/** Grava os apelidos no topo da nota como lista do Obsidian (`aliases:` com `  - item`), no lugar de
+ * `aliases`/`alias` que já existiam; sem apelidos, a chave sai. Cria o bloco de propriedades se
+ * faltar e mantém as outras propriedades e o fim de linha da nota. */
+export function setAliases(text: string, aliases: string[]) {
+  const clean = [...new Set(aliases.map(a => a.replace(/[\r\n]+/g, ' ').trim()).filter(Boolean))];
+  const quote = (value: string) => /^[\w\u00C0-\u024F][\w\u00C0-\u024F .'()-]*$/.test(value) && !/^(true|false|null|yes|no|~)$/i.test(value) ? value : JSON.stringify(value);
+  const block = propertiesBlock(text);
+  const newline = block?.[2] ?? (text.includes('\r\n') ? '\r\n' : '\n');
+  const list = clean.length ? `aliases:${newline}${clean.map(a => `  - ${quote(a)}`).join(newline)}${newline}` : '';
+  if (!block) return clean.length ? `---${newline}${list}---${newline}${text}` : text;
+  const [, opening, , properties, closing] = block;
+  const lines = properties.split(/\r?\n/);
+  if (lines[lines.length - 1] === '') lines.pop();
+  const kept: string[] = []; let skipping = false; let at = -1;
+  for (const line of lines) {
+    const key = /^([^\s:#-][^:]*):/.exec(line)?.[1].trim().toLowerCase();
+    if (key !== undefined) skipping = key === 'aliases' || key === 'alias';
+    else if (skipping && !/^(\s|-)/.test(line)) skipping = false;
+    if (skipping) { if (at < 0) at = kept.length; continue; }
+    kept.push(line);
+  }
+  const rest = kept.map(line => line + newline);
+  rest.splice(at < 0 ? 0 : at, 0, list);
+  const updated = rest.join('');
+  if (!updated.trim()) return text.slice(block[0].length);
+  return opening + updated + closing + text.slice(block[0].length);
+}
+
 /** Propriedades do Obsidian (frontmatter YAML no início da nota): `chave: valor`, listas
  * (`- item` ou `[a, b]`). O banner segue o make-md: `banner` (caminho na raiz; também [[imagem]] ou
  * ![[imagem]]) e `banner_y` (porcentagem, 0–100). Endereços da web não viram banner. */
 export function frontmatter(text: string): Frontmatter {
   const match = propertiesBlock(text);
-  if (!match) return { properties: [], banner: null, body: text };
+  if (!match) return { properties: [], aliases: [], banner: null, body: text };
   const properties: Property[] = [];
   for (const line of match[3].split(/\r?\n/)) {
     const item = /^\s*-(?:\s+(.*))?$/.exec(line);
@@ -126,5 +181,6 @@ export function frontmatter(text: string): Frontmatter {
     target, y: Math.min(100, Math.max(0, y)),
     ...(Number.isFinite(height) ? { height: Math.min(600, Math.max(80, height)) } : {}),
   } : null;
-  return { properties: properties.filter(p => !['banner', 'banner_y', 'banner_height', 'banner_x', 'banner_icon', 'banner_lock'].includes(p.key)), banner, body: text.slice(match[0].length) };
+  const aliases = properties.filter(p => ['aliases', 'alias'].includes(p.key.toLowerCase())).flatMap(p => p.values);
+  return { properties: properties.filter(p => ![...BANNER_KEYS, 'aliases', 'alias'].includes(p.key) && !['aliases', 'alias'].includes(p.key.toLowerCase())), aliases, banner, body: text.slice(match[0].length) };
 }

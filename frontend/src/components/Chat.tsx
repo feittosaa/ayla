@@ -90,7 +90,7 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
   // O modo escolhido vale para as próximas conversas até ser trocado.
   const [source, setSource] = useState<ResponseSource>(snapshot.preferences.response_source || (snapshot.preferences.usage_mode === 'hybrid' ? 'auto' : 'local'));
   /** Automático em dúvida: a pessoa escolhe entre nuvem e este computador. */
-  const [ask, setAsk] = useState<{ message: string; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; manual?: boolean } | null>(null);
+  const [ask, setAsk] = useState<{ message: string; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; manual?: boolean; held?: number } | null>(null);
   const [skipNotes, setSkipNotes] = useState<string[]>([]);
   const [routeNotice, setRouteNotice] = useState('');
   /** A nuvem falhou no Automático (limite, sem conexão): dá para responder aqui com um clique. */
@@ -382,8 +382,8 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
     else if (automaticCloud) {
       setStatus('Verificando a privacidade do pedido…');
       try {
-        const check = await native<{ route: 'local' | 'cloud' | 'search' | 'ask' | 'notes'; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; notice?: string }>('automatic_check', { message, project: project?.id ?? null, ...versionOf });
-        if (check.route === 'ask' || check.route === 'notes') { await holdFor({ message, search: check.search, notes: check.notes, kept: check.kept }); return; }
+        const check = await native<{ route: 'local' | 'cloud' | 'search' | 'ask' | 'notes'; search: boolean; notes?: OfferedNote[]; kept?: KeptNote[]; notice?: string; held?: number }>('automatic_check', { message, project: project?.id ?? null, ...versionOf });
+        if (check.route === 'ask' || check.route === 'notes') { await holdFor({ message, search: check.search, notes: check.notes, kept: check.kept, held: check.held }); return; }
         if (check.notice) setRouteNotice(check.notice);
         autoRoute = check.route;
       } catch { autoRoute = 'local'; }
@@ -607,9 +607,9 @@ export default function Chat({ snapshot, refresh, project, conversation, onConve
             <button type="button" onClick={() => void send(undefined, 'local')}>{ask.manual ? 'Enviar só o pedido' : 'Manter neste computador'}</button>
           </div>
         </div> : <div className="route-ask" role="group" aria-label="Onde responder">
-          <p>Não tenho certeza se este pedido tem algo pessoal. {ask.search ? 'Posso pesquisar na internet' : 'Posso responder pela nuvem'} ou manter tudo neste computador.</p>
+          <p>{ask.held ? `${ask.held === 1 ? 'Uma troca anterior desta conversa tem' : `${ask.held} trocas anteriores desta conversa têm`} algo pessoal. Posso ${ask.search ? 'pesquisar na internet' : 'responder pela nuvem'} levando só as mensagens públicas, ou manter tudo neste computador.` : `Não tenho certeza se este pedido tem algo pessoal. ${ask.search ? 'Posso pesquisar na internet' : 'Posso responder pela nuvem'} ou manter tudo neste computador.`}</p>
           <div className="button-row">
-            <button type="button" onClick={() => void send(undefined, 'cloud')}>{ask.search ? 'Pesquisar na internet' : 'Usar a nuvem'}</button>
+            <button type="button" onClick={() => void send(undefined, 'cloud')}>{ask.held ? 'Usar a nuvem só com as mensagens públicas' : ask.search ? 'Pesquisar na internet' : 'Usar a nuvem'}</button>
             <button type="button" onClick={() => void send(undefined, 'local')}>Manter neste computador</button>
           </div>
         </div>)}

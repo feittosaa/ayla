@@ -177,12 +177,12 @@ async fn preco_pela_nuvem(state: &Core, url: &str, produto: &str) -> Result<f64,
     let prefs = state.prefs()?;
     if prefs.usage_mode == UsageMode::LocalOnly { return Err("A Ayla está em \"só neste computador\"".into()); }
     let platform = prefs.cloud_platform().ok_or("Nenhuma nuvem conectada")?.to_string();
-    let (_, _, secret) = state.cloud_secret(&prefs, &platform).await?;
-    let model = cloud::provider(&platform).and_then(|p| p.default_model).filter(|m| !m.is_empty()).unwrap_or("gpt-5-mini").to_string();
+    let (api, base, secret) = state.cloud_secret(&prefs, &platform).await?;
+    let model = state.cloud_auto_model(&prefs, &platform, api, &base, &secret).await?;
     let alvo = if url.trim().is_empty() { produto.to_string() } else { format!("{produto} {url}") };
-    let request = cloud::search_request(&platform, &secret, &model, None, "Você checa preços para uma rotina automática.", &format!("Qual é o preço atual à vista, em reais, de: {alvo}? Responda só o JSON {{\"preco\": número}}."))?;
+    let request = cloud::search_request(&platform, &secret, &model, None, "Você checa preços para uma rotina automática.", &[], &format!("Qual é o preço atual à vista, em reais, de: {alvo}? Responda só o JSON {{\"preco\": número}}."))?;
     let token = CancellationToken::new();
-    let text = cloud::stream_search(request, &token, false, |_| {}).await?;
+    let text = cloud::search_text(request, &token).await?;
     rotinas::preco_da_resposta(&text).ok_or_else(|| "A pesquisa não trouxe um preço".into())
 }
 

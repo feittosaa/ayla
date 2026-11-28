@@ -13,6 +13,8 @@ export type Preferences = {
   desktop: { autostart: boolean; background: boolean; system_theme: boolean; panel_color: string; panel_accent: string; panel_font: string; panel_radius: number };
   notifications: { reply: boolean; setup: boolean; reminders: boolean };
   athena_folder: string; athena_vaults: string[]; athena_git: boolean;
+  /** Athena › Calendários: feriados e onde a pessoa mora (estado e cidade). */
+  calendar?: { feriados: boolean; uf: string; cidade: string };
   response_source: '' | 'local' | 'auto' | 'cloud';
   hidden_sources?: string[];
   appearance: { mode: 'escuro' | 'claro' | 'sistema'; accent: string; dark_background: string; light_background: string; roundness: number; opacity: number; icon_ayla: number; icon_athena: number };

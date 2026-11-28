@@ -518,6 +518,8 @@ pub fn run() {
             core::services::hand_sistema::hand_dotfiles_sincronizar,
             core::services::rotinas::rotinas_lista,
             core::services::design_doc::design_documento,
+            core::services::feriados::feriados_estado,
+            core::services::feriados::feriados_buscar,
             core::services::design_doc::design_documento_base,
             core::services::design_doc::design_documento_atual,
             core::services::design_doc::design_documento_gravar,

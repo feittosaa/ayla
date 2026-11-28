@@ -146,6 +146,9 @@ pub struct Placement {
 
 /// Caminho de uma mensagem até a primeira da conversa (recursivo pelo `parent_id`).
 const PATH_CTE: &str = "WITH RECURSIVE path(id) AS (SELECT ?2 UNION ALL SELECT m.parent_id FROM messages m JOIN path ON m.id=path.id WHERE m.parent_id IS NOT NULL)";
+/// Uma mensagem anterior da conversa, como a nuvem a veria (ver `history_turns`).
+#[derive(Clone, Debug)]
+pub struct HistoryTurn { pub role: String, pub content: String, pub origin: Option<String>, pub extras: Option<String>, pub files: bool }
 /// Arquivo guardado pela Ayla (cópia em `files/<id>/`).
 #[derive(Clone, Debug, Serialize)]
 pub struct FileInfo {
@@ -573,6 +576,21 @@ impl Store {
             .into_iter()
             .map(|(role, content)| serde_json::json!({"role":role,"content":content}))
             .collect())
+    }
+    /// Mensagens recentes no caminho até `upto`, com o que a nuvem precisa conferir antes de
+    /// recebê-las: origem da resposta, extras (notas, fichas, fontes…) e arquivos anexados.
+    pub fn history_turns(&self, id: &str, upto: Option<i64>, limit: usize, chars: usize) -> rusqlite::Result<Vec<HistoryTurn>> {
+        let Some(upto) = upto else { return Ok(Vec::new()) };
+        let mut rows: Vec<HistoryTurn> = self.conn.prepare(&format!("{PATH_CTE} SELECT m.role,m.content,m.origin,m.extras,EXISTS(SELECT 1 FROM files f WHERE f.message_id=m.id) OR m.files_from IS NOT NULL FROM messages m JOIN path ON m.id=path.id WHERE m.conversation_id=?1 AND m.complete=1 ORDER BY m.id DESC LIMIT ?3"))?
+            .query_map(params![id, upto, limit as i64], |r| Ok(HistoryTurn { role: r.get(0)?, content: r.get(1)?, origin: r.get(2)?, extras: r.get(3)?, files: r.get(4)? }))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut remaining = chars;
+        rows.retain(|turn| {
+            let count = turn.content.chars().count();
+            if count > remaining { remaining = 0; false } else { remaining -= count; true }
+        });
+        rows.reverse();
+        Ok(rows)
     }
     /// Extras das respostas no caminho até `upto` (a mais recente primeiro): fichas e notas que a
     /// conversa acabou de criar ou propor, para um pedido seguinte que não diga o nome ("altera ele").
@@ -1465,6 +1483,28 @@ mod tests {
         assert_eq!(rows[3].origin.as_deref(),Some("cloud_search"));
         assert_eq!(std::fs::read_dir(root.join("backups")).unwrap().count(),1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_turns_follow_the_branch_with_origin_and_limits() {
+        let path = std::env::temp_dir().join(format!("ayla-history-{}.db", id()));
+        let db = Store::open(&path).unwrap();
+        let chat = db.create_conversation("teste", None).unwrap();
+        let other = db.create_conversation("outra", None).unwrap();
+        db.save_turn(&other.id, db.placement(&other.id, None, None).unwrap().0,"x","y",true,&[],&[],None).unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0,"a","b",true,&[],&[],Some("cloud")).unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0,"c","incompleta",false,&[],&[],None).unwrap();
+        db.save_turn(&chat.id, db.placement(&chat.id, None, None).unwrap().0,"e","f",true,&[],&[],None).unwrap();
+        let parent = db.placement(&chat.id, None, None).unwrap().0.parent;
+        let turns = db.history_turns(&chat.id, parent, 20, 10_000).unwrap();
+        // Só esta conversa, sem a resposta incompleta, na ordem, com a origem de cada resposta.
+        assert_eq!(turns.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "e", "f"]);
+        assert_eq!(turns[1].origin.as_deref(), Some("cloud"));
+        assert!(turns.iter().all(|t| !t.files && t.extras.is_none()));
+        assert_eq!(db.history_turns(&chat.id, parent, 2, 10_000).unwrap().len(), 2);
+        assert_eq!(db.history_turns(&chat.id, parent, 20, 2).unwrap().iter().map(|t| t.content.as_str()).collect::<Vec<_>>(), ["e", "f"]);
+        assert!(db.history_turns(&chat.id, None, 20, 10_000).unwrap().is_empty());
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

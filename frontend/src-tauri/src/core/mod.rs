@@ -8,6 +8,7 @@ pub mod cloud;
 pub mod external;
 pub mod files;
 pub mod fichas;
+pub mod feriados;
 pub mod ayla_config;
 pub mod hand;
 pub mod hand_input;
